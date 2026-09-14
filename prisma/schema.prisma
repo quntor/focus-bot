@@ -1,0 +1,204 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id        String    @id @default(uuid())
+  tgId      BigInt    @unique @map("tg_id")
+  // Час пояс пользователя, а не сервера: от него зависит граница дня, а значит
+  // серия, цель дня и то, в какие сутки попадёт событие. По умолчанию Москва,
+  // уточняется по первому сообщению.
+  timezone  String    @default("Europe/Moscow")
+  // Откуда пришёл: метка из deep link (?start=<source>). Ставится один раз,
+  // при первом /start — иначе повторный переход по чужой ссылке перепишет когорту.
+  source    String?
+  createdAt DateTime  @default(now()) @map("created_at")
+  blockedAt DateTime? @map("blocked_at")
+
+  tasks    Task[]
+  sessions FocusSession[]
+  events   Event[]
+  outbox   OutboxMessage[]
+  goals    DailyGoal[]
+  points   PointsEntry[]
+  streak   Streak?
+
+  @@map("users")
+}
+
+model Task {
+  id     String @id @default(uuid())
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id])
+
+  title String
+  // Задача «та же самая или новая» решается моделью на старте сессии. Решение
+  // храним как ссылку на задачу, а не как переписку: на 1000 DAU сырой лог
+  // пришлось бы каждый раз отдавать модели целиком.
+  status String @default("active") // active | done | dropped
+
+  sessionsCount  Int       @default(0) @map("sessions_count")
+  // Последняя сессия, после которой задача реально сдвинулась. По разнице
+  // с sessionsCount видно застревание: три сессии подряд без прогресса.
+  lastProgressAt DateTime? @map("last_progress_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  sessions FocusSession[]
+
+  @@index([userId, status])
+  @@map("tasks")
+}
+
+model FocusSession {
+  id     String  @id @default(uuid())
+  userId String  @map("user_id")
+  user   User    @relation(fields: [userId], references: [id])
+  taskId String? @map("task_id")
+  task   Task?   @relation(fields: [taskId], references: [id])
+
+  startedAt      DateTime  @default(now()) @map("started_at")
+  plannedMinutes Int       @default(25) @map("planned_minutes")
+  // Время пинга считается при старте и кладётся в outbox. В сессии храним
+  // копию, чтобы не ходить в outbox ради ответа на вопрос «когда проверимся».
+  pingAt         DateTime? @map("ping_at")
+  pingAnsweredAt DateTime? @map("ping_answered_at")
+  finishedAt     DateTime? @map("finished_at")
+
+  // running | completed | abandoned. abandoned ставит сборщик, если отчёта нет
+  // через час после планового конца: незакрытая сессия не должна висеть вечно
+  // и не должна считаться завершённой работой при начислении очков.
+  outcome String @default("running")
+
+  reportText String? @map("report_text")
+  // moved | stuck — разбор отчёта моделью. Влияет на lastProgressAt задачи.
+  progress   String? @map("progress")
+
+  events Event[]
+
+  @@index([userId, startedAt])
+  @@map("focus_sessions")
+}
+
+// Событийный журнал. Пишется с первого дня: по нему считаются DAU и обращения
+// на пользователя, и пересчитать их задним числом по логам бота невозможно.
+model Event {
+  id        BigInt        @id @default(autoincrement())
+  userId    String        @map("user_id")
+  user      User          @relation(fields: [userId], references: [id])
+  sessionId String?       @map("session_id")
+  session   FocusSession? @relation(fields: [sessionId], references: [id])
+
+  type    String
+  payload Json?
+
+  // Обращением считается действие пользователя, а не сообщение бота. Флаг
+  // проставляется в одном месте (src/analytics/events.ts) и позволяет считать
+  // метрику одним запросом, не перечисляя типы событий в каждом отчёте.
+  isUserAction Boolean @default(false) @map("is_user_action")
+
+  // Календарный день в часовом поясе пользователя, YYYY-MM-DD. Денормализация
+  // ради честного счёта: сутки у пользователя из Владивостока не совпадают с
+  // сутками сервера, а DAU считается по пользовательским суткам.
+  dayKey String @map("day_key")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([dayKey, userId])
+  @@index([userId, createdAt])
+  @@index([type, createdAt])
+  @@map("events")
+}
+
+// Отложенные отправки: пинг в середине сессии, вечерняя сводка, возврат после
+// пропуска. Очередь в таблице, а не таймер в процессе: перезапуск приложения не
+// должен терять пинги, иначе продукт молчит ровно там, где вся его ценность.
+model OutboxMessage {
+  id     String @id @default(uuid())
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id])
+
+  kind    String // ping | summary | nudge
+  payload Json?
+
+  // Ключ идемпотентности: «одно сообщение этого вида для этой сущности».
+  // Например ping:<sessionId>. Уникальность в базе — единственная защита от
+  // дубля при ретрае воркера, на уровне кода её не гарантировать.
+  idempotencyKey String @unique @map("idempotency_key")
+
+  sendAfter   DateTime  @map("send_after")
+  // Аренда на время отправки: воркер берёт строку, ставит lockedUntil и только
+  // потом идёт в Telegram. Две параллельные выкатки не отправят одно и то же.
+  lockedUntil DateTime? @map("locked_until")
+  sentAt      DateTime? @map("sent_at")
+  attempts    Int       @default(0)
+  lastError   String?   @map("last_error")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([sentAt, sendAfter])
+  @@map("outbox_messages")
+}
+
+// Цель на день ставит сам пользователь. Выполненная цель — единственное, за что
+// начисляются очки помимо завершённой сессии, см. docs/metrics.md.
+model DailyGoal {
+  id     String @id @default(uuid())
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id])
+
+  dayKey           String @map("day_key")
+  targetSessions   Int    @default(4) @map("target_sessions")
+  completedSessions Int   @default(0) @map("completed_sessions")
+
+  // Подтверждение вечерней сводки: пользователь сам закрывает день. Это и
+  // ритуал закрытия, и честный сигнал вместо догадок по логам.
+  confirmedAt DateTime? @map("confirmed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@unique([userId, dayKey])
+  @@map("daily_goals")
+}
+
+model Streak {
+  userId String @id @map("user_id")
+  user   User   @relation(fields: [userId], references: [id])
+
+  current      Int     @default(0)
+  best         Int     @default(0)
+  lastActiveDay String? @map("last_active_day")
+
+  // Заморозка пропущенного дня. Самая недооценённая механика Duolingo: один
+  // пропуск не обнуляет прогресс, и человек возвращается вместо того, чтобы
+  // бросить совсем. Запас пополняется, а не выдаётся бесконечно.
+  freezesLeft Int     @default(2) @map("freezes_left")
+  frozenDay   String? @map("frozen_day")
+
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("streaks")
+}
+
+// Журнал начислений, а не счётчик в пользователе: начисление должно быть
+// объяснимо построчно. Метрики проходят внешнюю проверку, и «откуда 340 очков»
+// обязано иметь ответ.
+model PointsEntry {
+  id     String @id @default(uuid())
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id])
+
+  dayKey String @map("day_key")
+  amount Int
+  // session_completed | daily_goal | comeback
+  reason String
+  // Пара (причина, сущность) уникальна: повторный вызов начислит ноль раз.
+  refKey String @unique @map("ref_key")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId, dayKey])
+  @@map("points_entries")
+}
