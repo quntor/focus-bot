@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.local
+# бэкапы .env маска .env не ловит, а внутри боевые токены
+*.env.bak*
+.env*.bak*
+*.log
+tsconfig.tsbuildinfo
