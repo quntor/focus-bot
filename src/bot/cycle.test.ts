@@ -77,4 +77,22 @@ describe.skipIf(!hasDb)('полный цикл сессии', () => {
     const meeting = await prisma.outboxMessage.findFirst({ where: { kind: 'meeting', status: 'pending' } })
     expect(meeting).not.toBeNull()
   })
+  it('трижды досидел и сразу продолжал — бот один раз предлагает длинные блоки', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    for (let i = 0; i < 4; i++) {
+      await bot.text(A, `шаг ${i}`)
+      await bot.press(A, bot.lastButton(A, 'len:', ':ok'))
+      const s = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })
+      bot.advance(40)
+      await bot.press(A, `out:${s.id}:done`)
+      await bot.press(A, `skiprep:${s.id}:`)
+      await bot.press(A, `rest:${s.id}:continue`)
+    }
+    const suggestions = bot.textsTo(A).filter((t) => t.includes('длинные блоки'))
+    expect(suggestions).toHaveLength(1)
+    // И предложение длины выросло по правилу «трижды просил ещё».
+    expect(bot.textsTo(A).filter((t) => t.startsWith('Давай')).at(-1)).toBe('Давай 50 минут работы, потом 10 отдыха.')
+  })
 })

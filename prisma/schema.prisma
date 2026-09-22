@@ -55,6 +55,9 @@ model User {
   ritualText  String? @map("ritual_text")
   // auto | pomodoro | medium | long | free — см. src/session/technique.ts.
   technique   String  @default("auto")
+  // Когда бот предложил технику по рисунку сессий. Предлагает один раз: дальше
+  // выбор — в настройках, без напоминаний.
+  techniqueSuggestedAt DateTime? @map("technique_suggested_at")
   pingsEnabled Boolean @default(true) @map("pings_enabled")
   // Бот пишет первым, пока человек явно не отключил это в настройках.
   proactive   Boolean @default(true)

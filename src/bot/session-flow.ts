@@ -468,6 +468,31 @@ async function finalizeReport(ctx: Ctx, user: User, session: FocusSession, text:
   await askRest(ctx, user, session)
 }
 
+// После нескольких сессий бот сам замечает рисунок и предлагает технику одной
+// репликой. Решает код по истории, а не модель; предлагает один раз.
+export const SUGGEST_AFTER_COUNTED = 3
+
+async function maybeSuggestTechnique(ctx: Ctx, user: User): Promise<void> {
+  const fresh = await ctx.db.user.findUniqueOrThrow({ where: { id: user.id } })
+  if (fresh.technique !== 'auto' || fresh.techniqueSuggestedAt || fresh.countedSessions < SUGGEST_AFTER_COUNTED) return
+  const history = await ctx.db.focusSession.findMany({
+    where: { userId: user.id, state: { in: ['finished', 'abandoned'] } },
+    orderBy: { createdAt: 'desc' },
+    take: 3,
+    select: { state: true, counted: true, minutesAdjusted: true, restChoice: true },
+  })
+  const extends3 = history.length === 3 && history.every((s) => s.counted && (s.minutesAdjusted === 'up' || s.restChoice === 'continue'))
+  const drops = history.slice(0, 3).filter((s) => s.state === 'abandoned' || s.minutesAdjusted === 'down').length >= 2
+  const pick = extends3 ? 'long' : drops ? 'pomodoro' : null
+  if (!pick) return
+  const marked = await ctx.db.user.updateMany({ where: { id: user.id, techniqueSuggestedAt: null }, data: { techniqueSuggestedAt: ctx.now() } })
+  if (marked.count !== 1) return
+  await reply(ctx, user, pick === 'long' ? T.suggestLong : T.suggestShort, [
+    [{ text: T.tryIt, data: cb('tech', null, pick) }],
+    [{ text: T.keepAsIs, data: cb('tech', null, 'auto') }],
+  ])
+}
+
 // После отчёта отдых предлагается, а не назначается. Если ответа нет, через
 // время отдыха всё равно придёт «отдохнул?» — бот не замолкает.
 async function askRest(ctx: Ctx, user: User, session: FocusSession): Promise<void> {
@@ -522,6 +547,8 @@ export async function onRest(
     return true
   })
   if (!ok) return reply(ctx, user, T.stale)
+  // Рисунок сессий виден только после выбора: «сразу дальше» — часть сигнала.
+  await maybeSuggestTechnique(ctx, user)
 
   if (choice === 'rest') return reply(ctx, user, T.restStarted(hhmm(new Date(now.getTime() + rest * MIN), user.timezone)))
   if (choice === 'continue') return askIntent(ctx, user, { continue: true })
