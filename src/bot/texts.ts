@@ -4,6 +4,10 @@
 // Шаблоны закрывают всё, кроме двух касаний, где работает модель (разбор
 // намерения и отчёта): пинг, конец сессии, отдых, встречи и служебные ответы
 // не должны стоить обращения к модели.
+//
+// Обращения к человеку — без грамматического рода: «Готово», а не «Сделал»,
+// «Отдых закончился», а не «Отдохнул?». Пол не спрашиваем — это лишние
+// персональные данные и лишний шаг знакомства.
 
 import type { Outcome } from '../session/fsm.js'
 
@@ -43,7 +47,7 @@ export const T = {
       '[ЗАГЛУШКА: текст согласия на обработку персональных данных по 152-ФЗ — напишет человек]',
       policyUrl ? `Политика обработки данных: ${policyUrl}` : '[ЗАГЛУШКА: ссылка на политику]',
     ].join('\n'),
-  consentButton: 'Согласен',
+  consentButton: 'Принимаю',
   consentRequired: 'Чтобы начать, нужно согласие на обработку данных — оно в сообщении выше. Удалить всё о себе можно командой /delete_me.',
 
   askTimezone: 'Сколько у тебя сейчас времени? Напиши, например, 14:30 — так я не перепутаю твои сутки.',
@@ -51,7 +55,7 @@ export const T = {
   timezoneSet: (time: string) => `Понял, у тебя ${time}.`,
 
   askRitual:
-    'Что ты обычно делаешь перед тем, как сесть? Два-три действия одной строкой — например, «чай, закрыть вкладки, телефон в другую комнату». Буду напоминать перед стартом.',
+    'Что ты обычно делаешь перед тем, как сесть? Два-три действия одной строкой — например, «выпить кофе, включить музыку, удобно сесть». Буду напоминать перед стартом.',
   skip: 'Пропустить',
   ritualSaved: 'Записал ритуал.',
 
@@ -68,7 +72,7 @@ export const T = {
     minutes ? `Это на несколько заходов. С чего начнёшь в эти ${minutesText(minutes)}?` : 'Это на несколько заходов. С чего начнёшь сейчас?',
 
   propose: (minutes: number, rest: number) => `Давай ${minutesAcc(minutes)} работы, потом ${rest} отдыха.`,
-  proposeFree: 'Работаем без таймера: проверюсь раз в полчаса, закончишь — нажми /done.',
+  proposeFree: 'Работаем без таймера — загляну раз в полчаса. Когда закончишь, нажми /done.',
   proposeTechnique: (minutes: number, rest: number) => `${minutesText(minutes)} работы, ${rest} отдыха — как договаривались.`,
   ok: 'Ок',
   shorter: 'Короче',
@@ -79,7 +83,7 @@ export const T = {
     minutes && end
       ? `${capital(minutesText(minutes))} работы, потом ${rest} отдыха. Поехали — напишу в ${end}.`
       : 'Поехали. Закончишь — /done.',
-  cancelled: 'Отменил. Напиши, когда будешь готов.',
+  cancelled: 'Отменил. Напиши, когда будет удобно.',
   alreadyRunning: (end: string | null) =>
     end ? `Сессия идёт до ${end}. Закончить раньше — /done, бросить — /stop.` : 'Сессия идёт. Закончить — /done, бросить — /stop.',
   stopped: 'Остановил. Бывает — вернёмся, когда сможешь.',
@@ -87,26 +91,26 @@ export const T = {
 
   // --- Пинг: шаблон, без модели.
   ping: 'На месте?',
-  pingHere: 'Да',
-  pingBack: 'Отвлёкся, возвращаюсь',
+  pingHere: 'Да, работаю',
+  pingBack: 'Возвращаюсь к делу',
   pingAnsweredHere: 'Отлично, продолжаем.',
-  pingAnsweredBack: 'Бывает. Возвращайся к делу — я тут.',
+  pingAnsweredBack: 'Бывает. Я тут — продолжаем.',
 
   // --- Конец и отчёт. Исход троичный.
   sessionEnd: 'Время! Как прошло?',
   sessionEndEarly: 'Как прошло?',
-  outcome: { done: 'Сделал', not_done: 'Не сделал', other: 'Вышло другое' } satisfies Record<Outcome, string>,
+  outcome: { done: 'Готово', not_done: 'Пока не готово', other: 'Ушло в другое' } satisfies Record<Outcome, string>,
   askReport: 'Пара слов — что вышло? Можно пропустить.',
   stuck: (task: string) => `По «${task}» уже третья сессия без сдвига. Давай в следующий раз возьмём шаг поменьше — какой самый маленький кусок можно закончить?`,
 
   // --- Отдых: спрашиваем, а не назначаем.
   askRest: (rest: number) => `Записал. Отдохнёшь ${rest} минут?`,
   restOk: (rest: number) => `Отдохну ${rest}`,
-  restContinue: 'Сразу дальше',
+  restContinue: 'Ещё поработаем',
   restLater: 'Вернусь позже',
   dayEnd: 'На сегодня всё',
   restStarted: (end: string) => `Отдыхай. Напишу в ${end}.`,
-  restOver: 'Отдохнул? С чего продолжишь?',
+  restOver: 'Отдых закончился. С чего продолжишь?',
   postpone: 'Ещё отдохну',
   postponed: (at: string) => `Хорошо, напишу в ${at}.`,
 
@@ -140,7 +144,7 @@ export const T = {
       s.sessions === 0
         ? 'Сегодня сессий не было — бывает.'
         : `За сегодня: ${s.sessions} ${plural(s.sessions, 'сессия', 'сессии', 'сессий')}` +
-          ` (сделал — ${s.done}, не сделал — ${s.notDone}, вышло другое — ${s.other}).`,
+          outcomesLine(s),
       s.target ? `Цель: ${s.counted} из ${s.target}.` : null,
       s.abandoned > 0 ? `Брошено: ${s.abandoned}.` : null,
       `Серия: ${s.streak} ${plural(s.streak, 'день', 'дня', 'дней')}. Очки за сегодня: ${s.points}.`,
@@ -157,7 +161,7 @@ export const T = {
       `Техника: ${TECHNIQUE_NAMES[s.technique] ?? s.technique}`,
       `Пинги в середине: ${s.pings ? 'да' : 'нет'}`,
       `Пишу первым: ${s.proactive ? 'да' : 'нет'}`,
-      `Утро: ${s.morning}, пояс: ${s.timezone}`,
+      `Утро: ${s.morning}, пояс: ${zoneName(s.timezone)}`,
     ].join('\n'),
   setTechnique: 'Техника',
   togglePings: 'Пинги вкл/выкл',
@@ -169,7 +173,7 @@ export const T = {
     '• Помодоро — 25 минут работы, 5 отдыха, без пинга.\n' +
     '• Средний блок — 50 и 10, пинг в середине.\n' +
     '• Длинный блок — 90 и 20, для задач, где долго входишь в работу.\n' +
-    '• Свободный — без таймера, проверяюсь раз в полчаса.\n' +
+    '• Свободный — без таймера, загляну раз в полчаса.\n' +
     '• Сам подберу — по тому, как у тебя идёт.',
   saved: 'Сохранил.',
   suggestLong: 'Ты стабильно просишь продлить — похоже, тебе подходят длинные блоки: 90 минут работы и 20 отдыха. Попробуем так?',
@@ -226,6 +230,32 @@ const TECHNIQUE_NAMES: Record<string, string> = {
   long: 'длинный блок 90/20',
   free: 'свободный',
 }
+
+// Нулевые исходы не показываем: «ушло в другое — 0» — шум.
+function outcomesLine(s: DaySummary): string {
+  const parts = [
+    s.done ? `готово — ${s.done}` : null,
+    s.notDone ? `пока не готово — ${s.notDone}` : null,
+    s.other ? `ушло в другое — ${s.other}` : null,
+  ].filter(Boolean)
+  return parts.length ? ` (${parts.join(', ')}).` : '.'
+}
+
+// Российские пояса — по-русски, остальные — кодом.
+const ZONE_NAMES: Record<string, string> = {
+  'Europe/Kaliningrad': 'Калининград',
+  'Europe/Moscow': 'Москва',
+  'Europe/Samara': 'Самара',
+  'Asia/Yekaterinburg': 'Екатеринбург',
+  'Asia/Omsk': 'Омск',
+  'Asia/Krasnoyarsk': 'Красноярск',
+  'Asia/Irkutsk': 'Иркутск',
+  'Asia/Yakutsk': 'Якутск',
+  'Asia/Vladivostok': 'Владивосток',
+  'Asia/Magadan': 'Магадан',
+  'Asia/Kamchatka': 'Камчатка',
+}
+export const zoneName = (tz: string) => ZONE_NAMES[tz] ?? tz
 
 function capital(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1)

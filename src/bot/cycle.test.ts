@@ -45,7 +45,7 @@ describe.skipIf(!hasDb)('полный цикл сессии', () => {
 
     bot.advance(10)
     await runOutboxOnce(bot.ctx)
-    expect(bot.lastText(A)).toBe('Отдохнул? С чего продолжишь?')
+    expect(bot.lastText(A)).toBe('Отдых закончился. С чего продолжишь?')
 
     const done = await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })
     expect(done.state).toBe('finished')
