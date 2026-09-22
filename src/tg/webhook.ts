@@ -49,13 +49,7 @@ export async function handleUpdate(raw: unknown): Promise<void> {
       data: { tgId, source: parseSource(command.args) },
     }))
 
-  await logEvent({
-    subjectId: user.subjectId,
-    userRole: user.role,
-    type: 'bot_started',
-    timezone: user.timezone,
-    payload: { source: user.source, returning: existing !== null },
-  })
+  await logEvent(prisma, user.id, 'bot_started', { source: user.source, returning: existing !== null })
 
   await sendMessage(message.chat.id, GREETING)
 }

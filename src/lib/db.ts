@@ -1,4 +1,4 @@
-import { PrismaClient } from '@prisma/client'
+import { PrismaClient, type Prisma } from '@prisma/client'
 import { PrismaPg } from '@prisma/adapter-pg'
 import { Pool } from 'pg'
 
@@ -20,3 +20,8 @@ export const prisma = new Proxy({} as PrismaClient, {
     return (client() as unknown as Record<string | symbol, unknown>)[prop]
   },
 })
+
+// Клиент или транзакция — всё, что пишет в базу, принимает одно из двух.
+// Изменение состояния, начисление и событие идут одной транзакцией, поэтому
+// функции не открывают свою, а работают в той, что им дали.
+export type Db = Prisma.TransactionClient

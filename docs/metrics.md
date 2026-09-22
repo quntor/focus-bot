@@ -17,8 +17,8 @@
 
 ## DAU
 
-DAU за день D — число пользователей, у которых в дне D есть хотя бы одно событие
-с `is_user_action = true`.
+DAU за день D — число пользователей (`subject_id`), у которых в дне D есть хотя бы
+одно событие с `is_user_action = true`.
 
 День — календарный день в часовом поясе пользователя (`users.timezone`), а не
 сервера. Ключ дня кладётся в `events.day_key` при записи события. Иначе у части
@@ -30,25 +30,76 @@ DAU за день D — число пользователей, у которых
 
 ## Список событий
 
-| Тип | Когда | Действие пользователя | Полезная нагрузка |
+Полезная нагрузка — только идентификаторы, числа, флаги и значения из закрытых
+списков. Схема каждого типа строгая и лежит в `src/analytics/payloads.ts`; тест
+проверяет, что ни одно поле не принимает свободный текст. Формулировка задачи и
+отчёт в журнал не попадают никогда: выгрузка уходит наружу.
+
+Каждое событие несёт псевдоним `subject_id` (не id пользователя), `user_role` на
+момент события и `day_key` в поясе пользователя. Журнал только на дозапись —
+UPDATE и DELETE запрещены триггером.
+
+| Тип | Когда | Обращение | Полезная нагрузка |
 |---|---|---|---|
-| `bot_started` | первый `/start` | да | `source` |
-| `session_started` | пользователь назвал задачу и таймер пошёл | да | `task_id`, `is_new_task`, `planned_minutes` |
+| `bot_started` | `/start` | да | `source`, `returning` |
+| `consent_given` | согласие на обработку данных | да | — |
+| `timezone_set` | человек назвал своё время | да | `offset_minutes` |
+| `intent_submitted` | ответ на «с чего начнёшь» | да | `length_chars`, `named_minutes` |
+| `intent_parsed` | намерение разобрано | нет | `llm_used`, `task_id`, `is_new_task`, `scope` |
+| `session_length_adjusted` | человек сдвинул предложенную длину | да | `direction`, `planned_minutes` |
+| `session_started` | подтвердил, таймер пошёл | да | `task_id`, `is_new_task`, `planned_minutes`, `planned_rest_minutes`, `minutes_source`, `technique`, `scope` |
+| `session_cancelled` | отменил до старта | да | — |
+| `session_expired` | не подтвердил старт за час | нет | — |
 | `ping_sent` | бот спросил «на месте?» | нет | `session_id` |
-| `ping_answered` | пользователь ответил на пинг | да | `session_id`, `latency_sec` |
-| `session_completed` | пришёл отчёт о работе | да | `session_id`, `elapsed_minutes` |
-| `session_abandoned` | отчёта нет через час после планового конца | нет | `session_id` |
-| `report_parsed` | модель разобрала отчёт | нет | `session_id`, `progress` |
-| `task_stuck_detected` | третья сессия подряд без прогресса | нет | `task_id` |
-| `daily_goal_set` | пользователь поставил цель на день | да | `target_sessions` |
+| `ping_answered` | ответил на пинг | да | `session_id`, `latency_sec` |
+| `session_end_sent` | бот сказал «время» | нет | `session_id` |
+| `session_completed` | выбрал исход | да | `session_id`, `outcome`, `elapsed_minutes`, `early`, `counted` |
+| `session_stopped` | `/stop` | да | `session_id`, `elapsed_minutes` |
+| `session_abandoned` | отчёта нет через час после конца / нет ответа на пинги | нет | `session_id`, `reason` |
+| `report_submitted` | написал пару слов об итоге | да | `session_id`, `length_chars` |
+| `report_parsed` | отчёт разобран | нет | `session_id`, `llm_used`, `progress` |
+| `llm_fallback` | модель недоступна или ответила не по схеме | нет | `stage`, `reason` |
+| `task_stuck_detected` | третья сессия подряд без сдвига | нет | `task_id`, `sessions_without_progress` |
+| `rest_chosen` | выбор после отчёта | да | `session_id`, `choice`, `rest_minutes` |
+| `rest_over_sent` | отдых кончился | нет | `session_id` |
+| `meeting_scheduled` | назначил следующую встречу | да | `kind`, `minutes_ahead` |
+| `meeting_defaulted` | не назначил — бот поставил утро | нет | `minutes_ahead` |
+| `meeting_sent` | напоминание о встрече | нет | — |
+| `meeting_answered` | ответил на напоминание | да | `response` |
+| `decline_check_sent` | третий отказ подряд, бот спросил вслух | нет | `declines_in_row` |
+| `daily_goal_set` | поставил цель на день | да | `target_sessions` |
+| `goal_reached` | цель дня выполнена | нет | `day_key`, `target_sessions` |
+| `day_closed` | «всё, на сегодня» | да | `day_key`, `via` |
 | `daily_summary_sent` | вечерняя сводка ушла | нет | `day_key` |
-| `daily_summary_confirmed` | пользователь закрыл день | да | `day_key`, `sessions` |
-| `streak_frozen` | пропущенный день закрыт заморозкой | нет | `day_key` |
+| `daily_summary_confirmed` | закрыл день по сводке | да | `day_key`, `sessions` |
+| `streak_extended` | серия выросла | нет | `day_key`, `current` |
+| `streak_frozen` | пропуск закрыт заморозкой | нет | `day_key`, `freezes_left` |
+| `streak_reset` | серия прервалась | нет | `day_key`, `previous` |
 | `points_awarded` | начисление | нет | `amount`, `reason` |
+| `points_capped` | упёрлось в потолок дня | нет | `reason`, `requested`, `awarded` |
+| `settings_changed` | поменял настройку | да | `key` |
+| `profile_edited` | поправил личный профиль | да | `action` |
+| `ritual_set` | задал ритуал старта | да | `action` |
+| `outbox_uncertain` | отправка ушла, ответа нет — не переотправляем | нет | `kind`, `outbox_id` |
+| `user_blocked` | бот заблокирован (403) | нет | — |
+| `user_deleted` | `/delete_me` | да | — |
 
 Событий бота в списке больше, чем действий пользователя, и это нормально: они
 нужны для продуктовой аналитики (доходимость пинга, доля ответивших), но в
 зачётные метрики не попадают.
+
+Кнопка выбора отдыха после отчёта (`rest_chosen`) добавлена 22.09.2026 и даёт
++1 обращение на сессию. При сравнении периодов до и после это нужно учитывать.
+
+## Роли
+
+Роль на момент события пишется в `events.user_role`, история — в
+`role_transitions`. Определения предварительные, пороги в `src/analytics/roles.ts`:
+
+- `new` — первые 7 дней, пока засчитанных сессий меньше трёх;
+- `observer` — смотрит за кем-то и сам за 7 дней засчитанных сессий не вёл;
+- `active` — есть действие пользователя за последние 7 дней;
+- `dormant` — нет.
 
 ## Гигиена начислений
 
