@@ -8,3 +8,5 @@ coverage/
 .env*.bak*
 *.log
 tsconfig.tsbuildinfo
+# служебные файлы macOS Finder
+.DS_Store
