@@ -135,6 +135,8 @@ async function onCommand(ctx: Ctx, user: User, command: string, args: string, cr
       if (Number.isInteger(n) && n >= 1 && n <= 20) return day.onGoal(ctx, user, String(n))
       return reply(ctx, user, T.askGoal, day.goalKeyboard())
     }
+    case 'dayoff':
+      return day.planDayOff(ctx, user)
     case 'settings':
       return account.sendSettings(ctx, user)
     case 'profile':
@@ -231,6 +233,9 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
         break
       case 'skip':
         if (arg === 'ritual') return await account.onRitualText(ctx, user, null)
+        break
+      case 'off':
+        if (arg === 'tomorrow') return await day.planDayOff(ctx, user)
         break
     }
   } catch (error) {

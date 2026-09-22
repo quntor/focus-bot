@@ -123,10 +123,15 @@ export const T = {
   askCustomTime: 'Напиши время, например 18:30.',
   meetingSet: (at: string, day: 'today' | 'tomorrow') => `Договорились: ${day === 'today' ? 'сегодня' : 'завтра'} в ${at}.`,
   meetingMorning: 'Доброе утро. Сколько заходов сегодня?',
+  // Начало недели — естественный новый старт (Dai, Milkman, Riis, 2014).
+  meetingMonday: 'Новая неделя. Сколько заходов сегодня?',
   meetingPlain: 'Привет! С чего начнёшь?',
   later: 'Позже',
   askNextMeeting: 'Когда встретимся в следующий раз?',
   tomorrowAt: (at: string) => `Завтра в ${at}`,
+  dayOffButton: 'Завтра выходной',
+  dayOffSet: (at: string) => `Завтра выходной — серия не прервётся. Напишу послезавтра в ${at}.`,
+  dayOffTaken: 'На этой неделе выходной уже был — следующий можно взять с понедельника.',
 
   // --- Третий отказ подряд: спросить вслух.
   declineCheck: 'Третий раз откладываем. Хочешь паузу или не получается начать?',
@@ -139,6 +144,24 @@ export const T = {
   goalSet: (n: number) => `Цель на сегодня — ${n} ${plural(n, 'заход', 'захода', 'заходов')}. С чего начнёшь?`,
   askGoal: 'Сколько заходов сегодня?',
   goalReached: 'Цель дня выполнена!',
+  // Прогресс к цели после каждой сессии: чем ближе цель, тем сильнее тянет её
+  // закрыть (эффект приближения к цели, Kivetz et al., 2006).
+  goalProgress: (done: number, target: number) => {
+    const left = target - done
+    return `${done} из ${target} — ${left === 1 ? 'остался один заход' : `осталось ${left} ${plural(left, 'заход', 'захода', 'заходов')}`}.`
+  },
+  // Заморозка — запас на срыв, и работает он, когда его видно (Sharif & Shu, 2021).
+  freezeUsed: (days: number, left: number) =>
+    (days === 1 ? 'Вчера был пропуск — закрыл его заморозкой' : `Пропущено ${days} ${plural(days, 'день', 'дня', 'дней')} — закрыл заморозками`) +
+    `, ${left === 1 ? 'осталась 1' : `осталось ${left}`}.`,
+  // Разрыв — без вины и с выходом: показанная прерванная серия снижает
+  // вовлечённость, возможность починить этот эффект ослабляет.
+  streakBroken: (previous: number, repairable: boolean) =>
+    repairable
+      ? `Серия в ${previous} ${plural(previous, 'день', 'дня', 'дней')} прервалась — не страшно. Два захода за день в ближайшие три дня — и я её верну.`
+      : 'Начинаем новую серию — сегодня первый день.',
+  streakRepaired: (n: number) => `Серия восстановлена: ${n} ${plural(n, 'день', 'дня', 'дней')}.`,
+  comeback: 'С возвращением!',
   summary: (s: DaySummary) =>
     [
       s.sessions === 0
@@ -148,6 +171,8 @@ export const T = {
       s.target ? `Цель: ${s.counted} из ${s.target}.` : null,
       s.abandoned > 0 ? `Брошено: ${s.abandoned}.` : null,
       `Серия: ${s.streak} ${plural(s.streak, 'день', 'дня', 'дней')}. Очки за сегодня: ${s.points}.`,
+      weekLine(s),
+      `Активных дней за последние 7: ${s.activeDays} из 7.`,
     ]
       .filter(Boolean)
       .join('\n'),
@@ -202,7 +227,7 @@ export const T = {
   help:
     'Просто напиши, с чего начнёшь, — я засеку время.\n' +
     '/focus — начать сессию\n/done — закончить раньше\n/stop — бросить сессию\n' +
-    '/today — на сегодня всё\n/goal — цель на день\n/settings — настройки\n' +
+    '/today — на сегодня всё\n/goal — цель на день\n/dayoff — завтра выходной\n/settings — настройки\n' +
     '/profile — что я о тебе помню\n/delete_me — удалить все данные',
 
   // Ошибка наружу — общая фраза; подробности только во внутреннем логе.
@@ -221,6 +246,25 @@ export type DaySummary = {
   target: number | null
   streak: number
   points: number
+  weekPoints: number
+  // Очки прошлой недели к тому же дню недели; null — прошлой недели не было.
+  prevWeekPoints: number | null
+  bestWeek: boolean
+  activeDays: number
+}
+
+// Очки — сведения о прогрессе, а не плата и не угроза: сравнение с собой же
+// неделю назад, без лидербордов (Deci, Koestner, Ryan, 1999).
+function weekLine(s: DaySummary): string {
+  const base = `За неделю: ${s.weekPoints} ${plural(s.weekPoints, 'очко', 'очка', 'очков')}`
+  let tail = '.'
+  if (s.prevWeekPoints !== null && s.prevWeekPoints > 0) {
+    tail =
+      s.weekPoints >= s.prevWeekPoints
+        ? ` — на ${s.weekPoints - s.prevWeekPoints} больше, чем к этому дню прошлой недели.`
+        : ` — к этому дню прошлой недели было ${s.prevWeekPoints}.`
+  }
+  return base + tail + (s.bestWeek ? ' Лучшая неделя!' : '')
 }
 
 const TECHNIQUE_NAMES: Record<string, string> = {

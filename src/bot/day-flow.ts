@@ -1,8 +1,9 @@
 import type { Prisma, User } from '@prisma/client'
 import { logEvent } from '../analytics/log.js'
-import { dayKey } from '../lib/day.js'
+import { addDays, dayKey, daysBetween, weekStart } from '../lib/day.js'
 import { nextLocalTime, parseClock } from '../lib/time.js'
 import { cancelPending, enqueue } from '../outbox/queue.js'
+import { DAYS_OFF_PER_WEEK } from '../retention/rules.js'
 import { cb } from './callbacks.js'
 import { reply, type Ctx } from './context.js'
 import { askIntent } from './session-flow.js'
@@ -29,6 +30,30 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
   const goal = await db.dailyGoal.findUnique({ where: { userId_dayKey: { userId: user.id, dayKey: day } } })
   const streak = await db.streak.findUnique({ where: { userId: user.id } })
   const points = await db.pointsEntry.aggregate({ where: { userId: user.id, dayKey: day }, _sum: { amount: true } })
+
+  // Неделя к неделе: эта неделя с понедельника по сегодня против прошлой по тот
+  // же день недели. Лучшая неделя — больше любой прошлой целиком.
+  const week = weekStart(day)
+  const offset = daysBetween(week, day)
+  const entries = await db.pointsEntry.findMany({ where: { userId: user.id }, select: { dayKey: true, amount: true } })
+  const byWeek = new Map<string, number>()
+  for (const e of entries) byWeek.set(weekStart(e.dayKey), (byWeek.get(weekStart(e.dayKey)) ?? 0) + e.amount)
+  const weekPoints = byWeek.get(week) ?? 0
+  const prevStart = addDays(week, -7)
+  const prevEnd = addDays(prevStart, offset)
+  const hadPrev = [...byWeek.keys()].some((w) => w < week)
+  const prevWeekPoints = hadPrev
+    ? entries.filter((e) => e.dayKey >= prevStart && e.dayKey <= prevEnd).reduce((a, e) => a + e.amount, 0)
+    : null
+  const previous = [...byWeek.entries()].filter(([w]) => w < week).map(([, v]) => v)
+  const bestWeek = previous.length > 0 && weekPoints > Math.max(...previous)
+
+  // Мягкая метрика рядом с серией: сколько из последних 7 дней были активными.
+  // Один пропуск почти не мешает привычке (Lally et al., 2010) — пусть это видно.
+  const recent = await db.dailyGoal.count({
+    where: { userId: user.id, dayKey: { gte: addDays(day, -6), lte: day }, completedSessions: { gt: 0 } },
+  })
+
   return {
     sessions: finished.length,
     done: finished.filter((s) => s.outcome === 'done').length,
@@ -39,6 +64,10 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
     target: goal?.targetSessions ?? null,
     streak: streak?.current ?? 0,
     points: points._sum.amount ?? 0,
+    weekPoints,
+    prevWeekPoints,
+    bestWeek,
+    activeDays: recent,
   }
 }
 
@@ -46,7 +75,33 @@ function nextMeetingKeyboard(user: User): Keyboard {
   return [
     [{ text: T.tomorrowAt(user.morningTime), data: cb('meet', null, 'morning') }],
     [{ text: T.customTime, data: cb('meet', null, 'custom') }],
+    [{ text: T.dayOffButton, data: cb('off', null, 'tomorrow') }],
   ]
+}
+
+// Объявленный выходной — только на завтра (объявляется накануне), не больше
+// одного в календарную неделю. Встреча переносится на послезавтра утром.
+export async function planDayOff(ctx: Ctx, user: User): Promise<void> {
+  const now = ctx.now()
+  const tomorrow = addDays(dayKey(now, user.timezone), 1)
+  const week = weekStart(tomorrow)
+  // Послезавтра утром: начало завтрашних суток, затем начало следующих.
+  const startTomorrow = nextLocalTime(user.timezone, { h: 0, m: 0 }, now)
+  const startAfter = nextLocalTime(user.timezone, { h: 0, m: 0 }, startTomorrow)
+  const at = nextLocalTime(user.timezone, morningClock(user), new Date(startAfter.getTime() - 60_000))
+  const ok = await ctx.db.$transaction(async (tx) => {
+    // Блокировка пользователя: два одновременных нажатия не должны дать два
+    // выходных на одной неделе.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'dayoff:' + user.id}))`
+    const taken = await tx.dayOff.count({ where: { userId: user.id, dayKey: { gte: week, lte: addDays(week, 6) } } })
+    if (taken >= DAYS_OFF_PER_WEEK) return false
+    await tx.dayOff.create({ data: { userId: user.id, dayKey: tomorrow, createdAt: now } })
+    await logEvent(tx, user.id, 'day_off_planned', { day_key: tomorrow }, { at: now })
+    await putMeeting(tx, user, at, { defaulted: false, morning: true })
+    return true
+  })
+  if (!ok) return reply(ctx, user, T.dayOffTaken)
+  await reply(ctx, user, T.dayOffSet(hhmm(at, user.timezone)))
 }
 
 // Одна ждущая встреча на пользователя: новая заменяет прежние.

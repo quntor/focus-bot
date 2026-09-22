@@ -148,8 +148,10 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
     const today = dayKey(now, user.timezone)
     const goal = await ctx.db.dailyGoal.findUnique({ where: { userId_dayKey: { userId: user.id, dayKey: today } } })
     const askGoal = p.morning === true && (goal?.targetSessions ?? null) === null
+    // Понедельник — новый старт недели, и это стоит сказать.
+    const monday = new Date(`${today}T00:00:00Z`).getUTCDay() === 1
     const r = askGoal
-      ? await renderReminder(ctx, user, T.meetingMorning, goalKeyboard(), false)
+      ? await renderReminder(ctx, user, monday ? T.meetingMonday : T.meetingMorning, goalKeyboard(), false)
       : await renderReminder(ctx, user, T.meetingPlain, reminderKeyboard(), true)
     return withEvent(r, async (tx) => {
       await logEvent(tx, user.id, 'meeting_sent', {}, { at: now })

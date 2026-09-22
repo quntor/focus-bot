@@ -5,7 +5,7 @@ import { nextLocalTime, parseClock } from '../lib/time.js'
 import { parseIntent } from '../llm/intent.js'
 import { parseReport } from '../llm/report.js'
 import { cancelPending, enqueue } from '../outbox/queue.js'
-import { creditCountedSession } from '../retention/credit.js'
+import { creditCountedSession, type Credit } from '../retention/credit.js'
 import { isCounted } from '../retention/rules.js'
 import { adjust, parseNamedMinutes, proposeMinutes, restFor } from '../session/duration.js'
 import { ACTIVE_STATES, StaleTransition, transition, type Outcome } from '../session/fsm.js'
@@ -365,25 +365,35 @@ export async function onOutcome(ctx: Ctx, user: User, sessionId: string, outcome
   const early = session.plannedEndAt !== null && now < session.plannedEndAt
   const day = dayKey(now, user.timezone)
 
-  let goalReached = false
+  let credit: Credit | null = null
   try {
     await ctx.db.$transaction(async (tx) => {
       await transition(tx, { sessionId, userId: user.id }, 'running', 'finished', { outcome, finishedAt: now, counted })
       await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `ping:${sessionId}` } })
       await cancelPending(tx, { userId: user.id, idempotencyKey: `session_end:${sessionId}` })
       await logEvent(tx, user.id, 'session_completed', { session_id: sessionId, outcome, elapsed_minutes: elapsed, early, counted }, { at: now, sessionId })
-      if (counted) {
-        const credit = await creditCountedSession(tx, { userId: user.id, sessionId, dayKey: day, at: now })
-        goalReached = credit.goalReached
-      }
+      if (counted) credit = await creditCountedSession(tx, { userId: user.id, sessionId, dayKey: day, at: now })
       await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'report_text' } })
     })
   } catch (error) {
     if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
     throw error
   }
-  const text = goalReached ? `${T.goalReached}\n${T.askReport}` : T.askReport
-  await reply(ctx, user, text, [[{ text: T.skip, data: cb('skiprep', sessionId) }]])
+  await reply(ctx, user, [...creditLines(credit), T.askReport].join('\n'), [[{ text: T.skip, data: cb('skiprep', sessionId) }]])
+}
+
+// Что человек узнаёт сразу после засчитанной сессии: возвращение, серия
+// (починка, разрыв без вины, заморозка), прогресс к цели дня.
+function creditLines(credit: Credit | null): string[] {
+  if (!credit) return []
+  const lines: string[] = []
+  if (credit.comeback) lines.push(T.comeback)
+  if (credit.streak.repaired) lines.push(T.streakRepaired(credit.streak.current))
+  else if (credit.streak.broken) lines.push(T.streakBroken(credit.streak.broken.previous, credit.streak.broken.repairable))
+  else if (credit.streak.frozenDays > 0) lines.push(T.freezeUsed(credit.streak.frozenDays, credit.streak.freezesLeft))
+  if (credit.goalReached) lines.push(T.goalReached)
+  else if (credit.goal.target !== null && credit.goal.completed < credit.goal.target) lines.push(T.goalProgress(credit.goal.completed, credit.goal.target))
+  return lines
 }
 
 // Отчёт — пара слов после исхода. Привязывается к последней закрытой сессии

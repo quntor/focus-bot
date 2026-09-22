@@ -23,6 +23,7 @@ export const ACTIONS = [
   'prof', // edit | clear | ritual
   'del', // confirm
   'skip', // пропустить вопрос онбординга: ritual
+  'off', // объявить выходной: tomorrow
 ] as const
 export type Action = (typeof ACTIONS)[number]
 
