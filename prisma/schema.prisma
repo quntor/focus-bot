@@ -6,12 +6,15 @@ datasource db {
   provider = "postgresql"
 }
 
+// Всё, что принадлежит пользователю, удаляется вместе с ним каскадом: /delete_me
+// удаляет по-настоящему, а не ставит флаг. Исключение — журнал событий, см. Event.
 model User {
   id        String    @id @default(uuid())
   tgId      BigInt    @unique @map("tg_id")
   // Час пояс пользователя, а не сервера: от него зависит граница дня, а значит
   // серия, цель дня и то, в какие сутки попадёт событие. По умолчанию Москва,
-  // уточняется по первому сообщению.
+  // уточняется вопросом «сколько у тебя сейчас времени» при знакомстве: сам
+  // Telegram пояс не присылает.
   timezone  String    @default("Europe/Moscow")
   // Откуда пришёл: метка из deep link (?start=<source>). Ставится один раз,
   // при первом /start — иначе повторный переход по чужой ссылке перепишет когорту.
@@ -19,21 +22,67 @@ model User {
   createdAt DateTime  @default(now()) @map("created_at")
   blockedAt DateTime? @map("blocked_at")
 
-  tasks    Task[]
-  sessions FocusSession[]
-  events   Event[]
-  outbox   OutboxMessage[]
-  goals    DailyGoal[]
-  points   PointsEntry[]
-  streak   Streak?
+  // Псевдоним в журнале событий. Случайный, не выводится из id и tg_id. Журнал
+  // ссылается на него, а не на пользователя: удаление строки users обезличивает
+  // события без единого UPDATE, и журнал остаётся строго на дозапись.
+  subjectId String @unique @default(uuid()) @map("subject_id")
 
+  // Согласие на обработку персональных данных (152-ФЗ). Пока его нет, бот не
+  // принимает от человека ни намерений, ни отчётов — только /start и /delete_me.
+  consentAt DateTime? @map("consent_at")
+
+  // Что бот ждёт от следующего свободного текста вне сессии: пояс, ритуал,
+  // время встречи, правку профиля. Состояний мало, и они видны в одной колонке,
+  // а не размазаны по памяти процесса.
+  // none | timezone | ritual | meeting_time | profile | report_text
+  pendingInput String @default("none") @map("pending_input")
+
+  // Роль на текущий момент: new | active | observer | dormant. История переходов
+  // — в role_transitions, роль на момент события — в events.user_role.
+  role             String    @default("new")
+  lastUserActionAt DateTime? @map("last_user_action_at")
+  // Счётчик засчитанных сессий нужен для правила роли new и для предложения
+  // длины, чтобы не считать агрегат на каждом касании.
+  countedSessions  Int       @default(0) @map("counted_sessions")
+
+  // --- Личный профиль и настройки. Всё это адаптируется; правила очков, серии и
+  // завершённой сессии здесь не живут и не адаптируются никогда.
+
+  // Личный промт: профиль на естественном языке, растущий из возражений
+  // пользователя. Человек видит его целиком и может поправить руками.
+  profileText String? @map("profile_text")
+  // Ритуал старта: два-три действия, проговорённые один раз.
+  ritualText  String? @map("ritual_text")
+  // auto | pomodoro | medium | long | free — см. src/session/technique.ts.
+  technique   String  @default("auto")
+  pingsEnabled Boolean @default(true) @map("pings_enabled")
+  // Бот пишет первым, пока человек явно не отключил это в настройках.
+  proactive   Boolean @default(true)
+  // Время первого сообщения дня, HH:MM в поясе пользователя.
+  morningTime String  @default("10:00") @map("morning_time")
+  eveningTime String  @default("21:00") @map("evening_time")
+  // Отказы подряд: «ещё отдохну», молчание на напоминание. Третий — повод
+  // спросить вслух, а не молча долбить дальше.
+  declinesInRow Int   @default(0) @map("declines_in_row")
+
+  tasks       Task[]
+  sessions    FocusSession[]
+  outbox      OutboxMessage[]
+  goals       DailyGoal[]
+  points      PointsEntry[]
+  streak      Streak?
+  watchedBy   Relationship[] @relation("owner")
+  watching    Relationship[] @relation("viewer")
+  invites     InviteToken[]
+
+  @@index([role, lastUserActionAt])
   @@map("users")
 }
 
 model Task {
   id     String @id @default(uuid())
   userId String @map("user_id")
-  user   User   @relation(fields: [userId], references: [id])
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   title String
   // Задача «та же самая или новая» решается моделью на старте сессии. Решение
@@ -42,9 +91,15 @@ model Task {
   status String @default("active") // active | done | dropped
 
   sessionsCount  Int       @default(0) @map("sessions_count")
-  // Последняя сессия, после которой задача реально сдвинулась. По разнице
-  // с sessionsCount видно застревание: три сессии подряд без прогресса.
+  // Последняя сессия, после которой задача реально сдвинулась.
   lastProgressAt DateTime? @map("last_progress_at")
+  // Сессий подряд без сдвига. Три — застревание: бот говорит об этом вслух.
+  // Счётчик, а не вычисление по датам: так правило воспроизводимо построчно.
+  sessionsSinceProgress Int @default(0) @map("sessions_since_progress")
+  // Следующий шаг, выделенный из отчёта. Из «вышло другое» растёт половина
+  // памяти продукта — сюда она и ложится.
+  nextStep       String?   @map("next_step")
+  lastSessionAt  DateTime? @map("last_session_at")
   createdAt      DateTime  @default(now()) @map("created_at")
 
   sessions FocusSession[]
@@ -53,44 +108,90 @@ model Task {
   @@map("tasks")
 }
 
+// Сессия — явный конечный автомат, переходы описаны в src/session/fsm.ts.
+//
+//   collecting_intent ── подтверждение ──> running ── отчёт ──> finished
+//   collecting_intent ── отмена/таймаут ──> cancelled
+//   running ── /stop или таймаут+1ч ──> abandoned
+//
+// cancelled отделён от abandoned: человек, передумавший на вопросе «с чего
+// начнёшь», не бросал работу, и смешивать это с брошенными сессиями значит
+// испортить долю доведённых до конца.
 model FocusSession {
   id     String  @id @default(uuid())
   userId String  @map("user_id")
-  user   User    @relation(fields: [userId], references: [id])
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   taskId String? @map("task_id")
-  task   Task?   @relation(fields: [taskId], references: [id])
+  task   Task?   @relation(fields: [taskId], references: [id], onDelete: SetNull)
 
-  startedAt      DateTime  @default(now()) @map("started_at")
-  plannedMinutes Int       @default(25) @map("planned_minutes")
+  // collecting_intent | running | finished | abandoned | cancelled.
+  // Ровно одна активная (collecting_intent или running) сессия на пользователя
+  // — частичный уникальный индекс в миграции, а не проверка в коде: два
+  // одновременных /focus иначе создали бы две.
+  state   String  @default("collecting_intent")
+  // Троичный исход: done | not_done | other. Только у finished.
+  outcome String?
+
+  // Намерение — самое чувствительное поле наравне с отчётом. Не попадает ни в
+  // события, ни в логи, ни третьим лицам.
+  intentText String? @map("intent_text")
+  // step | multi_session — намерение на один заход или больше. Большое
+  // намерение уточняется вопросом «с чего начнёшь в эти N минут».
+  scope      String?
+
+  // Длина сессии. Назвал человек сам — minutesSource = user, предложил бот —
+  // bot. Разница в доле доведённых до конца между ними — проверка решения от
+  // 22.09.2026 (длительность внутри намерения, а не отдельной репликой).
+  plannedMinutes     Int?    @map("planned_minutes")
+  minutesSource      String? @map("minutes_source")
+  // Сдвиг предложенной длины человеком: up | down. Нужен правилу «три раза
+  // досидел и просил ещё — предложить длиннее».
+  minutesAdjusted    String? @map("minutes_adjusted")
+  plannedRestMinutes Int?    @map("planned_rest_minutes")
+  technique          String?
+
+  createdAt      DateTime  @default(now()) @map("created_at")
+  startedAt      DateTime? @map("started_at")
+  plannedEndAt   DateTime? @map("planned_end_at")
   // Время пинга считается при старте и кладётся в outbox. В сессии храним
   // копию, чтобы не ходить в outbox ради ответа на вопрос «когда проверимся».
   pingAt         DateTime? @map("ping_at")
   pingAnsweredAt DateTime? @map("ping_answered_at")
+  // Неотвеченные пинги подряд — для свободного режима без планового конца.
+  pingsMissed    Int       @default(0) @map("pings_missed")
   finishedAt     DateTime? @map("finished_at")
-
-  // running | completed | abandoned. abandoned ставит сборщик, если отчёта нет
-  // через час после планового конца: незакрытая сессия не должна висеть вечно
-  // и не должна считаться завершённой работой при начислении очков.
-  outcome String @default("running")
+  // stop | timeout | no_ping — почему сессия брошена.
+  abandonReason  String?   @map("abandon_reason")
 
   reportText String? @map("report_text")
-  // moved | stuck — разбор отчёта моделью. Влияет на lastProgressAt задачи.
+  // moved | stuck — разбор отчёта. Влияет на lastProgressAt задачи.
   progress   String? @map("progress")
+  // Засчитана ли сессия: finished и не короче порога, см. src/retention/rules.ts.
+  // Хранится, чтобы серия, цель и очки опирались на одно и то же решение.
+  counted    Boolean @default(false)
 
-  events Event[]
+  // Выбор после отчёта: rest | continue | later | day_end.
+  restChoice  String?   @map("rest_choice")
+  restEndedAt DateTime? @map("rest_ended_at")
 
-  @@index([userId, startedAt])
+  @@index([userId, createdAt])
+  @@index([state, plannedEndAt])
   @@map("focus_sessions")
 }
 
 // Событийный журнал. Пишется с первого дня: по нему считаются DAU и обращения
 // на пользователя, и пересчитать их задним числом по логам бота невозможно.
+//
+// Только дозапись: UPDATE и DELETE запрещены триггером в базе. Связи с users и
+// focus_sessions — не внешние ключи, а непрозрачные идентификаторы: удаление
+// пользователя не должно ни каскадом стирать журнал, ни требовать его правки.
+// В payload — только числа, флаги, enum и идентификаторы; схема каждого типа
+// в src/analytics/payloads.ts. Свободного текста там нет ни при каких условиях:
+// выгрузка событий уходит наружу.
 model Event {
-  id        BigInt        @id @default(autoincrement())
-  userId    String        @map("user_id")
-  user      User          @relation(fields: [userId], references: [id])
-  sessionId String?       @map("session_id")
-  session   FocusSession? @relation(fields: [sessionId], references: [id])
+  id        BigInt  @id @default(autoincrement())
+  subjectId String  @map("subject_id")
+  sessionId String? @map("session_id")
 
   type    String
   payload Json?
@@ -100,6 +201,10 @@ model Event {
   // метрику одним запросом, не перечисляя типы событий в каждом отчёте.
   isUserAction Boolean @default(false) @map("is_user_action")
 
+  // Роль пользователя на момент события, а не текущая: иначе разрез «по
+  // активным» задним числом переписывался бы каждый раз, когда кто-то уснул.
+  userRole String @map("user_role")
+
   // Календарный день в часовом поясе пользователя, YYYY-MM-DD. Денормализация
   // ради честного счёта: сутки у пользователя из Владивостока не совпадают с
   // сутками сервера, а DAU считается по пользовательским суткам.
@@ -107,10 +212,23 @@ model Event {
 
   createdAt DateTime @default(now()) @map("created_at")
 
-  @@index([dayKey, userId])
-  @@index([userId, createdAt])
+  @@index([dayKey, subjectId])
+  @@index([subjectId, createdAt])
   @@index([type, createdAt])
   @@map("events")
+}
+
+// История смены ролей. Как и журнал, ссылается на псевдоним и только растёт.
+model RoleTransition {
+  id        BigInt   @id @default(autoincrement())
+  subjectId String   @map("subject_id")
+  fromRole  String   @map("from_role")
+  toRole    String   @map("to_role")
+  dayKey    String   @map("day_key")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([subjectId, createdAt])
+  @@map("role_transitions")
 }
 
 // Обработанные апдейты. Telegram повторяет доставку при любом не-2xx и при
@@ -126,15 +244,33 @@ model ProcessedUpdate {
   @@map("processed_updates")
 }
 
-// Отложенные отправки: пинг в середине сессии, вечерняя сводка, возврат после
-// пропуска. Очередь в таблице, а не таймер в процессе: перезапуск приложения не
-// должен терять пинги, иначе продукт молчит ровно там, где вся его ценность.
+// Счётчик апдейтов на пользователя в минутном окне. В базе, а не в памяти:
+// процессов может быть несколько, и лимит в памяти каждого делится на их число.
+model RateLimit {
+  tgId        BigInt   @map("tg_id")
+  windowStart DateTime @map("window_start")
+  count       Int      @default(0)
+
+  @@id([tgId, windowStart])
+  @@index([windowStart])
+  @@map("rate_limits")
+}
+
+// Отложенные отправки: пинг в середине сессии, конец сессии, конец отдыха,
+// встреча, вечерняя сводка. Очередь в таблице, а не таймер в процессе:
+// перезапуск приложения не должен терять пинги, иначе продукт молчит ровно там,
+// где вся его ценность.
+//
+// Текст сообщения здесь не хранится: он собирается в момент отправки из шаблона
+// и текущего состояния. Так устаревший пинг к уже закрытой сессии не уйдёт, а
+// чувствительный текст не лежит в очереди дольше, чем нужно.
 model OutboxMessage {
   id     String @id @default(uuid())
   userId String @map("user_id")
-  user   User   @relation(fields: [userId], references: [id])
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  kind    String // ping | summary | nudge
+  kind    String // ping | session_end | rest_over | meeting | summary
+  // Только идентификаторы и параметры шаблона, без текста пользователя.
   payload Json?
 
   // Ключ идемпотентности: «одно сообщение этого вида для этой сущности».
@@ -142,17 +278,25 @@ model OutboxMessage {
   // дубля при ретрае воркера, на уровне кода её не гарантировать.
   idempotencyKey String @unique @map("idempotency_key")
 
+  // pending | sending | sent | skipped | failed | uncertain | canceled.
+  // uncertain — запрос в Telegram ушёл, а ответа нет: доставлено ли, неизвестно.
+  // Такое сообщение не переотправляется (дубль хуже потери), но пишется
+  // событием outbox_uncertain, чтобы потери было видно.
+  status String @default("pending")
+
   sendAfter   DateTime  @map("send_after")
   // Аренда на время отправки: воркер берёт строку, ставит lockedUntil и только
   // потом идёт в Telegram. Две параллельные выкатки не отправят одно и то же.
   lockedUntil DateTime? @map("locked_until")
   sentAt      DateTime? @map("sent_at")
   attempts    Int       @default(0)
+  // Код ошибки без текста: описания Telegram бывают с данными запроса.
   lastError   String?   @map("last_error")
 
   createdAt DateTime @default(now()) @map("created_at")
 
-  @@index([sentAt, sendAfter])
+  @@index([status, sendAfter])
+  @@index([userId, status])
   @@map("outbox_messages")
 }
 
@@ -161,14 +305,18 @@ model OutboxMessage {
 model DailyGoal {
   id     String @id @default(uuid())
   userId String @map("user_id")
-  user   User   @relation(fields: [userId], references: [id])
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   dayKey           String @map("day_key")
-  targetSessions   Int    @default(4) @map("target_sessions")
+  // null — цель не ставилась: засчитанные сессии копятся, но очков за цель нет.
+  targetSessions   Int?   @map("target_sessions")
   completedSessions Int   @default(0) @map("completed_sessions")
+  goalReachedAt    DateTime? @map("goal_reached_at")
 
+  summarySentAt DateTime? @map("summary_sent_at")
   // Подтверждение вечерней сводки: пользователь сам закрывает день. Это и
-  // ритуал закрытия, и честный сигнал вместо догадок по логам.
+  // ритуал закрытия, и честный сигнал вместо догадок по логам. Очков не даёт:
+  // иначе очки зависели бы от касания, а не от работы.
   confirmedAt DateTime? @map("confirmed_at")
   createdAt   DateTime  @default(now()) @map("created_at")
 
@@ -178,7 +326,7 @@ model DailyGoal {
 
 model Streak {
   userId String @id @map("user_id")
-  user   User   @relation(fields: [userId], references: [id])
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   current      Int     @default(0)
   best         Int     @default(0)
@@ -201,7 +349,7 @@ model Streak {
 model PointsEntry {
   id     String @id @default(uuid())
   userId String @map("user_id")
-  user   User   @relation(fields: [userId], references: [id])
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   dayKey String @map("day_key")
   amount Int
@@ -213,5 +361,62 @@ model PointsEntry {
   createdAt DateTime @default(now()) @map("created_at")
 
   @@index([userId, dayKey])
+  @@index([userId, reason, createdAt])
   @@map("points_entries")
+}
+
+// --- Связи между людьми. Интерфейса в первой версии нет, схема закладывается
+// сразу: переделывать связи потом дороже всего.
+//
+// Уровень доступа — свойство связи, а не пользователя: один и тот же человек
+// бывает напарником одному и смотрителем другому. Связь направленная: owner —
+// тот, за кем смотрят, viewer — тот, кто смотрит. Видимость решает owner.
+//
+//   watcher (смотритель) — видит факт выполнения, но не формулировку задачи;
+//   partner (напарник)   — видит и формулировку. Только обоюдно: нужны оба
+//                          подтверждения, никогда автоматически.
+//
+// Смотрителю задача не показывается не из приватности как таковой: человек,
+// увидевший свой текст у чужого, начнёт писать обтекаемо, и структурированная
+// память, на которой стоит продукт, превратится в мусор.
+model Relationship {
+  id       String @id @default(uuid())
+  ownerId  String @map("owner_id")
+  owner    User   @relation("owner", fields: [ownerId], references: [id], onDelete: Cascade)
+  viewerId String @map("viewer_id")
+  viewer   User   @relation("viewer", fields: [viewerId], references: [id], onDelete: Cascade)
+
+  // Дефолт — смотритель. partner действует, только когда стоят оба подтверждения.
+  level                     String    @default("watcher")
+  partnerConfirmedByOwnerAt  DateTime? @map("partner_confirmed_by_owner_at")
+  partnerConfirmedByViewerAt DateTime? @map("partner_confirmed_by_viewer_at")
+
+  // Отзыв в одно касание, действует на сервере немедленно: каждое чтение
+  // фильтрует по revokedAt IS NULL.
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@unique([ownerId, viewerId])
+  @@index([viewerId])
+  @@map("relationships")
+}
+
+// Приглашение. Токен — 256 бит из криптографического генератора, не выводится
+// из идентификатора пользователя. В базе лежит только хэш: утечка таблицы не
+// даёт рабочих ссылок.
+model InviteToken {
+  id        String @id @default(uuid())
+  inviterId String @map("inviter_id")
+  inviter   User   @relation(fields: [inviterId], references: [id], onDelete: Cascade)
+
+  tokenHash String    @unique @map("token_hash")
+  level     String    @default("watcher")
+  expiresAt DateTime  @map("expires_at")
+  maxUses   Int       @default(1) @map("max_uses")
+  uses      Int       @default(0)
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@index([inviterId])
+  @@map("invite_tokens")
 }

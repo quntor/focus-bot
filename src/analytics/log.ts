@@ -4,7 +4,8 @@ import { dayKey } from '../lib/day.js'
 import { isUserAction, type EventType } from './events.js'
 
 type LogEventInput = {
-  userId: string
+  subjectId: string
+  userRole: string
   type: EventType
   timezone: string
   sessionId?: string
@@ -18,7 +19,8 @@ export async function logEvent(input: LogEventInput): Promise<void> {
   const at = input.at ?? new Date()
   await prisma.event.create({
     data: {
-      userId: input.userId,
+      subjectId: input.subjectId,
+      userRole: input.userRole,
       sessionId: input.sessionId ?? null,
       type: input.type,
       // Prisma требует свой тип JSON-входа и не принимает null внутри объекта.

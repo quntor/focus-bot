@@ -50,7 +50,8 @@ export async function handleUpdate(raw: unknown): Promise<void> {
     }))
 
   await logEvent({
-    userId: user.id,
+    subjectId: user.subjectId,
+    userRole: user.role,
     type: 'bot_started',
     timezone: user.timezone,
     payload: { source: user.source, returning: existing !== null },
