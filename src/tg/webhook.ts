@@ -3,6 +3,7 @@ import { prisma } from '../lib/db.js'
 import { logEvent } from '../analytics/log.js'
 import { parseCommand, parseSource } from './commands.js'
 import { sendMessage } from './client.js'
+import { claimUpdate } from './dedupe.js'
 
 // Разбираем только то, что читаем. Остальные поля апдейта Telegram меняет чаще,
 // чем выходят его же релизы, и строгая схема на всё сообщение ломала бы бота
@@ -30,6 +31,7 @@ const GREETING = [
 export async function handleUpdate(raw: unknown): Promise<void> {
   const parsed = updateSchema.safeParse(raw)
   if (!parsed.success) return
+  if (!(await claimUpdate(prisma, parsed.data.update_id))) return
 
   const message = parsed.data.message
   if (!message?.from || message.from.is_bot) return

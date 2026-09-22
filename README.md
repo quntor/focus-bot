@@ -55,9 +55,10 @@ npx prisma migrate dev
 npm run dev
 ```
 
-Вебхук слушает `POST /tg/<TELEGRAM_WEBHOOK_SECRET>`; проверка живости — `GET /healthz`.
-Для локальной разработки адрес пробрасывается любым туннелем и регистрируется
-через `setWebhook` с тем же секретом.
+Вебхук слушает `POST /tg/<TELEGRAM_WEBHOOK_PATH>` и принимает только запросы с
+заголовком `X-Telegram-Bot-Api-Secret-Token`, равным `TELEGRAM_WEBHOOK_SECRET`;
+проверка живости — `GET /healthz`. Для локальной разработки адрес пробрасывается
+любым туннелем и регистрируется через `setWebhook` с `secret_token`.
 
 ## Структура
 
