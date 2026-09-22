@@ -77,6 +77,7 @@ model User {
   watchedBy   Relationship[] @relation("owner")
   watching    Relationship[] @relation("viewer")
   invites     InviteToken[]
+  daysOff     DayOff[]
 
   @@index([role, lastUserActionAt])
   @@map("users")
@@ -341,9 +342,34 @@ model Streak {
   freezesLeft Int     @default(2) @map("freezes_left")
   frozenDay   String? @map("frozen_day")
 
+  // Починка серии вместо тихого сброса. Прерванная серия, выставленная напоказ,
+  // снижает вовлечённость, а возможность её починить этот эффект ослабляет
+  // (Silverman & Barasch, 2023). После разрыва сохраняем прежнюю длину: два
+  // засчитанных захода за день до repairUntil — и серия возвращается. Одна
+  // починка на 30 дней, иначе это не серия, а счётчик.
+  repairFrom    Int?    @map("repair_from")
+  repairUntil   String? @map("repair_until")
+  lastRepairDay String? @map("last_repair_day")
+
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@map("streaks")
+}
+
+// Заранее объявленный выходной. Не рвёт серию и не тратит заморозку, очков не
+// даёт. Объявляется накануне, не больше одного в календарную неделю — правило
+// одно для всех. Предложение перерыва удерживает лучше, чем его отсутствие
+// (Duolingo, «амулет выходного»: +4% вернувшихся через неделю).
+model DayOff {
+  id     String @id @default(uuid())
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  dayKey    String   @map("day_key")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, dayKey])
+  @@map("days_off")
 }
 
 // Журнал начислений, а не счётчик в пользователе: начисление должно быть

@@ -18,3 +18,17 @@ export function daysBetween(from: string, to: string): number {
   const ms = Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)
   return Math.round(ms / 86_400_000)
 }
+
+// Сдвиг ключа дня на n суток. Арифметика по UTC-полуночи: ключ — календарная
+// дата без пояса, и сдвиг не должен зависеть от перехода на летнее время.
+export function addDays(day: string, n: number): string {
+  const d = new Date(`${day}T00:00:00Z`)
+  d.setUTCDate(d.getUTCDate() + n)
+  return d.toISOString().slice(0, 10)
+}
+
+// Понедельник недели, в которую попадает день. Неделя — с понедельника.
+export function weekStart(day: string): string {
+  const weekday = (new Date(`${day}T00:00:00Z`).getUTCDay() + 6) % 7
+  return addDays(day, -weekday)
+}

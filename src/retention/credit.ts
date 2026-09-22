@@ -2,7 +2,14 @@ import type { Db } from '../lib/db.js'
 import { logEvent } from '../analytics/log.js'
 import { award } from './points.js'
 import { COMEBACK_COOLDOWN_DAYS, COMEBACK_MIN_GAP_DAYS, POINTS } from './rules.js'
-import { markDayActive } from './streak.js'
+import { markDayActive, type StreakResult } from './streak.js'
+
+export type Credit = {
+  goalReached: boolean
+  goal: { completed: number; target: number | null }
+  streak: StreakResult
+  comeback: boolean
+}
 
 // Всё, что следует из засчитанной сессии: цель дня, серия, очки. Вызывается в
 // той же транзакции, что и переход сессии в finished. Брошенная и отменённая
@@ -10,7 +17,7 @@ import { markDayActive } from './streak.js'
 export async function creditCountedSession(
   db: Db,
   input: { userId: string; sessionId: string; dayKey: string; at: Date },
-): Promise<{ goalReached: boolean }> {
+): Promise<Credit> {
   const { userId, sessionId, dayKey, at } = input
 
   await db.user.update({ where: { id: userId }, data: { countedSessions: { increment: 1 } } })
@@ -21,7 +28,7 @@ export async function creditCountedSession(
     update: { completedSessions: { increment: 1 } },
   })
 
-  const streak = await markDayActive(db, userId, dayKey, at)
+  const streak = await markDayActive(db, userId, dayKey, at, goal.completedSessions)
 
   await award(db, { userId, dayKey, reason: 'session_completed', refKey: `session:${sessionId}`, amount: POINTS.session_completed, at })
 
@@ -39,13 +46,14 @@ export async function creditCountedSession(
     }
   }
 
-  if (streak.reset && streak.missedDays >= COMEBACK_MIN_GAP_DAYS) {
+  let comeback = false
+  if (streak.missedDays >= COMEBACK_MIN_GAP_DAYS) {
     const since = new Date(at.getTime() - COMEBACK_COOLDOWN_DAYS * 86_400_000)
     const recent = await db.pointsEntry.count({ where: { userId, reason: 'comeback', createdAt: { gte: since } } })
     if (recent === 0) {
-      await award(db, { userId, dayKey, reason: 'comeback', refKey: `comeback:${userId}:${dayKey}`, amount: POINTS.comeback, at })
+      comeback = (await award(db, { userId, dayKey, reason: 'comeback', refKey: `comeback:${userId}:${dayKey}`, amount: POINTS.comeback, at })) > 0
     }
   }
 
-  return { goalReached }
+  return { goalReached, goal: { completed: goal.completedSessions, target: goal.targetSessions }, streak, comeback }
 }

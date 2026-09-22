@@ -37,6 +37,8 @@ export const EVENT_TYPES = [
   'streak_extended',
   'streak_frozen',
   'streak_reset',
+  'streak_repaired',
+  'day_off_planned',
   'points_awarded',
   'points_capped',
   'settings_changed',
@@ -72,6 +74,7 @@ export const USER_ACTIONS = [
   'settings_changed',
   'profile_edited',
   'ritual_set',
+  'day_off_planned',
   'user_deleted',
 ] as const satisfies readonly EventType[]
 
@@ -97,6 +100,7 @@ export const BOT_EVENTS = [
   'streak_extended',
   'streak_frozen',
   'streak_reset',
+  'streak_repaired',
   'points_awarded',
   'points_capped',
   'outbox_uncertain',
