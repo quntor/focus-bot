@@ -9,13 +9,18 @@ export type LlmOutcome<T> = { ok: true; value: T } | { ok: false; reason: 'disab
 export async function runLlm<T>(provider: LlmProvider, req: LlmRequest, schema: z.ZodType<T>): Promise<LlmOutcome<T>> {
   if (!provider.enabled) return { ok: false, reason: 'disabled' }
   let raw: string
+  let timeout: ReturnType<typeof setTimeout> | undefined
   try {
     raw = await Promise.race([
       provider.complete(req),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), req.timeoutMs)),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('timeout')), req.timeoutMs)
+      }),
     ])
   } catch (error) {
     return { ok: false, reason: (error as Error).message === 'timeout' ? 'timeout' : 'error' }
+  } finally {
+    if (timeout) clearTimeout(timeout)
   }
   let json: unknown
   try {

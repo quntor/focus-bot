@@ -5,17 +5,21 @@ import { createWebhookServer } from './http/server.js'
 import { handleUpdate } from './tg/webhook.js'
 import { telegram } from './tg/client.js'
 import { disabledProvider } from './llm/provider.js'
+import { createOpenAiCompatibleProvider } from './llm/openai-compatible.js'
 import { runOutboxOnce } from './outbox/worker.js'
 import { startLoops } from './jobs/sweeper.js'
 import type { Ctx } from './bot/context.js'
 
 const cfg = config()
+const llm =
+  cfg.LLM_API_KEY && cfg.LLM_BASE_URL && cfg.LLM_MODEL
+    ? createOpenAiCompatibleProvider({ apiKey: cfg.LLM_API_KEY, baseUrl: cfg.LLM_BASE_URL, model: cfg.LLM_MODEL })
+    : disabledProvider
 
 const ctx: Ctx = {
   db: prisma,
   tg: telegram,
-  // Провайдер модели не выбран — оба касания идут детерминированным путём.
-  llm: disabledProvider,
+  llm,
   now: () => new Date(),
   policyUrl: cfg.PRIVACY_POLICY_URL,
 }

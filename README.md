@@ -90,6 +90,7 @@ docs            схема событий и метрики, развёртыв�
 - [docs/metrics.md](docs/metrics.md) — схема событий, как считаются DAU и обращения,
   гигиена начислений;
 - [docs/roadmap.md](docs/roadmap.md) — план по неделям до 15 октября.
+- [docs/llm.md](docs/llm.md) — границы модели, конфигурация, fallback и откат.
 
 ## Права
 
