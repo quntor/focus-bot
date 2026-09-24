@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { LlmProvider } from './provider.js'
-import { runLlm, type LlmOutcome } from './run.js'
+import { runLlm, type CallMeter, type LlmOutcome } from './run.js'
 
 // Разбор намерения: к какой задаче относится и на один ли это заход.
 //
@@ -46,6 +46,7 @@ export function fallbackIntent(text: string, tasks: TaskRef[]): IntentResult {
 export async function parseIntent(
   provider: LlmProvider,
   input: { text: string; tasks: TaskRef[]; profile: string | null },
+  meter?: CallMeter,
 ): Promise<{ result: IntentResult; failure: LlmOutcome<never> | null }> {
   const labels = new Map(input.tasks.map((t, i) => [`t${i + 1}`, t]))
   const payload = JSON.stringify({
@@ -53,7 +54,7 @@ export async function parseIntent(
     tasks: [...labels].map(([label, t]) => ({ label, title: t.title })),
     profile: input.profile,
   })
-  const out = await runLlm(provider, { system: SYSTEM, input: payload, maxTokens: 200, timeoutMs: 8_000 }, answer)
+  const out = await runLlm(provider, { system: SYSTEM, input: payload, maxTokens: 200, timeoutMs: 8_000 }, answer, meter)
   if (!out.ok) return { result: fallbackIntent(input.text, input.tasks), failure: out }
 
   let taskId: string | null = null

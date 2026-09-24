@@ -200,9 +200,9 @@ model Event {
   type    String
   payload Json?
 
-  // Обращением считается действие пользователя, а не сообщение бота. Флаг
-  // проставляется в одном месте (src/analytics/events.ts) и позволяет считать
-  // метрику одним запросом, не перечисляя типы событий в каждом отчёте.
+  // Действие пользователя, а не сообщение бота: по нему считается DAU. Флаг
+  // проставляется в одном месте (src/analytics/events.ts). Зачётные обращения
+  // конкурса — вызовы компонентов, они в component_calls.
   isUserAction Boolean @default(false) @map("is_user_action")
 
   // Роль пользователя на момент события, а не текущая: иначе разрез «по
@@ -448,4 +448,51 @@ model InviteToken {
 
   @@index([inviterId])
   @@map("invite_tokens")
+}
+
+// Журнал вызовов компонентов решения — зачётные «обращения» по Положению
+// конкурса (Прил. 2, п. 2.2): вызовы модели, skill, инструментов и фоновых
+// систем, а не действия пользователя. Одна строка — один реальный вызов.
+// Что из этого засчитывать, решает представление, а не запись: журнал хранит
+// факты, трактовка методики — в SQL (zachet_daily).
+//
+// Как и events: только дозапись, ссылка на псевдоним subject_id, ни одного
+// поля со свободным текстом — выгрузка уходит организаторам для антифрода.
+model ComponentCall {
+  id           BigInt   @id @default(autoincrement())
+  subjectId    String   @map("subject_id")
+  sessionId    String?  @map("session_id")
+  // llm | tool | background
+  component    String
+  // Касание, ради которого сделан вызов: intent, report.
+  name         String
+  // Системный промт над моделью (skill). Положение считает skill отдельным
+  // вызовом; храним его при вызове модели, а не отдельной выдуманной строкой.
+  skill        String?
+  model        String?
+  // ok | error | timeout | invalid
+  status       String
+  errorCode    String?  @map("error_code")
+  latencyMs    Int      @map("latency_ms")
+  inputTokens  Int?     @map("input_tokens")
+  outputTokens Int?     @map("output_tokens")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([subjectId, createdAt])
+  @@map("component_calls")
+}
+
+// Псевдонимы участников команды и тестовых аккаунтов. Их активность —
+// недобросовестная по Положению (п. 5.1.3), в зачётные цифры она не входит.
+// Отдельная таблица, а не флаг в users: после /delete_me строка users исчезает,
+// а события с тем же subject_id остаются — исключение должно их пережить.
+// Пометка действует задним числом на весь журнал.
+model TeamSubject {
+  subjectId String   @id @map("subject_id")
+  // member | test
+  kind      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("team_subjects")
 }

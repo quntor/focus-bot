@@ -4,6 +4,7 @@ import { dayKey } from '../lib/day.js'
 import { nextLocalTime, parseClock } from '../lib/time.js'
 import { parseIntent } from '../llm/intent.js'
 import { parseReport } from '../llm/report.js'
+import { llmMeter } from '../analytics/calls.js'
 import { cancelPending, enqueue } from '../outbox/queue.js'
 import { creditCountedSession, type Credit } from '../retention/credit.js'
 import { isCounted } from '../retention/rules.js'
@@ -134,7 +135,7 @@ async function handleIntent(ctx: Ctx, user: User, session: FocusSession, text: s
       take: 20,
       select: { id: true, title: true },
     })
-    const parsed = await parseIntent(ctx.llm, { text, tasks, profile: user.profileText })
+    const parsed = await parseIntent(ctx.llm, { text, tasks, profile: user.profileText }, llmMeter(ctx, user.id, 'intent', session.id))
     taskId = parsed.result.taskId
     title = parsed.result.title
     scope = parsed.result.scope
@@ -440,7 +441,7 @@ async function finalizeReport(ctx: Ctx, user: User, session: FocusSession, text:
   }
 
   // Модель зовётся вне транзакции: медленный ответ не должен держать блокировки.
-  const parsed = await parseReport(ctx.llm, { intent: session.intentText, outcome, report: text })
+  const parsed = await parseReport(ctx.llm, { intent: session.intentText, outcome, report: text }, llmMeter(ctx, user.id, 'report', session.id))
   const failure = parsed.failure && !parsed.failure.ok ? parsed.failure.reason : null
   let stuckTask: string | null = null
 
