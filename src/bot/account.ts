@@ -102,6 +102,12 @@ export async function onSetting(ctx: Ctx, user: User, arg: string): Promise<void
     await ctx.db.$transaction(async (tx) => {
       if (arg === 'pings') {
         await tx.user.update({ where: { id: user.id }, data: { pingsEnabled: !user.pingsEnabled } })
+        if (user.pingsEnabled) {
+          // Настройка действует сразу: уже поставленный пинг текущей сессии тоже
+          // не должен отвлекать после явного отключения.
+          await cancelPending(tx, { userId: user.id, kind: 'ping' })
+          await tx.focusSession.updateMany({ where: { userId: user.id, state: 'running' }, data: { pingAt: null } })
+        }
       } else {
         await tx.user.update({ where: { id: user.id }, data: { proactive: !user.proactive } })
         // Выключил «писать первым» — снимаем встречи и сводки, которые уже ждут.

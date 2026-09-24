@@ -77,6 +77,32 @@ describe.skipIf(!hasDb)('полный цикл сессии', () => {
     const meeting = await prisma.outboxMessage.findFirst({ where: { kind: 'meeting', status: 'pending' } })
     expect(meeting).not.toBeNull()
   })
+
+  it('отключение пингов отменяет уже запланированную проверку', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    await bot.text(A, 'набросать план главы')
+    await bot.press(A, bot.lastButton(A, 'len:', ':ok'))
+
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    const session = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })
+    expect(await prisma.outboxMessage.findFirstOrThrow({ where: { idempotencyKey: `ping:${session.id}:1` } })).toMatchObject({
+      status: 'pending',
+    })
+
+    await bot.text(A, '/settings')
+    await bot.press(A, bot.lastButton(A, 'set:', ':pings'))
+
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ pingsEnabled: false })
+    expect(await prisma.outboxMessage.findFirstOrThrow({ where: { idempotencyKey: `ping:${session.id}:1` } })).toMatchObject({
+      status: 'canceled',
+    })
+
+    bot.advance(20)
+    await runOutboxOnce(bot.ctx)
+    expect(bot.textsTo(A)).not.toContain('На месте?')
+  })
+
   it('трижды досидел и сразу продолжал — бот один раз предлагает длинные блоки', async () => {
     const bot = makeBot()
     await bot.onboard(A)

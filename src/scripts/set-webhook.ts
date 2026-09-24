@@ -1,4 +1,5 @@
-// Регистрация вебхука: npm run set-webhook. Запускает человек, не приложение.
+// Регистрация вебхука и нативного меню: npm run set-webhook. Запускает человек,
+// не приложение.
 //
 // secret_token — тот же, что сверяется в заголовке на каждом запросе. Адрес и
 // секрет не печатаются: путь вебхука — тоже секрет, хоть и слабее заголовка.
@@ -6,6 +7,7 @@
 // поверхность и лишние обращения к базе.
 import { call } from '../tg/client.js'
 import { config } from '../lib/config.js'
+import { BOT_COMMANDS } from '../tg/menu.js'
 
 const cfg = config()
 const base = process.env.PUBLIC_URL
@@ -19,4 +21,8 @@ await call('setWebhook', {
   secret_token: cfg.TELEGRAM_WEBHOOK_SECRET,
   allowed_updates: ['message', 'callback_query'],
 })
-console.log('вебхук установлен')
+await call('setMyCommands', {
+  commands: BOT_COMMANDS,
+  scope: { type: 'all_private_chats' },
+})
+console.log('вебхук и меню команд установлены')

@@ -27,6 +27,19 @@ describe.skipIf(!hasDb)('outbox', () => {
     expect(bot.tg.sent.slice(before).filter((s) => s.text === 'На месте?')).toHaveLength(1)
   })
 
+  it('не отправляет пинг, если настройка выключена перед доставкой', async () => {
+    const bot = makeBot()
+    const session = await runningSession(bot)
+    await prisma.user.update({ where: { id: session.userId }, data: { pingsEnabled: false } })
+
+    bot.advance(20)
+    const before = bot.tg.sent.length
+    await runOutboxOnce(bot.ctx)
+
+    expect(bot.tg.sent.slice(before).filter((s) => s.text === 'На месте?')).toHaveLength(0)
+    expect((await prisma.outboxMessage.findFirstOrThrow({ where: { kind: 'ping' } })).status).toBe('skipped')
+  })
+
   it('повторная постановка с тем же ключом не создаёт второго сообщения', async () => {
     const bot = makeBot()
     const s = await runningSession(bot)

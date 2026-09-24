@@ -17,8 +17,10 @@ fallback. Для Cloud.ru значения адреса и модели прив
 node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
 ```
 
-Регистрация вебхука — `npm run set-webhook` (нужен `PUBLIC_URL` с https). Telegram
-принимает вебхуки только на портах 443, 80, 88 и 8443.
+Регистрация вебхука и нативного меню команд — `npm run set-webhook` (нужен
+`PUBLIC_URL` с https). Меню регистрируется для личных чатов: его пункт
+«Настройки» открывает текущие значения и кнопки изменения. Telegram принимает
+вебхуки только на портах 443, 80, 88 и 8443.
 
 ## nginx перед приложением
 
@@ -70,8 +72,8 @@ docker compose --env-file .env.production -f compose.prod.yml config --quiet
 docker compose --env-file .env.production -f compose.prod.yml up -d --build
 ```
 
-После появления валидного HTTPS и ручной проверки `/healthz` webhook
-регистрируется из уже собранного production-образа:
+После появления валидного HTTPS и ручной проверки `/healthz` webhook и меню
+команд регистрируются из уже собранного production-образа:
 
 ```bash
 docker compose --env-file .env.production -f compose.prod.yml run --rm app \

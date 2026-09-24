@@ -101,6 +101,11 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
       }
     }
 
+    // Пользователь мог отключить проверки, когда сообщение уже было взято
+    // воркером из очереди. Повторно проверяем настройку непосредственно перед
+    // отправкой, а pingAt сбрасывается обработчиком настройки.
+    if (!user.pingsEnabled || !session.pingAt) return { skip: true }
+
     const n = Number(p.n ?? 1)
     const free = session.plannedMinutes === null
     if (free && n > 1 && session.pingAnsweredAt === null) {
