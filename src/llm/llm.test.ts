@@ -10,10 +10,11 @@ function provider(answers: string[]): LlmProvider & { inputs: string[] } {
   const inputs: string[] = []
   return {
     enabled: true,
+    model: 'test-model',
     inputs,
     async complete(req) {
       inputs.push(req.input)
-      return answers.shift() ?? 'мусор'
+      return { text: answers.shift() ?? 'мусор', usage: null }
     },
   }
 }

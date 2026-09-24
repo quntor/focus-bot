@@ -2,10 +2,17 @@
 //
 // Сегменты: all (вся база), active | new | observer | dormant (по роли на момент
 // события), roles (все роли рядом), sessions, minutes-source, technique, outbox.
-// Любой разрез считается по требованию из журнала, без предположений о методике.
+// Здесь «действия» — нажатия и сообщения человека: внутренняя метрика
+// вовлечённости, к зачёту конкурса она не относится.
+//
+// Зачёт по Положению: zachet — DAU по московским суткам без команды, обращения
+// (вызовы компонентов) и сводка за период с порогами; call-errors — отказы
+// вызовов по кодам. Для зачётного периода: --from 2026-11-03 --to 2026-11-30.
 import { prisma } from '../lib/db.js'
+import { daysBetween } from '../lib/day.js'
+import { summarize, ZACHET, type ZachetDay } from '../analytics/zachet.js'
 
-const SEGMENTS = ['all', 'active', 'new', 'observer', 'dormant', 'roles', 'sessions', 'minutes-source', 'technique', 'outbox'] as const
+const SEGMENTS = ['all', 'active', 'new', 'observer', 'dormant', 'roles', 'sessions', 'minutes-source', 'technique', 'outbox', 'zachet', 'call-errors'] as const
 type Segment = (typeof SEGMENTS)[number]
 
 function arg(name: string, fallback: string): string {
@@ -42,6 +49,20 @@ async function main() {
       break
     case 'technique':
       rows = await prisma.$queryRaw`SELECT * FROM metrics_by_technique`
+      break
+    case 'zachet': {
+      rows = await prisma.$queryRaw`SELECT * FROM zachet_daily WHERE day_msk BETWEEN ${from} AND ${to} ORDER BY day_msk`
+      console.table(plain(rows))
+      // Длина периода — по границам, если обе заданы: пустые дни тоже дни.
+      const bounded = process.argv.includes('--from') && process.argv.includes('--to')
+      const days = plain(rows) as unknown as ZachetDay[]
+      const summary = summarize(days, bounded ? daysBetween(from, to) + 1 : days.length)
+      console.log(`пороги: DAU ≥ ${ZACHET.minDau} не менее ${ZACHET.steadyDays} дней и в среднем; обращений на DAU ≥ ${ZACHET.minCallsPerDau} (Н1: ≥ ${ZACHET.highFrequencyCallsPerDau})`)
+      console.table([summary])
+      return
+    }
+    case 'call-errors':
+      rows = await prisma.$queryRaw`SELECT * FROM component_call_errors WHERE day_msk BETWEEN ${from} AND ${to} ORDER BY day_msk, calls DESC`
       break
     case 'outbox':
       rows = await prisma.$queryRaw`SELECT * FROM metrics_outbox_uncertain WHERE day_key BETWEEN ${from} AND ${to} ORDER BY day_key`

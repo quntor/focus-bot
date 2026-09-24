@@ -23,7 +23,7 @@ describe('OpenAI-compatible provider', () => {
       fetchFn,
     })
 
-    await expect(provider.complete(request)).resolves.toBe('{"ok":true}')
+    await expect(provider.complete(request)).resolves.toEqual({ text: '{"ok":true}', usage: null })
     expect(fetchFn).toHaveBeenCalledOnce()
     const [url, init] = fetchFn.mock.calls[0]!
     expect(url).toBe('https://shared1.multitool.works:4000/v1/chat/completions')

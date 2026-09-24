@@ -64,7 +64,9 @@ npm run dev
 
 Тесты с базой запускаются при заданном `TEST_DATABASE_URL` (отдельная база — тесты
 стирают таблицы). В CI база поднимается сервисом, и пропуск этих тестов там —
-ошибка. Метрики — `npm run metrics -- --segment all|active|roles|sessions`.
+ошибка. Метрики — `npm run metrics -- --segment all|active|roles|sessions`;
+зачёт конкурса — `--segment zachet`, пометка команды — `npm run team`, выгрузка
+для организаторов — `npm run export` (подробно в [docs/metrics.md](docs/metrics.md)).
 
 Вебхук слушает `POST /tg/<TELEGRAM_WEBHOOK_PATH>` и принимает только запросы с
 заголовком `X-Telegram-Bot-Api-Secret-Token`, равным `TELEGRAM_WEBHOOK_SECRET`;

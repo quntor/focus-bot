@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import type { Outcome } from '../session/fsm.js'
 import type { LlmProvider } from './provider.js'
-import { runLlm, type LlmOutcome } from './run.js'
+import { runLlm, type CallMeter, type LlmOutcome } from './run.js'
 
 // Разбор отчёта: сдвинулась ли задача и какой следующий шаг. Исход (сделал / не
 // сделал / вышло другое) выбирает человек кнопкой — модель его не решает и
@@ -28,10 +28,11 @@ export function fallbackReport(outcome: Outcome): ReportResult {
 export async function parseReport(
   provider: LlmProvider,
   input: { intent: string | null; outcome: Outcome; report: string | null },
+  meter?: CallMeter,
 ): Promise<{ result: ReportResult; failure: LlmOutcome<never> | null }> {
   if (!input.report) return { result: fallbackReport(input.outcome), failure: null }
   const payload = JSON.stringify({ intent: input.intent, outcome: input.outcome, report: input.report })
-  const out = await runLlm(provider, { system: SYSTEM, input: payload, maxTokens: 150, timeoutMs: 8_000 }, answer)
+  const out = await runLlm(provider, { system: SYSTEM, input: payload, maxTokens: 150, timeoutMs: 8_000 }, answer, meter)
   if (!out.ok) return { result: fallbackReport(input.outcome), failure: out }
   return { result: { progress: out.value.progress, nextStep: out.value.next_step, llmUsed: true }, failure: null }
 }

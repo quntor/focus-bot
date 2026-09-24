@@ -14,6 +14,8 @@
     "test": "vitest run",
     "prisma": "prisma",
     "metrics": "tsx src/scripts/metrics.ts",
+    "team": "tsx src/scripts/team.ts",
+    "export": "tsx src/scripts/export.ts",
     "set-webhook": "tsx src/scripts/set-webhook.ts"
   },
   "dependencies": {
