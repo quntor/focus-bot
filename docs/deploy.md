@@ -50,3 +50,39 @@ location = /healthz {
 - Заменить заглушку текста согласия и ссылку на политику (`src/bot/texts.ts`,
   `PRIVACY_POLICY_URL`) — текст пишет человек.
 - Прогнать миграции: `npx prisma migrate deploy`.
+
+## Production Compose
+
+Production-контур описан в `compose.prod.yml`: PostgreSQL и приложение доступны
+только во внутренней Docker-сети, а наружу опубликованы только `80/443` через
+Caddy. Сервис `migrate` должен успешно применить миграции до старта приложения.
+
+```bash
+cp .env.production.example .env.production
+chmod 600 .env.production
+# заполнить значения; пустой PRIVACY_POLICY_URL не оставлять
+docker compose --env-file .env.production -f compose.prod.yml config --quiet
+docker compose --env-file .env.production -f compose.prod.yml up -d --build
+```
+
+После появления валидного HTTPS и ручной проверки `/healthz` webhook
+регистрируется из уже собранного production-образа:
+
+```bash
+docker compose --env-file .env.production -f compose.prod.yml run --rm app \
+  node dist/scripts/set-webhook.js
+```
+
+На первом сервере токен можно ввести без командной строки и shell history:
+
+```bash
+./deploy/set-token-and-webhook.sh
+```
+
+Скрипт отключает echo терминала, атомарно обновляет root-only `.env.production`,
+перезапускает приложение, ждёт валидный HTTPS `/healthz` и только затем
+регистрирует webhook. Сам токен не печатается.
+
+Проверить `getWebhookInfo` и пройти `/start` нужно до приглашения тестировщиков.
+При откате приложение останавливается тем же compose-файлом; volume `pgdata` не
+удалять. Перед обновлениями с реальными пользователями делать `pg_dump`.

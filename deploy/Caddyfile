@@ -1,0 +1,23 @@
+{
+	admin off
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	@health path /healthz
+	handle @health {
+		reverse_proxy app:3000
+	}
+
+	@telegram {
+		path /tg/*
+		method POST
+		remote_ip 149.154.160.0/20 91.108.4.0/22
+	}
+	handle @telegram {
+		reverse_proxy app:3000
+	}
+
+	respond 404
+}

@@ -3,6 +3,7 @@ dist/
 coverage/
 .env
 .env.local
+.env.production
 # бэкапы .env маска .env не ловит, а внутри боевые токены
 *.env.bak*
 .env*.bak*
