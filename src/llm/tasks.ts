@@ -32,6 +32,7 @@ const SYSTEM = [
   'Фрагмент без личной формы глагола, который уточняет предыдущую задачу, не новая задача: объедини их.',
   'Контекст «про X» присоединяй к следующей задаче и сохраняй X в названии.',
   'Не добавляй active_tasks, которых пользователь не назвал в text.',
+  'Если new_tasks непуст, kind обязан быть capture.',
   'Пример 1: «закончить отчёт и отправить его» → new_tasks=["Закончить отчёт","Отправить отчёт"].',
   'Пример 2: «нужно сделать оплату. функцию оплаты» → new_tasks=["Сделать функцию оплаты"].',
   'Пример 3: «второе про сайт. нужно исправить форму» → new_tasks=["Исправить форму сайта"].',
@@ -122,8 +123,13 @@ export async function parseTaskMessage(
 
   const value = out.value
   if (value.kind === 'session_intent') {
-    if (value.new_tasks.length || value.complete_task || value.start_task || value.start_title) {
+    if (value.complete_task || value.start_task || value.start_title) {
       return { result: null, failure: { ok: false, reason: 'invalid' } }
+    }
+    if (value.new_tasks.length) {
+      const titles = dedupeTitles(value.new_tasks.map(clean).filter(Boolean))
+      if (!titles.length) return { result: null, failure: { ok: false, reason: 'invalid' } }
+      return { result: { kind: 'capture', titles, llmUsed: true }, failure: null }
     }
     return { result: { kind: 'session_intent', llmUsed: true }, failure: null }
   }

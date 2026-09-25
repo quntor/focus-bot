@@ -35,6 +35,32 @@ describe('разбор сообщения со списком задач', () =>
     expect(parsed.result).toEqual({ kind: 'capture', titles: ['Доделать выкат', 'Поправить ошибки'], llmUsed: true })
   })
 
+  it('нормализует список задач с ошибочным kind session_intent', async () => {
+    const parsed = await parseTaskMessage(
+      provider(
+        '{"kind":"session_intent","new_tasks":["Выкатить Милавицу на VDS","Поправить все косяки","Запустить умные функции FocusBot","Сделать планирование дня"]}',
+      ),
+      {
+        text:
+          'Мне завтра нужно выкатить Милавицу на VDS, поправить все косяки, запустить умные функции FocusBot и сделать планирование дня',
+        tasks,
+        currentTaskId: null,
+      },
+    )
+
+    expect(parsed.failure).toBeNull()
+    expect(parsed.result).toEqual({
+      kind: 'capture',
+      titles: [
+        'Выкатить Милавицу на VDS',
+        'Поправить все косяки',
+        'Запустить умные функции FocusBot',
+        'Сделать планирование дня',
+      ],
+      llmUsed: true,
+    })
+  })
+
   it('не передаёт активные задачи модели при захвате списка', async () => {
     const observed: LlmProvider = {
       enabled: true,
