@@ -1,6 +1,8 @@
 import type { Ctx } from '../bot/context.js'
 import type { LlmProvider } from '../llm/provider.js'
 import { disabledProvider } from '../llm/provider.js'
+import type { SttProvider } from '../stt/provider.js'
+import { disabledSttProvider } from '../stt/provider.js'
 import type { Keyboard, ReplyKeyboard, Telegram } from '../tg/client.js'
 import { handleUpdate } from '../tg/webhook.js'
 import { prisma } from './db.js'
@@ -9,12 +11,21 @@ export type Sent = { chatId: bigint; text: string; keyboard?: Keyboard | undefin
 
 // Поддельный Telegram: запоминает каждое сообщение. Тесты читают отсюда, что
 // именно увидел пользователь — вплоть до байта.
-export function fakeTelegram(): Telegram & { sent: Sent[]; failNext: unknown[] } {
+export function fakeTelegram(): Telegram & {
+  sent: Sent[]
+  failNext: unknown[]
+  downloads: Map<string, Uint8Array>
+  downloadRequests: string[]
+} {
   const sent: Sent[] = []
   const failNext: unknown[] = []
+  const downloads = new Map<string, Uint8Array>()
+  const downloadRequests: string[] = []
   return {
     sent,
     failNext,
+    downloads,
+    downloadRequests,
     async send(chatId, text, keyboard, replyKeyboard) {
       const error = failNext.shift()
       if (error) throw error
@@ -22,6 +33,13 @@ export function fakeTelegram(): Telegram & { sent: Sent[]; failNext: unknown[] }
     },
     async answerCallback() {},
     async clearKeyboard() {},
+    async download(fileId, maxBytes) {
+      downloadRequests.push(fileId)
+      const bytes = downloads.get(fileId)
+      if (!bytes) throw new Error('missing test download')
+      if (bytes.byteLength > maxBytes) throw new Error('download too large')
+      return bytes
+    },
   }
 }
 
@@ -29,10 +47,16 @@ export function fakeTelegram(): Telegram & { sent: Sent[]; failNext: unknown[] }
 // processed_updates не должен отбрасывать апдейты второго бота как дубли первого.
 let updateId = 1
 
-export function makeBot(opts: { now?: Date; llm?: LlmProvider } = {}) {
+export function makeBot(opts: { now?: Date; llm?: LlmProvider; stt?: SttProvider } = {}) {
   let now = opts.now ?? new Date('2026-09-22T07:00:00Z')
   const tg = fakeTelegram()
-  const ctx: Ctx = { db: prisma, tg, llm: opts.llm ?? disabledProvider, now: () => now }
+  const ctx: Ctx = {
+    db: prisma,
+    tg,
+    llm: opts.llm ?? disabledProvider,
+    stt: opts.stt ?? disabledSttProvider,
+    now: () => now,
+  }
 
   const text = (tgId: number, t: string, id = updateId++) =>
     handleUpdate(ctx, { update_id: id, message: { text: t, from: { id: tgId }, chat: { id: tgId, type: 'private' } } })
@@ -40,6 +64,24 @@ export function makeBot(opts: { now?: Date; llm?: LlmProvider } = {}) {
     handleUpdate(ctx, {
       update_id: id,
       callback_query: { id: `cq${id}`, from: { id: tgId }, data, message: { message_id: 1, chat: { id: tgId, type: 'private' } } },
+    })
+  const voice = (
+    tgId: number,
+    input: { fileId: string; duration: number; mimeType?: string; fileSize?: number },
+    id = updateId++,
+  ) =>
+    handleUpdate(ctx, {
+      update_id: id,
+      message: {
+        voice: {
+          file_id: input.fileId,
+          duration: input.duration,
+          ...(input.mimeType ? { mime_type: input.mimeType } : {}),
+          ...(input.fileSize !== undefined ? { file_size: input.fileSize } : {}),
+        },
+        from: { id: tgId },
+        chat: { id: tgId, type: 'private' },
+      },
     })
 
   // Все кнопки, показанные пользователю, — чтобы нажимать «как человек».
@@ -66,6 +108,7 @@ export function makeBot(opts: { now?: Date; llm?: LlmProvider } = {}) {
     tg,
     text,
     press,
+    voice,
     buttons,
     lastButton,
     lastText,

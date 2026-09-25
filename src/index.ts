@@ -9,17 +9,24 @@ import { createOpenAiCompatibleProvider } from './llm/openai-compatible.js'
 import { runOutboxOnce } from './outbox/worker.js'
 import { startLoops } from './jobs/sweeper.js'
 import type { Ctx } from './bot/context.js'
+import { disabledSttProvider } from './stt/provider.js'
+import { createOpenAiCompatibleSttProvider } from './stt/openai-compatible.js'
 
 const cfg = config()
 const llm =
   cfg.LLM_API_KEY && cfg.LLM_BASE_URL && cfg.LLM_MODEL
     ? createOpenAiCompatibleProvider({ apiKey: cfg.LLM_API_KEY, baseUrl: cfg.LLM_BASE_URL, model: cfg.LLM_MODEL })
     : disabledProvider
+const stt =
+  cfg.LLM_API_KEY && cfg.LLM_BASE_URL && cfg.STT_MODEL
+    ? createOpenAiCompatibleSttProvider({ apiKey: cfg.LLM_API_KEY, baseUrl: cfg.LLM_BASE_URL, model: cfg.STT_MODEL })
+    : disabledSttProvider
 
 const ctx: Ctx = {
   db: prisma,
   tg: telegram,
   llm,
+  stt,
   now: () => new Date(),
   policyUrl: cfg.PRIVACY_POLICY_URL,
 }

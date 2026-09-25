@@ -1,5 +1,6 @@
 import type { PrismaClient, User } from '@prisma/client'
 import type { LlmProvider } from '../llm/provider.js'
+import type { SttProvider } from '../stt/provider.js'
 import type { Keyboard, ReplyKeyboard, Telegram } from '../tg/client.js'
 import { TelegramError } from '../tg/client.js'
 import { log } from '../lib/log.js'
@@ -13,6 +14,7 @@ export type Ctx = {
   db: PrismaClient
   tg: Telegram
   llm: LlmProvider
+  stt: SttProvider
   now: () => Date
   policyUrl?: string | undefined
 }

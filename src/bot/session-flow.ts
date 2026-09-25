@@ -80,6 +80,10 @@ function activeElapsedMs(session: FocusSession, now: Date): number {
   return Math.max(0, now.getTime() - session.startedAt.getTime() - session.pausedSeconds * 1000 - currentPause)
 }
 
+export function activeElapsedMinutes(session: FocusSession, now: Date): number {
+  return Math.floor(activeElapsedMs(session, now) / MIN)
+}
+
 function sessionHistory(ctx: Ctx, userId: string) {
   return ctx.db.focusSession.findMany({
     where: { userId, state: { in: ['finished', 'abandoned'] } },
@@ -155,6 +159,39 @@ export async function onStartButton(ctx: Ctx, user: User): Promise<void> {
     if (active?.state === 'paused') return reply(ctx, user, T.breakChoice)
     return reply(ctx, user, T.stale)
   }
+  await startRunning(ctx, user, session.id)
+}
+
+// Выбор из списка задач пропускает повторный LLM-разбор: taskId уже выбран
+// человеком кнопкой, а владение проверено запросом по userId.
+export async function startTaskSession(ctx: Ctx, user: User, taskId: string): Promise<void> {
+  const task = await ctx.db.task.findFirst({ where: { id: taskId, userId: user.id, status: 'active' } })
+  if (!task) return reply(ctx, user, T.stale)
+
+  const session = await openCollecting(ctx, user.id)
+  if (session.state === 'running') return reply(ctx, user, T.alreadyRunning(endText(ctx, user, session)))
+  if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
+
+  const technique: Technique = isTechnique(user.technique) ? user.technique : 'auto'
+  const minutes = technique === 'auto' ? proposeMinutes(await sessionHistory(ctx, user.id)) : PRESETS[technique].minutes
+  const rest = technique === 'auto' ? restFor(minutes) : PRESETS[technique].rest
+  const updated = await ctx.db.$transaction(async (tx) => {
+    const res = await tx.focusSession.updateMany({
+      where: { id: session.id, userId: user.id, state: 'collecting_intent' },
+      data: {
+        intentText: task.title,
+        taskId: task.id,
+        scope: 'step',
+        plannedMinutes: minutes,
+        minutesSource: 'bot',
+        plannedRestMinutes: rest,
+        technique,
+      },
+    })
+    if (res.count === 1) await logEvent(tx, user.id, 'task_selected', { task_id: task.id }, { at: ctx.now(), sessionId: session.id })
+    return res.count
+  })
+  if (updated !== 1) return reply(ctx, user, T.stale)
   await startRunning(ctx, user, session.id)
 }
 

@@ -1,4 +1,5 @@
 import { config } from '../lib/config.js'
+import { z } from 'zod'
 
 // Токен живёт только в URL запроса и нигде больше: ни в сообщениях ошибок, ни в
 // логах. Сообщения TelegramError содержат описание от Telegram и не логируются
@@ -84,6 +85,7 @@ export interface Telegram {
   send(chatId: bigint, text: string, keyboard?: Keyboard, replyKeyboard?: ReplyKeyboard): Promise<void>
   answerCallback(callbackId: string, text?: string): Promise<void>
   clearKeyboard(chatId: bigint, messageId: number): Promise<void>
+  download(fileId: string, maxBytes: number): Promise<Uint8Array>
 }
 
 export const telegram: Telegram = {
@@ -110,5 +112,45 @@ export const telegram: Telegram = {
   },
   async clearKeyboard(chatId, messageId) {
     await call('editMessageReplyMarkup', { chat_id: chatId.toString(), message_id: messageId, reply_markup: { inline_keyboard: [] } })
+  },
+  async download(fileId, maxBytes) {
+    const parsed = z
+      .object({ file_path: z.string().min(1), file_size: z.number().nonnegative().optional() })
+      .safeParse(await call('getFile', { file_id: fileId }))
+    if (!parsed.success || parsed.data.file_path.includes('..')) throw new TelegramError('getFile: invalid response', null)
+    if (parsed.data.file_size !== undefined && parsed.data.file_size > maxBytes) {
+      throw new TelegramError('getFile: file too large', 413)
+    }
+
+    let response: Response
+    try {
+      response = await fetch(`https://api.telegram.org/file/bot${config().TELEGRAM_BOT_TOKEN}/${parsed.data.file_path}`, {
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      })
+    } catch {
+      throw new DeliveryError(false, 'download_failed')
+    }
+    if (!response.ok || !response.body) throw new TelegramError(`download: HTTP ${response.status}`, response.status)
+
+    const reader = response.body.getReader()
+    const chunks: Uint8Array[] = []
+    let total = 0
+    while (true) {
+      const part = await reader.read()
+      if (part.done) break
+      total += part.value.byteLength
+      if (total > maxBytes) {
+        await reader.cancel()
+        throw new TelegramError('download: file too large', 413)
+      }
+      chunks.push(part.value)
+    }
+    const bytes = new Uint8Array(total)
+    let offset = 0
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    return bytes
   },
 }

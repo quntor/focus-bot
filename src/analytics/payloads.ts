@@ -20,7 +20,7 @@ export const TECHNIQUES = ['auto', 'pomodoro', 'medium', 'long', 'free'] as cons
 export const REST_CHOICES = ['rest', 'continue', 'later', 'day_end'] as const
 export const SCOPES = ['step', 'multi_session'] as const
 export const POINT_REASONS = ['session_completed', 'daily_goal', 'comeback'] as const
-export const LLM_STAGES = ['intent', 'report'] as const
+export const LLM_STAGES = ['intent', 'report', 'tasks'] as const
 export const LLM_FALLBACK_REASONS = ['disabled', 'error', 'timeout', 'invalid'] as const
 export const OUTBOX_KINDS = ['ping', 'session_end', 'rest_over', 'meeting', 'summary'] as const
 export const SETTINGS_KEYS = [
@@ -44,6 +44,14 @@ export const PAYLOADS = {
     is_new_task: z.boolean(),
     scope: z.enum(SCOPES),
   }),
+  voice_transcribed: z.strictObject({ duration_seconds: z.int().min(0).max(180), length_chars: z.int().min(0) }),
+  tasks_parsed: z.strictObject({
+    kind: z.enum(['session_intent', 'capture', 'complete_and_start']),
+    count: z.int().min(0).max(10),
+  }),
+  tasks_captured: z.strictObject({ count: z.int().min(1).max(10), source: z.enum(['text', 'voice']) }),
+  task_selected: z.strictObject({ task_id: id }),
+  task_switched: z.strictObject({ from_task_id: id, to_task_id: id, source: z.enum(['text', 'voice']) }),
   session_length_adjusted: z.strictObject({ direction: z.enum(['up', 'down']), planned_minutes: minutes }),
   session_started: z.strictObject({
     task_id: id.nullable(),

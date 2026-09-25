@@ -25,6 +25,7 @@ export const ACTIONS = [
   'del', // confirm
   'skip', // пропустить вопрос онбординга: ritual
   'off', // объявить выходной: tomorrow
+  'task', // выбрать задачу из списка: start
 ] as const
 export type Action = (typeof ACTIONS)[number]
 

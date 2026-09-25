@@ -32,13 +32,20 @@ const schema = z
     LLM_API_KEY: optionalString,
     LLM_BASE_URL: optionalHttpsUrl,
     LLM_MODEL: optionalString,
+    // STT использует те же ключ и base URL, но включается отдельно: голос не
+    // должен неожиданно стать платным только из-за включённой текстовой модели.
+    STT_MODEL: optionalString,
   })
   .superRefine((value, ctx) => {
     const fields = ['LLM_API_KEY', 'LLM_BASE_URL', 'LLM_MODEL'] as const
     const configured = fields.filter((field) => value[field] !== undefined)
-    if (configured.length === 0 || configured.length === fields.length) return
-    for (const field of fields) {
-      if (value[field] === undefined) ctx.addIssue({ code: 'custom', path: [field], message: 'нужен полный набор LLM_*' })
+    if (configured.length !== 0 && configured.length !== fields.length) {
+      for (const field of fields) {
+        if (value[field] === undefined) ctx.addIssue({ code: 'custom', path: [field], message: 'нужен полный набор LLM_*' })
+      }
+    }
+    if (value.STT_MODEL && (!value.LLM_API_KEY || !value.LLM_BASE_URL)) {
+      ctx.addIssue({ code: 'custom', path: ['STT_MODEL'], message: 'для STT нужны LLM_API_KEY и LLM_BASE_URL' })
     }
   })
 

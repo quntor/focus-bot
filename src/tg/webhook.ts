@@ -8,6 +8,7 @@ import { T } from '../bot/texts.js'
 import * as account from '../bot/account.js'
 import * as day from '../bot/day-flow.js'
 import * as session from '../bot/session-flow.js'
+import * as tasks from '../bot/tasks.js'
 import { OUTCOMES, StaleTransition, type Outcome } from '../session/fsm.js'
 import { parseCommand, parseSource } from './commands.js'
 import { claimUpdate } from './dedupe.js'
@@ -21,6 +22,14 @@ const updateSchema = z.object({
   message: z
     .object({
       text: z.string().optional(),
+      voice: z
+        .object({
+          file_id: z.string().min(1),
+          duration: z.number().int().nonnegative(),
+          mime_type: z.string().optional(),
+          file_size: z.number().int().nonnegative().optional(),
+        })
+        .optional(),
       from: from.optional(),
       chat: z.object({ id: z.number(), type: z.string() }),
     })
@@ -100,6 +109,14 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
   try {
     if (cq) await onCallback(ctx, user, cq.id, cq.data, cq.message?.message_id)
     else if (command) await onCommand(ctx, user, command.command, command.args, created)
+    else if (msg?.voice) {
+      if (!user.consentAt) {
+        if (created) await account.sendConsent(ctx, user)
+        else await reply(ctx, user, T.consentRequired)
+      } else {
+        await tasks.onVoice(ctx, user, msg.voice)
+      }
+    }
     else if (msg?.text) await onText(ctx, user, msg.text, created)
   } catch (error) {
     // Наружу — общая фраза, подробности — во внутренний лог без текста.
@@ -174,6 +191,7 @@ async function onText(ctx: Ctx, user: User, text: string, created: boolean): Pro
       if (await session.onReportText(ctx, user, text)) return
       break
   }
+  if (tasks.shouldParseTaskMessage(text) && (await tasks.onTaskMessage(ctx, user, text, 'text'))) return
   return session.onIntentText(ctx, user, text)
 }
 
@@ -246,6 +264,9 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
         break
       case 'off':
         if (arg === 'tomorrow') return await day.planDayOff(ctx, user)
+        break
+      case 'task':
+        if (id && arg === 'start') return await tasks.onTaskSelected(ctx, user, id)
         break
     }
   } catch (error) {

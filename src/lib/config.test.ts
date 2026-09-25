@@ -26,6 +26,21 @@ describe('LLM config', () => {
     expect(config.LLM_MODEL).toBe('ai-sage/GigaChat3-10B-A1.8B')
   })
 
+  it('включает STT отдельно на тех же credentials', () => {
+    const config = parseConfig({
+      ...base,
+      LLM_API_KEY: 'cloud-key',
+      LLM_BASE_URL: 'https://foundation-models.api.cloud.ru/v1',
+      LLM_MODEL: 'ai-sage/GigaChat3-10B-A1.8B',
+      STT_MODEL: 'openai/whisper-large-v3',
+    })
+    expect(config.STT_MODEL).toBe('openai/whisper-large-v3')
+  })
+
+  it('не включает STT без credentials', () => {
+    expect(() => parseConfig({ ...base, STT_MODEL: 'openai/whisper-large-v3' })).toThrow('STT_MODEL')
+  })
+
   it('отклоняет неполный набор, не печатая ключ', () => {
     expect(() => parseConfig({ ...base, LLM_API_KEY: 'cloud-key' })).toThrow('LLM_BASE_URL, LLM_MODEL')
     expect(() => parseConfig({ ...base, LLM_API_KEY: 'cloud-key' })).not.toThrow('cloud-key')

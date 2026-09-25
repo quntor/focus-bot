@@ -46,6 +46,11 @@ UPDATE и DELETE запрещены триггером.
 | `timezone_set` | человек назвал своё время | да | `offset_minutes` |
 | `intent_submitted` | ответ на «с чего начнёшь» | да | `length_chars`, `named_minutes` |
 | `intent_parsed` | намерение разобрано | нет | `llm_used`, `task_id`, `is_new_task`, `scope` |
+| `voice_transcribed` | голосовое распознано | да | `duration_seconds`, `length_chars` |
+| `tasks_parsed` | модель классифицировала управление задачами | нет | `kind`, `count` |
+| `tasks_captured` | человек добавил список задач | да | `count`, `source` |
+| `task_selected` | выбрал задачу для сессии | да | `task_id` |
+| `task_switched` | завершил одну задачу и начал другую | да | `from_task_id`, `to_task_id`, `source` |
 | `session_length_adjusted` | человек сдвинул предложенную длину | да | `direction`, `planned_minutes` |
 | `session_started` | подтвердил, таймер пошёл | да | `task_id`, `is_new_task`, `planned_minutes`, `planned_rest_minutes`, `minutes_source`, `technique`, `scope` |
 | `session_paused` | нажал «Перерыв» | да | `session_id`, `elapsed_minutes` |
