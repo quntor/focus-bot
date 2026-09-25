@@ -25,6 +25,16 @@ describe('разбор сообщения со списком задач', () =>
     expect(parsed.result).toEqual({ kind: 'capture', titles: ['Подготовить отчёт', 'Купить корм'], llmUsed: true })
   })
 
+  it('принимает capture без опущенных моделью null-полей', async () => {
+    const parsed = await parseTaskMessage(
+      provider('{"kind":"capture","tasks":["Доделать выкат","Поправить ошибки"]}'),
+      { text: 'Нужно доделать выкат и поправить ошибки', tasks, currentTaskId: null },
+    )
+
+    expect(parsed.failure).toBeNull()
+    expect(parsed.result).toEqual({ kind: 'capture', titles: ['Доделать выкат', 'Поправить ошибки'], llmUsed: true })
+  })
+
   it('переводит только временные метки своих задач в id', async () => {
     const parsed = await parseTaskMessage(
       provider('{"kind":"complete_and_start","tasks":[],"complete_task":"t1","start_task":"t2","start_title":null}'),

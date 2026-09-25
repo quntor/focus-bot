@@ -18,9 +18,9 @@ const label = z.string().regex(/^t\d{1,2}$/)
 const answer = z.strictObject({
   kind: z.enum(['session_intent', 'capture', 'complete_and_start']),
   tasks: z.array(z.string().min(1).max(80)).max(10),
-  complete_task: label.nullable(),
-  start_task: label.nullable(),
-  start_title: z.string().min(1).max(80).nullable(),
+  complete_task: label.nullable().default(null),
+  start_task: label.nullable().default(null),
+  start_title: z.string().min(1).max(80).nullable().default(null),
 })
 
 const SYSTEM = [
