@@ -35,8 +35,17 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     const started = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
     expect(started).toMatchObject({ taskId: null, intentText: null, plannedMinutes: 40 })
     expect(bot.lastText(A)).toContain('Таймер уже идёт')
-    expect(bot.buttons(A).filter((button) => button.data.endsWith(':start'))).toHaveLength(2)
+    const listMessage = bot.tg.sent.filter((message) => message.chatId === BigInt(A)).at(-1)
+    expect(listMessage?.keyboard?.slice(0, 2)).toEqual([
+      [{ text: first.title, data: `task:${first.id}:view0` }],
+      [{ text: second.title, data: `task:${second.id}:view0` }],
+    ])
+    expect(bot.buttons(A).filter((button) => button.data.endsWith(':start'))).toHaveLength(0)
 
+    await bot.press(A, `task:${first.id}:view0`)
+    expect(bot.lastText(A)).toContain(first.title)
+    expect(bot.buttons(A).filter((button) => button.data === `task:${first.id}:start`)).toHaveLength(1)
+    expect(bot.buttons(A).filter((button) => button.data === `task:${first.id}:drop`)).toHaveLength(1)
     await bot.press(A, `task:${first.id}:start`)
     const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
     expect(running).toMatchObject({ id: started.id, taskId: first.id, intentText: first.title, plannedMinutes: 40 })
@@ -44,6 +53,7 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     expect(running.plannedEndAt).toEqual(started.plannedEndAt)
     expect(bot.lastText(A)).toContain('Таймер продолжает идти')
 
+    await bot.press(A, `task:${second.id}:view0`)
     await bot.press(A, `task:${second.id}:start`)
     const switched = await prisma.focusSession.findUniqueOrThrow({ where: { id: started.id } })
     expect(switched).toMatchObject({ taskId: second.id, intentText: second.title })
@@ -73,6 +83,12 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     await bot.press(A, 'tasks::p1')
     expect(bot.lastText(A)).toContain('Задача 7')
     expect(bot.lastText(A)).toContain('Задача 8')
+    const secondPage = bot.tg.sent.filter((message) => message.chatId === BigInt(A)).at(-1)
+    expect(secondPage?.keyboard?.slice(0, 2).every((row) => row.length === 1)).toBe(true)
+    const task7 = await prisma.task.findFirstOrThrow({ where: { userId: user.id, title: 'Задача 7' } })
+    await bot.press(A, `task:${task7.id}:view1`)
+    expect(bot.lastText(A)).toContain('Задача 7')
+    expect(bot.buttons(A).some((button) => button.data === 'tasks::p1')).toBe(true)
 
     await bot.text(A, '/tasks')
     expect(bot.lastText(A)).toContain('Задача 1')
@@ -86,6 +102,7 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     const removable = await prisma.task.create({ data: { userId: user.id, title: 'Лишняя задача' } })
     const current = await prisma.task.create({ data: { userId: user.id, title: 'Текущая задача' } })
 
+    await bot.press(A, `task:${removable.id}:view0`)
     await bot.press(A, `task:${removable.id}:drop`)
     expect(await prisma.task.findUniqueOrThrow({ where: { id: removable.id } })).toMatchObject({ status: 'dropped' })
     expect(bot.textsTo(A).some((text) => text.includes('Убрал «Лишняя задача»'))).toBe(true)
@@ -115,6 +132,8 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     const buy = bot.buttons(A).filter((button) => button.text.includes('Купить корм')).at(-1)
     if (!buy) throw new Error('нет кнопки задачи «Купить корм»')
     await bot.press(A, buy.data)
+    expect(bot.lastText(A)).toContain('Купить корм')
+    await bot.press(A, `task:${buy.data.split(':')[1]}:start`)
     const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' }, include: { task: true } })
     expect(running.task?.title).toBe('Купить корм')
     expect(running.intentText).toBe('Купить корм')
@@ -221,6 +240,9 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     await bot.onboard(B)
     const other = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(B) } })
     const task = await prisma.task.create({ data: { userId: other.id, title: 'Чужая задача' } })
+
+    await bot.press(A, `task:${task.id}:view0`)
+    expect(bot.lastText(A)).toContain('неактуально')
 
     await bot.press(A, `task:${task.id}:start`)
 

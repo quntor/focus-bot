@@ -269,6 +269,10 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
         if (arg === 'tomorrow') return await day.planDayOff(ctx, user)
         break
       case 'task':
+        if (id && arg?.startsWith('view')) {
+          const page = /^view(\d{1,4})$/.exec(arg)
+          if (page) return await tasks.onTaskOpened(ctx, user, id, Number(page[1]))
+        }
         if (id && arg === 'start') return await tasks.onTaskSelected(ctx, user, id)
         if (id && arg === 'drop') return await tasks.onTaskDropped(ctx, user, id)
         if (id && arg === 'restore') return await tasks.onTaskRestored(ctx, user, id)

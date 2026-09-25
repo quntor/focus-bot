@@ -56,7 +56,8 @@ export function shouldParseTaskMessage(text: string): boolean {
 const TASKS_PER_PAGE = 6
 
 function taskLabel(title: string): string {
-  return title.replace(/\s+/g, ' ').trim().slice(0, 42)
+  const chars = Array.from(title.replace(/\s+/g, ' ').trim())
+  return chars.length <= 60 ? chars.join('') : `${chars.slice(0, 59).join('')}…`
 }
 
 function taskKeyboard(
@@ -66,8 +67,7 @@ function taskKeyboard(
   restore?: { id: string },
 ): Keyboard {
   const keyboard: Keyboard = tasks.map((task) => [
-    { text: `▶️ ${taskLabel(task.title)}`, data: cb('task', task.id, 'start') },
-    { text: '🗑', data: cb('task', task.id, 'drop') },
+    { text: taskLabel(task.title), data: cb('task', task.id, `view${page}`) },
   ])
   const navigation = []
   if (page > 0) navigation.push({ text: '← Назад', data: cb('tasks', null, `p${page - 1}`) })
@@ -107,6 +107,21 @@ export async function onTasksPage(ctx: Ctx, user: User, arg: string): Promise<vo
   const match = /^p(\d{1,4})$/.exec(arg)
   if (!match) return reply(ctx, user, T.stale)
   await showTasks(ctx, user, Number(match[1]))
+}
+
+export async function onTaskOpened(ctx: Ctx, user: User, taskId: string, page: number): Promise<void> {
+  const task = await ctx.db.task.findFirst({
+    where: { id: taskId, userId: user.id, status: 'active' },
+    select: { id: true, title: true },
+  })
+  if (!task) return reply(ctx, user, T.stale)
+  await reply(ctx, user, T.taskActions(task.title), [
+    [
+      { text: T.taskStartButton, data: cb('task', task.id, 'start') },
+      { text: T.taskDropButton, data: cb('task', task.id, 'drop') },
+    ],
+    [{ text: T.tasksBackButton, data: cb('tasks', null, `p${page}`) }],
+  ])
 }
 
 export async function onTaskSelected(ctx: Ctx, user: User, taskId: string): Promise<void> {
