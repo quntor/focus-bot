@@ -17,7 +17,7 @@ const llm = (answer: string): LlmProvider => ({
 })
 
 const capture = llm(
-  '{"kind":"capture","tasks":["Подготовить отчёт","Купить корм"],"complete_task":null,"start_task":null,"start_title":null}',
+  '{"kind":"capture","new_tasks":["Подготовить отчёт","Купить корм"],"complete_task":null,"start_task":null,"start_title":null}',
 )
 
 describe.skipIf(!hasDb)('список задач из текста и голоса', () => {
@@ -89,7 +89,7 @@ describe.skipIf(!hasDb)('список задач из текста и голос
 
   it('явно завершает текущую задачу и сразу запускает следующую', async () => {
     const switchLlm = llm(
-      '{"kind":"complete_and_start","tasks":[],"complete_task":"t1","start_task":"t2","start_title":null}',
+      '{"kind":"complete_and_start","new_tasks":[],"complete_task":"t1","start_task":"t2","start_title":null}',
     )
     const bot = makeBot({ llm: switchLlm })
     await bot.onboard(A)
