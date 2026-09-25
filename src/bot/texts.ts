@@ -84,10 +84,23 @@ export const T = {
   longer: 'Длиннее',
   cancel: 'Отмена',
 
-  started: (minutes: number | null, rest: number, end: string | null) =>
-    minutes && end
-      ? `${capital(minutesText(minutes))} работы, потом ${rest} отдыха. Поехали — напишу в ${end}.`
-      : 'Поехали. Закончишь — /done.',
+  started: (minutes: number | null, rest: number, end: string | null, intent: string | null) => {
+    const name = intent?.replace(/\s+/g, ' ').trim().slice(0, 80)
+    const prefix = name ? `Сессия «${name}» началась.` : 'Сессия началась.'
+    return minutes && end
+      ? `${prefix} ${capital(minutesText(minutes))} работы, потом ${rest} отдыха. Поехали — напишу в ${end}.`
+      : `${prefix} Работаем без таймера. Закончишь — /done.`
+  },
+  changeRunningWork: 'Изменить работу',
+  changeRunningDuration: 'Изменить длительность',
+  askRunningWork: 'Что меняем в текущей работе? Напиши новую формулировку.',
+  askRunningDuration: 'Сколько должна длиться вся сессия? Напиши, например: 25 минут.',
+  badRunningDuration: 'Не понял длительность. Напиши, например: 25 минут или 1 час.',
+  runningDurationTooShort: (elapsed: number) =>
+    `Уже прошло ${elapsed} ${plural(elapsed, 'минута', 'минуты', 'минут')}. Укажи общую длительность больше.`,
+  runningWorkUpdated: (intent: string) => `Работу изменил на «${intent.replace(/\s+/g, ' ').trim().slice(0, 80)}». Таймер продолжается.`,
+  runningDurationUpdated: (minutes: number, end: string) =>
+    `Длительность изменил: ${minutesText(minutes)}. Новое время окончания — ${end}.`,
   cancelled: 'Отменил. Напиши, когда будет удобно.',
   alreadyRunning: (end: string | null) =>
     end ? `Сессия идёт до ${end}. Закончить раньше — /done, бросить — /stop.` : 'Сессия идёт. Закончить — /done, бросить — /stop.',
@@ -285,6 +298,10 @@ const TECHNIQUE_NAMES: Record<string, string> = {
   free: 'свободный',
 }
 
+function capital(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1)
+}
+
 // Нулевые исходы не показываем: «ушло в другое — 0» — шум.
 function outcomesLine(s: DaySummary): string {
   const parts = [
@@ -310,7 +327,3 @@ const ZONE_NAMES: Record<string, string> = {
   'Asia/Kamchatka': 'Камчатка',
 }
 export const zoneName = (tz: string) => ZONE_NAMES[tz] ?? tz
-
-function capital(s: string): string {
-  return s.charAt(0).toUpperCase() + s.slice(1)
-}

@@ -152,10 +152,13 @@ async function onText(ctx: Ctx, user: User, text: string, created: boolean): Pro
     if (created) return account.sendConsent(ctx, user)
     return reply(ctx, user, T.consentRequired)
   }
-  if (text === T.sessionStartButton) return session.askIntent(ctx, user)
+  if (text === T.sessionStartButton) return session.onStartButton(ctx, user)
   if (text === T.sessionBreakButton) return session.onBreak(ctx, user)
   if (text === T.sessionResumeButton) return session.onResume(ctx, user)
   if (text === T.sessionNewButton) return session.onNewAfterBreak(ctx, user)
+  const runningEdit = /^running_(work|duration):([0-9a-f-]{36})$/.exec(user.pendingInput)
+  if (runningEdit?.[1] === 'work' && runningEdit[2]) return session.onRunningWorkText(ctx, user, runningEdit[2], text)
+  if (runningEdit?.[1] === 'duration' && runningEdit[2]) return session.onRunningDurationText(ctx, user, runningEdit[2], text)
   switch (user.pendingInput) {
     case 'timezone':
       return account.onTimezoneText(ctx, user, text)
@@ -192,6 +195,9 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
     switch (action) {
       case 'len':
         if (id && arg) return await session.onLength(ctx, user, id, arg)
+        break
+      case 'run':
+        if (id && (arg === 'work' || arg === 'duration')) return await session.onRunningEdit(ctx, user, id, arg)
         break
       case 'ping':
         if (id && arg) return await session.onPing(ctx, user, id, arg)

@@ -48,6 +48,20 @@ describe.skipIf(!hasDb)('outbox', () => {
     expect(await prisma.outboxMessage.count({ where: { idempotencyKey: `ping:${s.id}:1` } })).toBe(1)
   })
 
+  it('окончание сессии сбрасывает незавершённую правку работы', async () => {
+    const bot = makeBot()
+    const session = await runningSession(bot)
+    await bot.press(A, bot.lastButton(A, 'run:', ':work'))
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: session.userId } })).toMatchObject({
+      pendingInput: `running_work:${session.id}`,
+    })
+
+    bot.advance(40)
+    await runOutboxOnce(bot.ctx)
+
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: session.userId } })).toMatchObject({ pendingInput: 'none' })
+  })
+
   it('упавший посреди отправки процесс: сообщение не переотправляется, а помечается uncertain', async () => {
     const bot = makeBot()
     await runningSession(bot)

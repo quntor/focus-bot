@@ -9,6 +9,7 @@ import { z } from 'zod'
 export const ACTIONS = [
   'consent',
   'len', // предложение длины: ok | up | down | cancel
+  'run', // правка уже запущенной сессии: work | duration
   'ping', // here | back
   'out', // исход: done | not_done | other
   'skiprep', // пропустить отчёт

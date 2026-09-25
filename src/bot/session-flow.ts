@@ -80,6 +80,22 @@ function activeElapsedMs(session: FocusSession, now: Date): number {
   return Math.max(0, now.getTime() - session.startedAt.getTime() - session.pausedSeconds * 1000 - currentPause)
 }
 
+function sessionHistory(ctx: Ctx, userId: string) {
+  return ctx.db.focusSession.findMany({
+    where: { userId, state: { in: ['finished', 'abandoned'] } },
+    orderBy: { createdAt: 'desc' },
+    take: 5,
+    select: { state: true, plannedMinutes: true, counted: true, minutesAdjusted: true, restChoice: true },
+  })
+}
+
+function runningEditKeyboard(sessionId: string): Keyboard {
+  return [
+    [{ text: T.changeRunningWork, data: cb('run', sessionId, 'work') }],
+    [{ text: T.changeRunningDuration, data: cb('run', sessionId, 'duration') }],
+  ]
+}
+
 // «С чего начнёшь?» — с ритуалом и подсказкой следующего шага. Если сессия уже
 // идёт, вместо вопроса — где мы сейчас.
 export async function askIntent(ctx: Ctx, user: User, opts: { continue?: boolean; preset?: { minutes: number }; prefix?: string } = {}) {
@@ -96,6 +112,50 @@ export async function askIntent(ctx: Ctx, user: User, opts: { continue?: boolean
     ? T.askContinue
     : T.askIntent(user.ritualText, await intentHint(ctx, user.id))
   await reply(ctx, user, opts.prefix ? `${opts.prefix}\n${text}` : text)
+}
+
+// Постоянная кнопка — это действие, а не вход в анкету. Сессия стартует сразу:
+// работа наследуется из последней реальной сессии, длительность берётся тем же
+// детерминированным правилом, что и обычное предложение. Всё можно изменить уже
+// после старта, но отсутствие ответа не мешает работать и ставить паузу.
+export async function onStartButton(ctx: Ctx, user: User): Promise<void> {
+  const session = await openCollecting(ctx, user.id)
+  if (session.state === 'running') return reply(ctx, user, T.alreadyRunning(endText(ctx, user, session)))
+  if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
+  if (session.intentText !== null) return startRunning(ctx, user, session.id)
+
+  const previous = await ctx.db.focusSession.findFirst({
+    where: { userId: user.id, id: { not: session.id }, state: { in: ['finished', 'abandoned'] }, intentText: { not: null } },
+    orderBy: { createdAt: 'desc' },
+    select: { intentText: true, taskId: true, scope: true },
+  })
+  const previousTask = previous?.taskId
+    ? await ctx.db.task.findFirst({ where: { id: previous.taskId, userId: user.id, status: 'active' }, select: { id: true } })
+    : null
+  const technique: Technique = isTechnique(user.technique) ? user.technique : 'auto'
+  const minutes =
+    session.plannedMinutes ?? (technique === 'auto' ? proposeMinutes(await sessionHistory(ctx, user.id)) : PRESETS[technique].minutes)
+  const rest = technique === 'auto' ? restFor(minutes) : PRESETS[technique].rest
+  const updated = await ctx.db.focusSession.updateMany({
+    where: { id: session.id, userId: user.id, state: 'collecting_intent', intentText: null },
+    data: {
+      intentText: previous?.intentText ?? null,
+      taskId: previousTask?.id ?? null,
+      scope: previous?.scope === 'multi_session' ? 'multi_session' : 'step',
+      plannedMinutes: minutes,
+      minutesSource: 'bot',
+      plannedRestMinutes: rest,
+      technique,
+    },
+  })
+  if (updated.count !== 1) {
+    const active = await activeSession(ctx, user.id)
+    if (active?.state === 'collecting_intent' && active.intentText !== null) return startRunning(ctx, user, active.id)
+    if (active?.state === 'running') return reply(ctx, user, T.alreadyRunning(endText(ctx, user, active)))
+    if (active?.state === 'paused') return reply(ctx, user, T.breakChoice)
+    return reply(ctx, user, T.stale)
+  }
+  await startRunning(ctx, user, session.id)
 }
 
 // Свободный текст вне сессии — это ответ на «с чего начнёшь». Отдельной команды
@@ -170,13 +230,7 @@ async function handleIntent(ctx: Ctx, user: User, session: FocusSession, text: s
     minutes = PRESETS[technique].minutes
     source = 'bot'
   } else {
-    const history = await ctx.db.focusSession.findMany({
-      where: { userId: user.id, state: { in: ['finished', 'abandoned'] } },
-      orderBy: { createdAt: 'desc' },
-      take: 5,
-      select: { state: true, plannedMinutes: true, counted: true, minutesAdjusted: true, restChoice: true },
-    })
-    minutes = proposeMinutes(history)
+    minutes = proposeMinutes(await sessionHistory(ctx, user.id))
     source = 'bot'
   }
   const rest = technique !== 'auto' && named === null ? PRESETS[technique].rest : restFor(minutes)
@@ -323,7 +377,185 @@ export async function startRunning(ctx: Ctx, user: User, sessionId: string): Pro
     if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
     throw error
   }
-  await reply(ctx, user, T.started(minutes, rest, plannedEndAt ? hhmm(plannedEndAt, user.timezone) : null))
+  await reply(
+    ctx,
+    user,
+    T.started(minutes, rest, plannedEndAt ? hhmm(plannedEndAt, user.timezone) : null, session.intentText),
+    runningEditKeyboard(session.id),
+  )
+}
+
+export async function onRunningEdit(
+  ctx: Ctx,
+  user: User,
+  sessionId: string,
+  field: 'work' | 'duration',
+): Promise<void> {
+  const session = await ownedSession(ctx, user.id, sessionId)
+  if (!session || session.state !== 'running') return reply(ctx, user, T.stale)
+  await ctx.db.user.update({
+    where: { id: user.id },
+    data: { pendingInput: `running_${field}:${sessionId}` },
+  })
+  await reply(ctx, user, field === 'work' ? T.askRunningWork : T.askRunningDuration)
+}
+
+export async function onRunningWorkText(ctx: Ctx, user: User, sessionId: string, raw: string): Promise<void> {
+  const text = raw.trim().slice(0, INTENT_MAX)
+  if (!text) return reply(ctx, user, T.askRunningWork)
+  const session = await ownedSession(ctx, user.id, sessionId)
+  if (!session || session.state !== 'running') {
+    await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
+    return reply(ctx, user, T.stale)
+  }
+
+  const tasks = await ctx.db.task.findMany({
+    where: { userId: user.id, status: 'active' },
+    orderBy: { lastSessionAt: 'desc' },
+    take: 20,
+    select: { id: true, title: true },
+  })
+  const parsed = await parseIntent(ctx.llm, { text, tasks, profile: user.profileText })
+  const failure = parsed.failure && !parsed.failure.ok ? parsed.failure.reason : null
+
+  try {
+    await ctx.db.$transaction(async (tx) => {
+      let taskId = parsed.result.taskId
+      let isNewTask = false
+      if (taskId === null) {
+        const task = await tx.task.create({ data: { userId: user.id, title: parsed.result.title, createdAt: ctx.now() } })
+        taskId = task.id
+        isNewTask = true
+      }
+      const changed = await tx.focusSession.updateMany({
+        where: {
+          id: session.id,
+          userId: user.id,
+          state: 'running',
+          intentText: session.intentText,
+          taskId: session.taskId,
+        },
+        data: { intentText: text, taskId, scope: parsed.result.scope },
+      })
+      if (changed.count !== 1) throw new StaleTransition()
+      if (taskId !== session.taskId) {
+        if (session.taskId) {
+          await tx.task.updateMany({
+            where: { id: session.taskId, userId: user.id, sessionsCount: { gt: 0 } },
+            data: { sessionsCount: { decrement: 1 } },
+          })
+        }
+        await tx.task.updateMany({
+          where: { id: taskId, userId: user.id },
+          data: { sessionsCount: { increment: 1 }, lastSessionAt: ctx.now() },
+        })
+      }
+      await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
+      await logEvent(tx, user.id, 'intent_submitted', { length_chars: text.length, named_minutes: false }, { at: ctx.now(), sessionId })
+      await logEvent(
+        tx,
+        user.id,
+        'intent_parsed',
+        { llm_used: parsed.result.llmUsed, task_id: taskId, is_new_task: isNewTask, scope: parsed.result.scope },
+        { at: ctx.now(), sessionId },
+      )
+      if (failure) await logEvent(tx, user.id, 'llm_fallback', { stage: 'intent', reason: failure }, { at: ctx.now() })
+    })
+  } catch (error) {
+    if (error instanceof StaleTransition) {
+      await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
+      return reply(ctx, user, T.stale)
+    }
+    throw error
+  }
+  await reply(ctx, user, T.runningWorkUpdated(text), runningEditKeyboard(session.id))
+}
+
+export async function onRunningDurationText(ctx: Ctx, user: User, sessionId: string, text: string): Promise<void> {
+  const minutes = parseNamedMinutes(text)
+  if (minutes === null) return reply(ctx, user, T.badRunningDuration)
+  const now = ctx.now()
+  const session = await ownedSession(ctx, user.id, sessionId)
+  if (!session || session.state !== 'running' || !session.startedAt) {
+    await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
+    return reply(ctx, user, T.stale)
+  }
+
+  const elapsedMs = activeElapsedMs(session, now)
+  const remainingMs = minutes * MIN - elapsedMs
+  if (remainingMs <= 0) return reply(ctx, user, T.runningDurationTooShort(Math.max(1, Math.ceil(elapsedMs / MIN))))
+  const plannedEndAt = new Date(now.getTime() + remainingMs)
+  const rest = restFor(minutes)
+  const technique: Technique = isTechnique(session.technique ?? '') ? (session.technique as Technique) : 'auto'
+  let pingAt: Date | null = null
+  if (user.pingsEnabled && session.pingAnsweredAt === null && technique !== 'pomodoro' && minutes >= 20) {
+    const candidate = new Date(session.startedAt.getTime() + session.pausedSeconds * 1000 + (minutes / 2) * MIN)
+    if (candidate > now) pingAt = candidate
+  }
+
+  try {
+    await ctx.db.$transaction(async (tx) => {
+      const endKey = `session_end:${session.id}`
+      const endMessage = await tx.outboxMessage.findUnique({ where: { idempotencyKey: endKey } })
+      if (endMessage) {
+        const updated = await tx.outboxMessage.updateMany({
+          where: { id: endMessage.id, userId: user.id, status: { in: ['pending', 'paused', 'canceled'] } },
+          data: { status: 'pending', sendAfter: plannedEndAt, lockedUntil: null },
+        })
+        if (updated.count !== 1) throw new StaleTransition()
+      } else {
+        await enqueue(tx, { userId: user.id, kind: 'session_end', key: endKey, sendAfter: plannedEndAt, payload: { sessionId: session.id } })
+      }
+
+      const pingKey = `ping:${session.id}:1`
+      const pingMessage = await tx.outboxMessage.findUnique({ where: { idempotencyKey: pingKey } })
+      if (pingAt && pingMessage) {
+        const updated = await tx.outboxMessage.updateMany({
+          where: { id: pingMessage.id, userId: user.id, status: { in: ['pending', 'paused', 'canceled'] } },
+          data: { status: 'pending', sendAfter: pingAt, lockedUntil: null },
+        })
+        if (updated.count !== 1) pingAt = null
+      } else if (pingAt) {
+        await enqueue(tx, { userId: user.id, kind: 'ping', key: pingKey, sendAfter: pingAt, payload: { sessionId: session.id, n: 1 } })
+      } else {
+        await cancelPending(tx, { userId: user.id, idempotencyKey: pingKey })
+      }
+
+      const changed = await tx.focusSession.updateMany({
+        where: {
+          id: session.id,
+          userId: user.id,
+          state: 'running',
+          plannedMinutes: session.plannedMinutes,
+          plannedEndAt: session.plannedEndAt,
+        },
+        data: {
+          plannedMinutes: minutes,
+          minutesSource: 'user',
+          minutesAdjusted: session.plannedMinutes !== null && minutes < session.plannedMinutes ? 'down' : 'up',
+          plannedRestMinutes: rest,
+          plannedEndAt,
+          pingAt,
+        },
+      })
+      if (changed.count !== 1) throw new StaleTransition()
+      await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
+      await logEvent(
+        tx,
+        user.id,
+        'session_length_adjusted',
+        { direction: session.plannedMinutes !== null && minutes < session.plannedMinutes ? 'down' : 'up', planned_minutes: minutes },
+        { at: now, sessionId },
+      )
+    })
+  } catch (error) {
+    if (error instanceof StaleTransition) {
+      await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
+      return reply(ctx, user, T.stale)
+    }
+    throw error
+  }
+  await reply(ctx, user, T.runningDurationUpdated(minutes, hhmm(plannedEndAt, user.timezone)), runningEditKeyboard(session.id))
 }
 
 // Вечерняя сводка ставится с первой сессией дня. Бот пишет первым, только пока
@@ -600,6 +832,7 @@ export async function onBreak(ctx: Ctx, user: User): Promise<void> {
         },
         data: { status: 'paused' },
       })
+      await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
       await logEvent(tx, user.id, 'session_paused', { session_id: session.id, elapsed_minutes: Math.floor(activeElapsedMs(session, now) / MIN) }, { at: now, sessionId: session.id })
     })
   } catch (error) {
@@ -672,13 +905,14 @@ export async function onNewAfterBreak(ctx: Ctx, user: User): Promise<void> {
         },
         data: { status: 'canceled' },
       })
+      await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
       await logEvent(tx, user.id, 'session_stopped', { session_id: session.id, elapsed_minutes: elapsed }, { at: now, sessionId: session.id })
     })
   } catch (error) {
     if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
     throw error
   }
-  await askIntent(ctx, user)
+  await onStartButton(ctx, user)
 }
 
 // /stop: running/paused — брошена (очков не даёт), collecting_intent — отменена.
@@ -711,6 +945,7 @@ export async function onStop(ctx: Ctx, user: User): Promise<void> {
         },
         data: { status: 'canceled' },
       })
+      await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
     })
   } catch (error) {
     if (error instanceof StaleTransition) return reply(ctx, user, T.stale)

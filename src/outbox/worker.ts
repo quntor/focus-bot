@@ -97,7 +97,13 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
       return {
         text: T.sessionEnd,
         keyboard: outcomeKeyboard(sessionId),
-        after: (tx) => logEvent(tx, user.id, 'session_end_sent', { session_id: sessionId }, { at: now, sessionId }),
+        after: async (tx) => {
+          await tx.user.updateMany({
+            where: { id: user.id, pendingInput: { in: [`running_work:${sessionId}`, `running_duration:${sessionId}`] } },
+            data: { pendingInput: 'none' },
+          })
+          await logEvent(tx, user.id, 'session_end_sent', { session_id: sessionId }, { at: now, sessionId })
+        },
       }
     }
 

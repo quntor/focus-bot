@@ -35,6 +35,7 @@ model User {
   // время встречи, правку профиля. Состояний мало, и они видны в одной колонке,
   // а не размазаны по памяти процесса.
   // none | timezone | ritual | meeting_time | morning_time | profile | report_text
+  // | running_work:<sessionId> | running_duration:<sessionId>
   pendingInput String @default("none") @map("pending_input")
 
   // Роль на текущий момент: new | active | observer | dormant. История переходов
