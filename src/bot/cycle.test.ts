@@ -78,6 +78,39 @@ describe.skipIf(!hasDb)('полный цикл сессии', () => {
     expect(meeting).not.toBeNull()
   })
 
+  it('подтверждение времени встречи не отменяет такую же встречу по умолчанию', async () => {
+    const bot = makeBot({ now: new Date('2026-09-24T16:51:00Z') })
+    await bot.onboard(A, '19:51')
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    await prisma.user.update({ where: { id: user.id }, data: { morningTime: '08:30' } })
+
+    await bot.text(A, '/today')
+    const before = await prisma.outboxMessage.findFirstOrThrow({ where: { userId: user.id, kind: 'meeting' } })
+    expect(before).toMatchObject({ status: 'pending', payload: { defaulted: true, morning: true } })
+
+    await bot.press(A, 'meet::morning')
+
+    const meetings = await prisma.outboxMessage.findMany({ where: { userId: user.id, kind: 'meeting' } })
+    expect(meetings).toHaveLength(1)
+    expect(meetings[0]).toMatchObject({ status: 'pending', payload: { defaulted: false, morning: true } })
+    expect(meetings[0]?.sendAfter).toEqual(before.sendAfter)
+  })
+
+  it('выбор другого времени отменяет прежнюю встречу и оставляет одну активную', async () => {
+    const bot = makeBot({ now: new Date('2026-09-24T16:51:00Z') })
+    await bot.onboard(A, '19:51')
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    await prisma.user.update({ where: { id: user.id }, data: { morningTime: '08:30' } })
+
+    await bot.text(A, '/today')
+    await bot.press(A, 'meet::custom')
+    await bot.text(A, '09:00')
+
+    const meetings = await prisma.outboxMessage.findMany({ where: { userId: user.id, kind: 'meeting' }, orderBy: { sendAfter: 'asc' } })
+    expect(meetings.map((m) => m.status)).toEqual(['canceled', 'pending'])
+    expect(meetings[1]?.payload).toEqual({ defaulted: false, morning: false })
+  })
+
   it('отключение пингов отменяет уже запланированную проверку', async () => {
     const bot = makeBot()
     await bot.onboard(A)

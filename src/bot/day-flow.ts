@@ -111,11 +111,25 @@ async function putMeeting(
   at: Date,
   opts: { defaulted: boolean; morning: boolean },
 ): Promise<void> {
-  await cancelPending(tx, { userId: user.id, kind: 'meeting' })
+  const key = `meeting:${user.id}:${at.getTime()}`
+  await cancelPending(tx, { userId: user.id, kind: 'meeting', idempotencyKey: { not: key } })
+  const reused = await tx.outboxMessage.updateMany({
+    where: { userId: user.id, kind: 'meeting', idempotencyKey: key, status: { in: ['pending', 'canceled'] } },
+    data: {
+      status: 'pending',
+      sendAfter: at,
+      payload: { defaulted: opts.defaulted, morning: opts.morning },
+      lockedUntil: null,
+      sentAt: null,
+      attempts: 0,
+      lastError: null,
+    },
+  })
+  if (reused.count === 1) return
   await enqueue(tx, {
     userId: user.id,
     kind: 'meeting',
-    key: `meeting:${user.id}:${at.getTime()}`,
+    key,
     sendAfter: at,
     payload: { defaulted: opts.defaulted, morning: opts.morning },
   })
