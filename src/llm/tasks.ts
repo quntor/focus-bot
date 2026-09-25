@@ -95,6 +95,15 @@ const dedupeTitles = (titles: string[]) => {
   return result
 }
 
+const groundedInText = (title: string, text: string) => {
+  const titleWords = words(title).filter((word) => word.length >= 3).map(wordKey)
+  if (!titleWords.length) return false
+  const textWords = new Set(words(text).map(wordKey))
+  if (!textWords.has(titleWords[0]!)) return false
+  const shared = titleWords.filter((word) => textWords.has(word)).length
+  return shared >= Math.min(2, titleWords.length)
+}
+
 export async function parseTaskMessage(
   provider: LlmProvider,
   input: { text: string; tasks: TaskRef[]; currentTaskId: string | null },
@@ -126,7 +135,12 @@ export async function parseTaskMessage(
     if (!value.new_tasks.length || value.complete_task || value.start_task || value.start_title) {
       return { result: null, failure: { ok: false, reason: 'invalid' } }
     }
-    const titles = dedupeTitles(value.new_tasks.map(clean).filter(Boolean))
+    const deduped = dedupeTitles(value.new_tasks.map(clean).filter(Boolean))
+    const activeTitles = new Set(input.tasks.map((task) => titleSignature(task.title).exact))
+    const grounded = deduped.filter(
+      (title) => !activeTitles.has(titleSignature(title).exact) || groundedInText(title, input.text),
+    )
+    const titles = grounded.length ? grounded : deduped
     if (!titles.length) return { result: null, failure: { ok: false, reason: 'invalid' } }
     return { result: { kind: 'capture', titles, llmUsed: true }, failure: null }
   }
