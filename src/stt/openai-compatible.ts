@@ -23,6 +23,7 @@ export function createOpenAiCompatibleSttProvider(options: Options): SttProvider
     async transcribe(req: SttRequest): Promise<string> {
       const form = new FormData()
       form.append('model', options.model)
+      form.append('language', 'ru')
       const audioBuffer = new ArrayBuffer(req.audio.byteLength)
       new Uint8Array(audioBuffer).set(req.audio)
       form.append('file', new File([audioBuffer], req.filename, { type: req.mimeType }))

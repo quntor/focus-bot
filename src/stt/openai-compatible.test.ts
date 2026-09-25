@@ -6,6 +6,7 @@ describe('OpenAI-compatible STT', () => {
     const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const form = init?.body as FormData
       expect(form.get('model')).toBe('openai/whisper-large-v3')
+      expect(form.get('language')).toBe('ru')
       expect(form.get('file')).toBeInstanceOf(File)
       return new Response(JSON.stringify({ text: 'добавь задачу купить корм' }), { status: 200 })
     })
