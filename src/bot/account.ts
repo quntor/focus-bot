@@ -106,7 +106,8 @@ export async function onSetting(ctx: Ctx, user: User, arg: string): Promise<void
           // Настройка действует сразу: уже поставленный пинг текущей сессии тоже
           // не должен отвлекать после явного отключения.
           await cancelPending(tx, { userId: user.id, kind: 'ping' })
-          await tx.focusSession.updateMany({ where: { userId: user.id, state: 'running' }, data: { pingAt: null } })
+          await tx.outboxMessage.updateMany({ where: { userId: user.id, kind: 'ping', status: 'paused' }, data: { status: 'canceled' } })
+          await tx.focusSession.updateMany({ where: { userId: user.id, state: { in: ['running', 'paused'] } }, data: { pingAt: null } })
         }
       } else {
         await tx.user.update({ where: { id: user.id }, data: { proactive: !user.proactive } })

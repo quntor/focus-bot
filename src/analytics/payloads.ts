@@ -54,6 +54,8 @@ export const PAYLOADS = {
     technique: z.enum(TECHNIQUES),
     scope: z.enum(SCOPES),
   }),
+  session_paused: z.strictObject({ session_id: id, elapsed_minutes: minutes }),
+  session_resumed: z.strictObject({ session_id: id, paused_minutes: minutes }),
   session_cancelled: empty,
   session_expired: empty,
   ping_sent: z.strictObject({ session_id: id }),

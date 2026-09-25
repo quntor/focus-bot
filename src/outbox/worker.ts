@@ -140,7 +140,7 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
     const sessionId = String(p.sessionId ?? '')
     const session = await ctx.db.focusSession.findFirst({ where: { id: sessionId, userId: user.id } })
     if (!session || (session.restChoice !== null && session.restChoice !== 'rest')) return { skip: true }
-    const active = await ctx.db.focusSession.count({ where: { userId: user.id, state: 'running' } })
+    const active = await ctx.db.focusSession.count({ where: { userId: user.id, state: { in: ['running', 'paused'] } } })
     if (active > 0) return { skip: true }
     const r = await renderReminder(ctx, user, T.restOver, reminderKeyboard(), true)
     return withEvent(r, (tx) => logEvent(tx, user.id, 'rest_over_sent', { session_id: sessionId }, { at: now, sessionId }))
@@ -148,7 +148,7 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
 
   if (m.kind === 'meeting') {
     if (p.defaulted === true && !user.proactive) return { skip: true }
-    const active = await ctx.db.focusSession.count({ where: { userId: user.id, state: 'running' } })
+    const active = await ctx.db.focusSession.count({ where: { userId: user.id, state: { in: ['running', 'paused'] } } })
     if (active > 0) return { skip: true }
     const today = dayKey(now, user.timezone)
     const goal = await ctx.db.dailyGoal.findUnique({ where: { userId_dayKey: { userId: user.id, dayKey: today } } })
@@ -293,4 +293,3 @@ export async function runOutboxOnce(ctx: Ctx): Promise<number> {
   }
   return batch.length
 }
-

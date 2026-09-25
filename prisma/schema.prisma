@@ -115,6 +115,7 @@ model Task {
 // Сессия — явный конечный автомат, переходы описаны в src/session/fsm.ts.
 //
 //   collecting_intent ── подтверждение ──> running ── отчёт ──> finished
+//                                      └─> paused ──> running | abandoned
 //   collecting_intent ── отмена/таймаут ──> cancelled
 //   running ── /stop или таймаут+1ч ──> abandoned
 //
@@ -128,8 +129,8 @@ model FocusSession {
   taskId String? @map("task_id")
   task   Task?   @relation(fields: [taskId], references: [id], onDelete: SetNull)
 
-  // collecting_intent | running | finished | abandoned | cancelled.
-  // Ровно одна активная (collecting_intent или running) сессия на пользователя
+  // collecting_intent | running | paused | finished | abandoned | cancelled.
+  // Ровно одна активная (collecting_intent, running или paused) сессия на пользователя
   // — частичный уникальный индекс в миграции, а не проверка в коде: два
   // одновременных /focus иначе создали бы две.
   state   String  @default("collecting_intent")
@@ -157,6 +158,10 @@ model FocusSession {
   createdAt      DateTime  @default(now()) @map("created_at")
   startedAt      DateTime? @map("started_at")
   plannedEndAt   DateTime? @map("planned_end_at")
+  // Перерыв замораживает таймер. pausedSeconds нужен, чтобы время отдыха не давало
+  // незаслуженный зачёт сессии; pausedAt переживает перезапуск процесса.
+  pausedAt      DateTime? @map("paused_at")
+  pausedSeconds Int       @default(0) @map("paused_seconds")
   // Время пинга считается при старте и кладётся в outbox. В сессии храним
   // копию, чтобы не ходить в outbox ради ответа на вопрос «когда проверимся».
   pingAt         DateTime? @map("ping_at")
@@ -164,7 +169,7 @@ model FocusSession {
   // Неотвеченные пинги подряд — для свободного режима без планового конца.
   pingsMissed    Int       @default(0) @map("pings_missed")
   finishedAt     DateTime? @map("finished_at")
-  // stop | timeout | no_ping — почему сессия брошена.
+  // stop | new_session | timeout | no_ping — почему сессия брошена.
   abandonReason  String?   @map("abandon_reason")
 
   reportText String? @map("report_text")
@@ -282,7 +287,7 @@ model OutboxMessage {
   // дубля при ретрае воркера, на уровне кода её не гарантировать.
   idempotencyKey String @unique @map("idempotency_key")
 
-  // pending | sending | sent | skipped | failed | uncertain | canceled.
+  // pending | paused | sending | sent | skipped | failed | uncertain | canceled.
   // uncertain — запрос в Telegram ушёл, а ответа нет: доставлено ли, неизвестно.
   // Такое сообщение не переотправляется (дубль хуже потери), но пишется
   // событием outbox_uncertain, чтобы потери было видно.

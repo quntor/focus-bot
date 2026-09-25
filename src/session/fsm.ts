@@ -4,22 +4,24 @@ import type { Db } from '../lib/db.js'
 // Конечный автомат сессии. Состояния и разрешённые переходы — только здесь.
 //
 //   collecting_intent ── подтверждение ──> running ── отчёт ──> finished(outcome)
+//                                      └─> paused ──> running | abandoned
 //   collecting_intent ── отмена/таймаут ──> cancelled
 //   running ── /stop, таймаут+1ч, молчание на пинги ──> abandoned
 //
 // Ответ на пинг — не переход, а событие внутри running.
 // cancelled добавлен к исходной схеме: передумавший на вопросе «с чего начнёшь»
 // не бросал работу, и считать его abandoned значит испортить долю доведённых.
-export const STATES = ['collecting_intent', 'running', 'finished', 'abandoned', 'cancelled'] as const
+export const STATES = ['collecting_intent', 'running', 'paused', 'finished', 'abandoned', 'cancelled'] as const
 export type State = (typeof STATES)[number]
-export const ACTIVE_STATES = ['collecting_intent', 'running'] as const satisfies readonly State[]
+export const ACTIVE_STATES = ['collecting_intent', 'running', 'paused'] as const satisfies readonly State[]
 
 export const OUTCOMES = ['done', 'not_done', 'other'] as const
 export type Outcome = (typeof OUTCOMES)[number]
 
 const TRANSITIONS: Record<State, readonly State[]> = {
   collecting_intent: ['running', 'cancelled'],
-  running: ['finished', 'abandoned'],
+  running: ['paused', 'finished', 'abandoned'],
+  paused: ['running', 'abandoned'],
   finished: [],
   abandoned: [],
   cancelled: [],

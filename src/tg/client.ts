@@ -76,23 +76,32 @@ export async function call(method: string, body: Record<string, unknown>): Promi
 
 export type Button = { text: string; data: string }
 export type Keyboard = Button[][]
+export type ReplyKeyboard = string[][]
 
 // То, чем бот пользуется из Telegram. Интерфейс, а не прямые вызовы: тесты
 // подменяют его и видят каждое отправленное сообщение.
 export interface Telegram {
-  send(chatId: bigint, text: string, keyboard?: Keyboard): Promise<void>
+  send(chatId: bigint, text: string, keyboard?: Keyboard, replyKeyboard?: ReplyKeyboard): Promise<void>
   answerCallback(callbackId: string, text?: string): Promise<void>
   clearKeyboard(chatId: bigint, messageId: number): Promise<void>
 }
 
 export const telegram: Telegram = {
-  async send(chatId, text, keyboard) {
+  async send(chatId, text, keyboard, replyKeyboard) {
     await call('sendMessage', {
       chat_id: chatId.toString(),
       text,
       link_preview_options: { is_disabled: true },
       ...(keyboard
         ? { reply_markup: { inline_keyboard: keyboard.map((row) => row.map((b) => ({ text: b.text, callback_data: b.data }))) } }
+        : replyKeyboard
+          ? {
+              reply_markup: {
+                keyboard: replyKeyboard.map((row) => row.map((text) => ({ text }))),
+                resize_keyboard: true,
+                is_persistent: true,
+              },
+            }
         : {}),
     })
   },

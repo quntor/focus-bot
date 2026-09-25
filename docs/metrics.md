@@ -48,13 +48,15 @@ UPDATE и DELETE запрещены триггером.
 | `intent_parsed` | намерение разобрано | нет | `llm_used`, `task_id`, `is_new_task`, `scope` |
 | `session_length_adjusted` | человек сдвинул предложенную длину | да | `direction`, `planned_minutes` |
 | `session_started` | подтвердил, таймер пошёл | да | `task_id`, `is_new_task`, `planned_minutes`, `planned_rest_minutes`, `minutes_source`, `technique`, `scope` |
+| `session_paused` | нажал «Перерыв» | да | `session_id`, `elapsed_minutes` |
+| `session_resumed` | вернулся к прежней сессии | да | `session_id`, `paused_minutes` |
 | `session_cancelled` | отменил до старта | да | — |
 | `session_expired` | не подтвердил старт за час | нет | — |
 | `ping_sent` | бот спросил «на месте?» | нет | `session_id` |
 | `ping_answered` | ответил на пинг | да | `session_id`, `latency_sec` |
 | `session_end_sent` | бот сказал «время» | нет | `session_id` |
 | `session_completed` | выбрал исход | да | `session_id`, `outcome`, `elapsed_minutes`, `early`, `counted` |
-| `session_stopped` | `/stop` | да | `session_id`, `elapsed_minutes` |
+| `session_stopped` | `/stop` или новая сессия с экрана перерыва | да | `session_id`, `elapsed_minutes` |
 | `session_abandoned` | отчёта нет через час после конца / нет ответа на пинги | нет | `session_id`, `reason` |
 | `report_submitted` | написал пару слов об итоге | да | `session_id`, `length_chars` |
 | `report_parsed` | отчёт разобран | нет | `session_id`, `llm_used`, `progress` |

@@ -1,11 +1,11 @@
 import type { Ctx } from '../bot/context.js'
 import type { LlmProvider } from '../llm/provider.js'
 import { disabledProvider } from '../llm/provider.js'
-import type { Keyboard, Telegram } from '../tg/client.js'
+import type { Keyboard, ReplyKeyboard, Telegram } from '../tg/client.js'
 import { handleUpdate } from '../tg/webhook.js'
 import { prisma } from './db.js'
 
-export type Sent = { chatId: bigint; text: string; keyboard?: Keyboard | undefined }
+export type Sent = { chatId: bigint; text: string; keyboard?: Keyboard | undefined; replyKeyboard?: ReplyKeyboard | undefined }
 
 // Поддельный Telegram: запоминает каждое сообщение. Тесты читают отсюда, что
 // именно увидел пользователь — вплоть до байта.
@@ -15,10 +15,10 @@ export function fakeTelegram(): Telegram & { sent: Sent[]; failNext: unknown[] }
   return {
     sent,
     failNext,
-    async send(chatId, text, keyboard) {
+    async send(chatId, text, keyboard, replyKeyboard) {
       const error = failNext.shift()
       if (error) throw error
-      sent.push({ chatId, text, keyboard })
+      sent.push({ chatId, text, keyboard, replyKeyboard })
     },
     async answerCallback() {},
     async clearKeyboard() {},

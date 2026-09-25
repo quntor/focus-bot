@@ -152,6 +152,10 @@ async function onText(ctx: Ctx, user: User, text: string, created: boolean): Pro
     if (created) return account.sendConsent(ctx, user)
     return reply(ctx, user, T.consentRequired)
   }
+  if (text === T.sessionStartButton) return session.askIntent(ctx, user)
+  if (text === T.sessionBreakButton) return session.onBreak(ctx, user)
+  if (text === T.sessionResumeButton) return session.onResume(ctx, user)
+  if (text === T.sessionNewButton) return session.onNewAfterBreak(ctx, user)
   switch (user.pendingInput) {
     case 'timezone':
       return account.onTimezoneText(ctx, user, text)

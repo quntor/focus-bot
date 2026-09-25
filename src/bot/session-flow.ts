@@ -74,12 +74,22 @@ function endText(ctx: Ctx, user: User, session: FocusSession): string | null {
   return session.plannedEndAt ? hhmm(session.plannedEndAt, user.timezone) : null
 }
 
+function activeElapsedMs(session: FocusSession, now: Date): number {
+  if (!session.startedAt) return 0
+  const currentPause = session.state === 'paused' && session.pausedAt ? Math.max(0, now.getTime() - session.pausedAt.getTime()) : 0
+  return Math.max(0, now.getTime() - session.startedAt.getTime() - session.pausedSeconds * 1000 - currentPause)
+}
+
 // «С чего начнёшь?» — с ритуалом и подсказкой следующего шага. Если сессия уже
 // идёт, вместо вопроса — где мы сейчас.
 export async function askIntent(ctx: Ctx, user: User, opts: { continue?: boolean; preset?: { minutes: number }; prefix?: string } = {}) {
   const session = await openCollecting(ctx, user.id, opts.preset)
   if (session.state === 'running') {
     await reply(ctx, user, T.alreadyRunning(endText(ctx, user, session)))
+    return
+  }
+  if (session.state === 'paused') {
+    await reply(ctx, user, T.breakChoice)
     return
   }
   const text = opts.continue
@@ -94,6 +104,10 @@ export async function onIntentText(ctx: Ctx, user: User, text: string): Promise<
   const session = await openCollecting(ctx, user.id)
   if (session.state === 'running') {
     await reply(ctx, user, T.alreadyRunning(endText(ctx, user, session)))
+    return
+  }
+  if (session.state === 'paused') {
+    await reply(ctx, user, T.breakChoice)
     return
   }
   // Предложение длины уже показано — новый текст уточняет намерение, а не
@@ -351,6 +365,7 @@ export function outcomeKeyboard(sessionId: string): Keyboard {
 
 export async function onDone(ctx: Ctx, user: User): Promise<void> {
   const session = await activeSession(ctx, user.id)
+  if (session?.state === 'paused') return reply(ctx, user, T.breakChoice)
   if (!session || session.state !== 'running') return reply(ctx, user, T.nothingRunning)
   await reply(ctx, user, T.sessionEndEarly, outcomeKeyboard(session.id))
 }
@@ -360,7 +375,7 @@ export async function onOutcome(ctx: Ctx, user: User, sessionId: string, outcome
   const session = await ownedSession(ctx, user.id, sessionId)
   if (!session || session.state !== 'running' || !session.startedAt) return reply(ctx, user, T.stale)
 
-  const elapsed = Math.max(0, Math.floor((now.getTime() - session.startedAt.getTime()) / MIN))
+  const elapsed = Math.floor(activeElapsedMs(session, now) / MIN)
   const counted = isCounted('finished', elapsed)
   const early = session.plannedEndAt !== null && now < session.plannedEndAt
   const day = dayKey(now, user.timezone)
@@ -566,16 +581,121 @@ export async function onRest(
   return next.dayEnd()
 }
 
-// /stop: running — брошена (очков не даёт), collecting_intent — отменена.
+// «Перерыв» не требует заранее решать судьбу текущей сессии. Таймер и сообщения
+// замораживаются; выбор продолжить или начать заново появляется уже на перерыве.
+export async function onBreak(ctx: Ctx, user: User): Promise<void> {
+  const now = ctx.now()
+  const session = await activeSession(ctx, user.id)
+  if (!session || session.state === 'collecting_intent') return reply(ctx, user, T.nothingToPause)
+  if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
+
+  try {
+    await ctx.db.$transaction(async (tx) => {
+      await transition(tx, { sessionId: session.id, userId: user.id }, 'running', 'paused', { pausedAt: now })
+      await tx.outboxMessage.updateMany({
+        where: {
+          userId: user.id,
+          status: 'pending',
+          OR: [{ idempotencyKey: { startsWith: `ping:${session.id}` } }, { idempotencyKey: `session_end:${session.id}` }],
+        },
+        data: { status: 'paused' },
+      })
+      await logEvent(tx, user.id, 'session_paused', { session_id: session.id, elapsed_minutes: Math.floor(activeElapsedMs(session, now) / MIN) }, { at: now, sessionId: session.id })
+    })
+  } catch (error) {
+    if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
+    throw error
+  }
+  await reply(ctx, user, `${T.breakStarted}\n${T.breakChoice}`)
+}
+
+export async function onResume(ctx: Ctx, user: User): Promise<void> {
+  const now = ctx.now()
+  const session = await activeSession(ctx, user.id)
+  if (!session || session.state !== 'paused' || !session.pausedAt) return reply(ctx, user, T.nothingPaused)
+
+  const pauseMs = Math.max(0, now.getTime() - session.pausedAt.getTime())
+  const plannedEndAt = session.plannedEndAt ? new Date(session.plannedEndAt.getTime() + pauseMs) : null
+  const pingAt = session.pingAt && session.pingAt > session.pausedAt ? new Date(session.pingAt.getTime() + pauseMs) : session.pingAt
+
+  try {
+    await ctx.db.$transaction(async (tx) => {
+      await transition(tx, { sessionId: session.id, userId: user.id }, 'paused', 'running', {
+        pausedAt: null,
+        pausedSeconds: { increment: Math.floor(pauseMs / 1000) },
+        plannedEndAt,
+        pingAt,
+      })
+      const held = await tx.outboxMessage.findMany({
+        where: {
+          userId: user.id,
+          status: 'paused',
+          OR: [{ idempotencyKey: { startsWith: `ping:${session.id}` } }, { idempotencyKey: `session_end:${session.id}` }],
+        },
+        select: { id: true, sendAfter: true },
+      })
+      for (const message of held) {
+        await tx.outboxMessage.update({
+          where: { id: message.id },
+          data: { status: 'pending', sendAfter: new Date(message.sendAfter.getTime() + pauseMs) },
+        })
+      }
+      await logEvent(tx, user.id, 'session_resumed', { session_id: session.id, paused_minutes: Math.floor(pauseMs / MIN) }, { at: now, sessionId: session.id })
+    })
+  } catch (error) {
+    if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
+    throw error
+  }
+  await reply(ctx, user, T.breakResumed(plannedEndAt ? hhmm(plannedEndAt, user.timezone) : null))
+}
+
+export async function onNewAfterBreak(ctx: Ctx, user: User): Promise<void> {
+  const now = ctx.now()
+  const session = await activeSession(ctx, user.id)
+  if (!session || session.state !== 'paused' || !session.pausedAt) return reply(ctx, user, T.nothingPaused)
+  const pauseMs = Math.max(0, now.getTime() - session.pausedAt.getTime())
+  const elapsed = Math.floor(activeElapsedMs(session, now) / MIN)
+
+  try {
+    await ctx.db.$transaction(async (tx) => {
+      await transition(tx, { sessionId: session.id, userId: user.id }, 'paused', 'abandoned', {
+        pausedAt: null,
+        pausedSeconds: { increment: Math.floor(pauseMs / 1000) },
+        finishedAt: now,
+        abandonReason: 'new_session',
+      })
+      await tx.outboxMessage.updateMany({
+        where: {
+          userId: user.id,
+          status: { in: ['pending', 'paused'] },
+          OR: [{ idempotencyKey: { startsWith: `ping:${session.id}` } }, { idempotencyKey: `session_end:${session.id}` }],
+        },
+        data: { status: 'canceled' },
+      })
+      await logEvent(tx, user.id, 'session_stopped', { session_id: session.id, elapsed_minutes: elapsed }, { at: now, sessionId: session.id })
+    })
+  } catch (error) {
+    if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
+    throw error
+  }
+  await askIntent(ctx, user)
+}
+
+// /stop: running/paused — брошена (очков не даёт), collecting_intent — отменена.
 export async function onStop(ctx: Ctx, user: User): Promise<void> {
   const now = ctx.now()
   const session = await activeSession(ctx, user.id)
   if (!session) return reply(ctx, user, T.nothingRunning)
   try {
     await ctx.db.$transaction(async (tx) => {
-      if (session.state === 'running') {
-        const elapsed = session.startedAt ? Math.max(0, Math.floor((now.getTime() - session.startedAt.getTime()) / MIN)) : 0
-        await transition(tx, { sessionId: session.id, userId: user.id }, 'running', 'abandoned', { finishedAt: now, abandonReason: 'stop' })
+      if (session.state === 'running' || session.state === 'paused') {
+        const elapsed = Math.floor(activeElapsedMs(session, now) / MIN)
+        const pauseMs = session.state === 'paused' && session.pausedAt ? Math.max(0, now.getTime() - session.pausedAt.getTime()) : 0
+        await transition(tx, { sessionId: session.id, userId: user.id }, session.state, 'abandoned', {
+          finishedAt: now,
+          abandonReason: 'stop',
+          ...(session.state === 'paused' ? { pausedAt: null, pausedSeconds: { increment: Math.floor(pauseMs / 1000) } } : {}),
+        })
         await logEvent(tx, user.id, 'session_stopped', { session_id: session.id, elapsed_minutes: elapsed }, { at: now, sessionId: session.id })
       } else {
         await transition(tx, { sessionId: session.id, userId: user.id }, 'collecting_intent', 'cancelled', { finishedAt: now })
@@ -583,10 +703,18 @@ export async function onStop(ctx: Ctx, user: User): Promise<void> {
       }
       await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `ping:${session.id}` } })
       await cancelPending(tx, { userId: user.id, idempotencyKey: `session_end:${session.id}` })
+      await tx.outboxMessage.updateMany({
+        where: {
+          userId: user.id,
+          status: 'paused',
+          OR: [{ idempotencyKey: { startsWith: `ping:${session.id}` } }, { idempotencyKey: `session_end:${session.id}` }],
+        },
+        data: { status: 'canceled' },
+      })
     })
   } catch (error) {
     if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
     throw error
   }
-  await reply(ctx, user, session.state === 'running' ? T.stopped : T.cancelled)
+  await reply(ctx, user, session.state === 'running' || session.state === 'paused' ? T.stopped : T.cancelled)
 }

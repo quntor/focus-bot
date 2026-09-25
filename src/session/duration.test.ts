@@ -47,7 +47,15 @@ describe('предложение длины', () => {
 describe('автомат сессии', () => {
   it('разрешены только переходы из схемы', () => {
     const allowed = STATES.flatMap((from) => STATES.filter((to) => canTransition(from, to)).map((to) => `${from}>${to}`))
-    expect(allowed.sort()).toEqual(['collecting_intent>cancelled', 'collecting_intent>running', 'running>abandoned', 'running>finished'])
+    expect(allowed.sort()).toEqual([
+      'collecting_intent>cancelled',
+      'collecting_intent>running',
+      'paused>abandoned',
+      'paused>running',
+      'running>abandoned',
+      'running>finished',
+      'running>paused',
+    ])
   })
   it('abandoned и finished — конечные', () => {
     expect(canTransition('abandoned', 'finished')).toBe(false)
