@@ -35,19 +35,16 @@ describe('разбор сообщения со списком задач', () =>
     expect(parsed.result).toEqual({ kind: 'capture', titles: ['Доделать выкат', 'Поправить ошибки'], llmUsed: true })
   })
 
-  it('разделяет активные задачи во входе и новые задачи в ответе', async () => {
+  it('не передаёт активные задачи модели при захвате списка', async () => {
     const observed: LlmProvider = {
       enabled: true,
       async complete(req) {
         expect(JSON.parse(req.input)).toEqual({
           text: 'Нужно доделать выкат и поправить ошибки',
-          active_tasks: [
-            { label: 't1', title: 'Подготовить презентацию' },
-            { label: 't2', title: 'Позвонить Ивану' },
-          ],
+          active_tasks: [],
           current_task: null,
         })
-        expect(req.system).toContain('new_tasks')
+        expect(req.system).toContain('полного упорядоченного списка')
         return '{"kind":"capture","new_tasks":["Доделать выкат","Поправить ошибки"]}'
       },
     }
@@ -67,6 +64,7 @@ describe('разбор сообщения со списком задач', () =>
       async complete(req) {
         const hasCoverageRule = req.system.includes('каждое явно названное самостоятельное действие')
         const hasDedupeRule = req.system.includes('Фрагмент без личной формы глагола')
+        expect(JSON.parse(req.input).active_tasks).toEqual([])
         return hasCoverageRule && hasDedupeRule
           ? JSON.stringify({
               kind: 'capture',
@@ -76,7 +74,6 @@ describe('разбор сообщения со списком задач', () =>
                 'Запустить умные функции FocusBot',
                 'Сделать планирование дня',
                 'Планирование дня',
-                'Перенос Милавицы на vds',
               ],
             })
           : JSON.stringify({
@@ -209,8 +206,22 @@ describe('разбор сообщения со списком задач', () =>
   })
 
   it('переводит только временные метки своих задач в id', async () => {
+    const switching: LlmProvider = {
+      enabled: true,
+      async complete(req) {
+        expect(JSON.parse(req.input)).toEqual({
+          text: 'Первую сделал, перехожу ко второй',
+          active_tasks: [
+            { label: 't1', title: 'Подготовить презентацию' },
+            { label: 't2', title: 'Позвонить Ивану' },
+          ],
+          current_task: 't1',
+        })
+        return '{"kind":"complete_and_start","new_tasks":[],"complete_task":"t1","start_task":"t2","start_title":null}'
+      },
+    }
     const parsed = await parseTaskMessage(
-      provider('{"kind":"complete_and_start","new_tasks":[],"complete_task":"t1","start_task":"t2","start_title":null}'),
+      switching,
       { text: 'Первую сделал, перехожу ко второй', tasks, currentTaskId: 'own-a' },
     )
 
