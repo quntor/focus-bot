@@ -1,0 +1,16 @@
+[Unit]
+Description=Deploy focus-bot main after successful GitHub CI
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/sbin/focus-bot-auto-deploy
+TimeoutStartSec=20min
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

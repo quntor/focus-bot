@@ -104,3 +104,36 @@ docker compose --env-file .env.production -f compose.prod.yml run --rm app \
 Проверить `getWebhookInfo` и пройти `/start` нужно до приглашения тестировщиков.
 При откате приложение останавливается тем же compose-файлом; volume `pgdata` не
 удалять. Перед обновлениями с реальными пользователями делать `pg_dump`.
+
+## Автоматическое обновление `main`
+
+Production не принимает входящие команды от GitHub и не хранит GitHub token.
+Root-owned systemd timer раз в две минуты запускает `deploy/auto-deploy.sh`:
+
+1. читает точный SHA публичной ветки `main` через `git ls-remote`;
+2. через публичный GitHub API требует успешный workflow `CI` именно для этого SHA;
+3. скачивает HTTPS-архив exact commit, отклоняет небезопасные пути;
+4. создаёт mode-`600` backup БД, исходников и `.env.production` вне build context;
+5. атомарно меняет дерево исходников, запускает Compose migration/build/update;
+6. ждёт container health и внешний `https://$DOMAIN/healthz = ok`, только затем
+   записывает полный SHA в `.release-commit`.
+
+При ошибке исходники возвращаются на предыдущую версию и Compose поднимает её
+снова; миграции поэтому обязаны быть обратно совместимыми минимум с предыдущим
+релизом. Хранятся пять последних комплектов backup. Новых публичных портов нет.
+
+Первичная установка или восстановление таймера выполняется после проверенного
+ручного релиза:
+
+```bash
+install -m 755 deploy/auto-deploy.sh /usr/local/sbin/focus-bot-auto-deploy
+install -m 644 deploy/focus-bot-auto-deploy.{service,timer} /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now focus-bot-auto-deploy.timer
+```
+
+Без изменения production проверить решение `main` и CI можно безопасно:
+
+```bash
+FOCUS_DEPLOY_CHECK_ONLY=1 ./deploy/auto-deploy.sh
+```

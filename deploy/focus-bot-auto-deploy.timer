@@ -1,0 +1,12 @@
+[Unit]
+Description=Check focus-bot main for a CI-approved release
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=2min
+RandomizedDelaySec=15s
+Persistent=true
+Unit=focus-bot-auto-deploy.service
+
+[Install]
+WantedBy=timers.target
