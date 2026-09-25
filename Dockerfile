@@ -1,4 +1,6 @@
-FROM node:24-alpine AS build
+ARG NODE_IMAGE=mirror.gcr.io/library/node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
+
+FROM ${NODE_IMAGE} AS build
 WORKDIR /app
 COPY package*.json ./
 COPY prisma ./prisma
@@ -6,7 +8,7 @@ RUN npm ci
 COPY . .
 RUN npx prisma generate && npm run build
 
-FROM node:24-alpine
+FROM ${NODE_IMAGE}
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package*.json ./
