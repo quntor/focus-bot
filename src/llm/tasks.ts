@@ -126,10 +126,7 @@ export async function parseTaskMessage(
     if (!value.new_tasks.length || value.complete_task || value.start_task || value.start_title) {
       return { result: null, failure: { ok: false, reason: 'invalid' } }
     }
-    const deduped = dedupeTitles(value.new_tasks.map(clean).filter(Boolean))
-    const activeTitles = new Set(input.tasks.map((task) => titleSignature(task.title).exact))
-    const newTitles = deduped.filter((title) => !activeTitles.has(titleSignature(title).exact))
-    const titles = newTitles.length ? newTitles : deduped
+    const titles = dedupeTitles(value.new_tasks.map(clean).filter(Boolean))
     if (!titles.length) return { result: null, failure: { ok: false, reason: 'invalid' } }
     return { result: { kind: 'capture', titles, llmUsed: true }, failure: null }
   }

@@ -41,6 +41,34 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     expect(running.intentText).toBe('Купить корм')
   })
 
+  it('показывает весь повторный список и создаёт только отсутствующие задачи', async () => {
+    const repeated = llm(
+      '{"kind":"capture","new_tasks":["Доделать выкат Милавицы на VDS","Поправить все косяки","Запустить умные функции FocusBot","Сделать функцию планирования дня"]}',
+    )
+    const transcript =
+      'Мне завтра нужно доделать выкат Милавицы на VDS и поправить все косяки. Второе про FocusBot. Нужно запустить умные функции. Надо сделать функцию планирования дня.'
+    const stt: SttProvider = { enabled: true, async transcribe() { return transcript } }
+    const bot = makeBot({ llm: repeated, stt })
+    bot.tg.downloads.set('voice-repeat', new Uint8Array([1, 2, 3]))
+    await bot.onboard(B)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(B) } })
+    await prisma.task.createMany({
+      data: [
+        { userId: user.id, title: 'Доделать выкат Милавицы на VDS' },
+        { userId: user.id, title: 'Запустить умные функции FocusBot' },
+        { userId: user.id, title: 'Сделать функцию планирования дня' },
+      ],
+    })
+
+    await bot.voice(B, { fileId: 'voice-repeat', duration: 30, mimeType: 'audio/ogg', fileSize: 3 })
+
+    expect(await prisma.task.count({ where: { userId: user.id } })).toBe(4)
+    expect(bot.lastText(B)).toContain('Доделать выкат Милавицы на VDS')
+    expect(bot.lastText(B)).toContain('Поправить все косяки')
+    expect(bot.lastText(B)).toContain('Запустить умные функции FocusBot')
+    expect(bot.lastText(B)).toContain('Сделать функцию планирования дня')
+  })
+
   it('распознаёт voice в памяти и пропускает через тот же парсер', async () => {
     const stt: SttProvider = {
       enabled: true,
