@@ -75,6 +75,8 @@ fi
 mkdir -p -m 700 "$BACKUP_ROOT"
 tmp_dir=$(mktemp -d /opt/.focus-bot-deploy.XXXXXX)
 old_dir="$tmp_dir/previous"
+old_app_image=''
+old_migrate_image=''
 deployed=0
 
 rollback() {
@@ -84,8 +86,14 @@ rollback() {
       mv -- "$APP_DIR" "$tmp_dir/failed"
     fi
     mv -- "$old_dir" "$APP_DIR"
-    docker compose --env-file "$APP_DIR/.env.production" -f "$APP_DIR/compose.prod.yml" up -d --build --remove-orphans || true
-    docker compose --env-file "$APP_DIR/.env.production" -f "$APP_DIR/compose.prod.yml" up -d --force-recreate caddy || true
+    if [[ -n "$old_app_image" ]]; then
+      docker image tag "$old_app_image" focus-bot-app:latest || true
+    fi
+    if [[ -n "$old_migrate_image" ]]; then
+      docker image tag "$old_migrate_image" focus-bot-migrate:latest || true
+    fi
+    docker compose --env-file "$APP_DIR/.env.production" -f "$APP_DIR/compose.prod.yml" \
+      up -d --no-build --remove-orphans --force-recreate app caddy || true
   fi
 }
 
@@ -110,13 +118,48 @@ curl --fail --silent --show-error --location --retry 3 \
   "https://github.com/${REPOSITORY}/archive/${desired_sha}.tar.gz" \
   --output "$archive"
 
-if tar -tzf "$archive" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
-  die 'unsafe path in release archive'
+if ! python3 - "$archive" <<'PY'
+import pathlib
+import sys
+import tarfile
+
+with tarfile.open(sys.argv[1], "r:gz") as archive:
+    for member in archive.getmembers():
+        path = pathlib.PurePosixPath(member.name)
+        if path.is_absolute() or ".." in path.parts or not (member.isfile() or member.isdir()):
+            raise SystemExit(1)
+PY
+then
+  die 'unsafe member in release archive'
 fi
 tar -xzf "$archive" -C "$tmp_dir"
 stage_dir="$tmp_dir/focus-bot-${desired_sha}"
 [[ -f "$stage_dir/compose.prod.yml" && -f "$stage_dir/package-lock.json" && -x "$stage_dir/deploy/auto-deploy.sh" ]] ||
   die 'release archive is incomplete'
+install -m 600 "$APP_DIR/.env.production" "$stage_dir/.env.production"
+chown -R root:root "$stage_dir"
+
+docker compose -p focus-bot --env-file "$stage_dir/.env.production" -f "$stage_dir/compose.prod.yml" config --quiet
+
+old_app_id=$(docker compose --env-file "$APP_DIR/.env.production" -f "$APP_DIR/compose.prod.yml" ps -q app)
+if [[ -n "$old_app_id" ]]; then
+  old_app_image=$(docker inspect --format '{{.Image}}' "$old_app_id")
+fi
+old_migrate_image=$(docker image inspect focus-bot-migrate:latest --format '{{.Id}}' 2>/dev/null || true)
+
+build_ok=0
+for attempt in 1 2 3; do
+  log "building ${desired_sha} (attempt ${attempt}/3)"
+  if docker compose -p focus-bot --env-file "$stage_dir/.env.production" -f "$stage_dir/compose.prod.yml" \
+    build app migrate; then
+    build_ok=1
+    break
+  fi
+  if [[ $attempt -lt 3 ]]; then
+    sleep $((attempt * 15))
+  fi
+done
+[[ $build_ok -eq 1 ]] || die 'image build failed after three attempts'
 
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 backup_dir="$BACKUP_ROOT/${timestamp}-${current_sha:-unknown}-to-${desired_sha:0:8}"
@@ -131,12 +174,11 @@ install -m 600 "$APP_DIR/.env.production" "$backup_dir/env.production"
 
 mv -- "$APP_DIR" "$old_dir"
 mv -- "$stage_dir" "$APP_DIR"
-install -m 600 "$backup_dir/env.production" "$APP_DIR/.env.production"
 chown -R root:root "$APP_DIR"
 
 docker compose --env-file "$APP_DIR/.env.production" -f "$APP_DIR/compose.prod.yml" config --quiet
 log "deploying ${desired_sha}"
-docker compose --env-file "$APP_DIR/.env.production" -f "$APP_DIR/compose.prod.yml" up -d --build --remove-orphans
+docker compose --env-file "$APP_DIR/.env.production" -f "$APP_DIR/compose.prod.yml" up -d --no-build --remove-orphans
 
 app_id=$(docker compose --env-file "$APP_DIR/.env.production" -f "$APP_DIR/compose.prod.yml" ps -q app)
 [[ -n "$app_id" ]] || die 'app container is missing'
@@ -158,13 +200,6 @@ domain=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$c
 [[ $(curl --fail --silent --show-error --location --retry 3 --proto '=https' --tlsv1.2 "https://${domain}/healthz") == 'ok' ]] ||
   die 'external health check failed'
 
-printf '%s\n' "$desired_sha" > "$APP_DIR/.release-commit"
-chmod 644 "$APP_DIR/.release-commit"
-install -m 755 "$APP_DIR/deploy/auto-deploy.sh" /usr/local/sbin/focus-bot-auto-deploy
-install -m 644 "$APP_DIR/deploy/focus-bot-auto-deploy.service" /etc/systemd/system/focus-bot-auto-deploy.service
-install -m 644 "$APP_DIR/deploy/focus-bot-auto-deploy.timer" /etc/systemd/system/focus-bot-auto-deploy.timer
-systemctl daemon-reload
-
 mapfile -t backups < <(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -name '20*' -printf '%f\n' | sort -r)
 if (( ${#backups[@]} > KEEP_BACKUPS )); then
   for old_backup in "${backups[@]:KEEP_BACKUPS}"; do
@@ -173,6 +208,13 @@ if (( ${#backups[@]} > KEEP_BACKUPS )); then
     rm -rf -- "$target"
   done
 fi
+
+printf '%s\n' "$desired_sha" > "$APP_DIR/.release-commit"
+chmod 644 "$APP_DIR/.release-commit"
+install -m 755 "$APP_DIR/deploy/auto-deploy.sh" /usr/local/sbin/focus-bot-auto-deploy
+install -m 644 "$APP_DIR/deploy/focus-bot-auto-deploy.service" /etc/systemd/system/focus-bot-auto-deploy.service
+install -m 644 "$APP_DIR/deploy/focus-bot-auto-deploy.timer" /etc/systemd/system/focus-bot-auto-deploy.timer
+systemctl daemon-reload
 
 deployed=1
 log "deployed ${desired_sha}; backup ${backup_dir}"
