@@ -2,6 +2,7 @@
 // и ручной ввод, поэтому у меню нет отдельной логики и отдельного состояния.
 export const BOT_COMMANDS = [
   { command: 'focus', description: 'Начать фокус-сессию' },
+  { command: 'tasks', description: 'Показать мои задачи' },
   { command: 'done', description: 'Закончить текущую сессию' },
   { command: 'stop', description: 'Бросить текущую сессию' },
   { command: 'goal', description: 'Задать цель на день' },

@@ -65,6 +65,7 @@ export const T = {
   sessionBreakButton: 'Перерыв',
   sessionResumeButton: 'Вернуться к работе',
   sessionNewButton: 'Начать новую сессию',
+  tasksButton: 'Мои задачи',
 
   // --- Список задач и голос.
   voiceTooLong: 'Голосовое должно быть не длиннее 3 минут.',
@@ -76,6 +77,22 @@ export const T = {
   tasksParseFailed: 'Не смог надёжно разобрать список. Напиши задачи отдельными пунктами или по одной.',
   tasksCaptured: (tasks: string[]) =>
     [`В списке ${tasks.length} ${plural(tasks.length, 'задача', 'задачи', 'задач')}:`, ...tasks.map((task, i) => `${i + 1}. ${task}`), '', 'Что берём сейчас?'].join('\n'),
+  tasksEmpty: 'Активных задач пока нет. Надиктуй или напиши, что нужно сделать.',
+  tasksChoose: 'Таймер уже идёт. Выбери задачу для этой сессии — отсчёт продолжится без перезапуска.',
+  tasksList: (tasks: string[], page: number, pages: number, notice?: string) =>
+    [
+      notice,
+      `Активные задачи${pages > 1 ? ` — страница ${page + 1} из ${pages}` : ''}:`,
+      ...tasks.map((task, i) => `${page * 6 + i + 1}. ${task}`),
+      '',
+      '▶️ — начать сессию, 🗑 — убрать из списка.',
+    ].filter(Boolean).join('\n'),
+  taskDropped: (task: string) => `Убрал «${task}» из активных задач.`,
+  taskRestored: (task: string) => `Вернул «${task}» в активные задачи.`,
+  taskDropActive: 'Эта задача сейчас идёт в текущей сессии. Сначала закончи её или останови сессию.',
+  taskRestoreButton: '↩️ Вернуть',
+  taskSelectedRunning: (task: string, end: string | null) =>
+    `Текущая сессия теперь по задаче «${task}». Таймер продолжает идти${end ? ` до ${end}` : ''}.`,
   taskSwitchMismatch: 'Не уверен, какую текущую задачу завершить. Назови её точнее — ничего пока не менял.',
   taskSwitchPaused: 'Сессия на перерыве. Сначала вернись к работе, затем напиши, что закончил и к чему переходишь.',
   taskSwitched: (done: string, next: string) => `«${done}» отметил готовой. Перехожу к «${next}».`,
@@ -263,7 +280,7 @@ export const T = {
 
   help:
     'Просто напиши, с чего начнёшь, — я засеку время.\n' +
-    '/focus — начать сессию\n/done — закончить раньше\n/stop — бросить сессию\n' +
+    '/focus — начать сессию\n/tasks — мои задачи\n/done — закончить раньше\n/stop — бросить сессию\n' +
     '/today — на сегодня всё\n/goal — цель на день\n/dayoff — завтра выходной\n/settings — настройки\n' +
     '/profile — что я о тебе помню\n/delete_me — удалить все данные',
 

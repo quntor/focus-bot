@@ -50,6 +50,6 @@ async function sessionKeyboard(ctx: Ctx, userId: string): Promise<ReplyKeyboard 
   if (!user?.consentAt) return undefined
   const paused = await ctx.db.focusSession.count({ where: { userId, state: 'paused' } })
   return paused > 0
-    ? [[T.sessionResumeButton, T.sessionNewButton]]
-    : [[T.sessionStartButton, T.sessionBreakButton]]
+    ? [[T.sessionResumeButton, T.sessionNewButton], [T.tasksButton]]
+    : [[T.sessionStartButton, T.sessionBreakButton], [T.tasksButton]]
 }

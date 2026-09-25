@@ -162,14 +162,49 @@ export async function onStartButton(ctx: Ctx, user: User): Promise<void> {
   await startRunning(ctx, user, session.id)
 }
 
-// Выбор из списка задач пропускает повторный LLM-разбор: taskId уже выбран
-// человеком кнопкой, а владение проверено запросом по userId.
+// Выбор из списка задач пропускает повторный LLM-разбор. Если таймер уже идёт,
+// меняем задачу внутри той же сессии, не сдвигая startedAt и plannedEndAt.
 export async function startTaskSession(ctx: Ctx, user: User, taskId: string): Promise<void> {
   const task = await ctx.db.task.findFirst({ where: { id: taskId, userId: user.id, status: 'active' } })
   if (!task) return reply(ctx, user, T.stale)
 
-  const session = await openCollecting(ctx, user.id)
-  if (session.state === 'running') return reply(ctx, user, T.alreadyRunning(endText(ctx, user, session)))
+  const active = await activeSession(ctx, user.id)
+  if (active?.state === 'running') {
+    try {
+      await ctx.db.$transaction(async (tx) => {
+        const selected = await tx.task.updateMany({
+          where: { id: task.id, userId: user.id, status: 'active' },
+          data: { status: 'active' },
+        })
+        if (selected.count !== 1) throw new StaleTransition()
+        const changed = await tx.focusSession.updateMany({
+          where: { id: active.id, userId: user.id, state: 'running', taskId: active.taskId },
+          data: { intentText: task.title, taskId: task.id, scope: 'step' },
+        })
+        if (changed.count !== 1) throw new StaleTransition()
+        if (active.taskId !== task.id) {
+          if (active.taskId) {
+            await tx.task.updateMany({
+              where: { id: active.taskId, userId: user.id, sessionsCount: { gt: 0 } },
+              data: { sessionsCount: { decrement: 1 } },
+            })
+          }
+          await tx.task.updateMany({
+            where: { id: task.id, userId: user.id, status: 'active' },
+            data: { sessionsCount: { increment: 1 }, lastSessionAt: ctx.now() },
+          })
+        }
+        await logEvent(tx, user.id, 'task_selected', { task_id: task.id }, { at: ctx.now(), sessionId: active.id })
+      })
+    } catch (error) {
+      if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
+      throw error
+    }
+    await reply(ctx, user, T.taskSelectedRunning(task.title, endText(ctx, user, active)), runningEditKeyboard(active.id))
+    return
+  }
+  if (active?.state === 'paused') return reply(ctx, user, T.breakChoice)
+  const session = active ?? await openCollecting(ctx, user.id)
   if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
 
   const technique: Technique = isTechnique(user.technique) ? user.technique : 'auto'
@@ -919,7 +954,7 @@ export async function onResume(ctx: Ctx, user: User): Promise<void> {
   await reply(ctx, user, T.breakResumed(plannedEndAt ? hhmm(plannedEndAt, user.timezone) : null))
 }
 
-export async function onNewAfterBreak(ctx: Ctx, user: User): Promise<void> {
+export async function onNewAfterBreak(ctx: Ctx, user: User, afterClose?: () => Promise<void>): Promise<void> {
   const now = ctx.now()
   const session = await activeSession(ctx, user.id)
   if (!session || session.state !== 'paused' || !session.pausedAt) return reply(ctx, user, T.nothingPaused)
@@ -949,7 +984,8 @@ export async function onNewAfterBreak(ctx: Ctx, user: User): Promise<void> {
     if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
     throw error
   }
-  await onStartButton(ctx, user)
+  if (afterClose) await afterClose()
+  else await onStartButton(ctx, user)
 }
 
 // /stop: running/paused — брошена (очков не даёт), collecting_intent — отменена.

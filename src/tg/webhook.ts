@@ -140,7 +140,9 @@ async function onCommand(ctx: Ctx, user: User, command: string, args: string, cr
   switch (command) {
     case 'focus':
       if (args) return session.onIntentText(ctx, user, args)
-      return session.askIntent(ctx, user)
+      return tasks.onSessionStart(ctx, user)
+    case 'tasks':
+      return tasks.showTasks(ctx, user)
     case 'done':
       return session.onDone(ctx, user)
     case 'stop':
@@ -169,10 +171,11 @@ async function onText(ctx: Ctx, user: User, text: string, created: boolean): Pro
     if (created) return account.sendConsent(ctx, user)
     return reply(ctx, user, T.consentRequired)
   }
-  if (text === T.sessionStartButton) return session.onStartButton(ctx, user)
+  if (text === T.sessionStartButton) return tasks.onSessionStart(ctx, user)
+  if (text === T.tasksButton) return tasks.showTasks(ctx, user)
   if (text === T.sessionBreakButton) return session.onBreak(ctx, user)
   if (text === T.sessionResumeButton) return session.onResume(ctx, user)
-  if (text === T.sessionNewButton) return session.onNewAfterBreak(ctx, user)
+  if (text === T.sessionNewButton) return session.onNewAfterBreak(ctx, user, () => tasks.onSessionStart(ctx, user))
   const runningEdit = /^running_(work|duration):([0-9a-f-]{36})$/.exec(user.pendingInput)
   if (runningEdit?.[1] === 'work' && runningEdit[2]) return session.onRunningWorkText(ctx, user, runningEdit[2], text)
   if (runningEdit?.[1] === 'duration' && runningEdit[2]) return session.onRunningDurationText(ctx, user, runningEdit[2], text)
@@ -267,6 +270,11 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
         break
       case 'task':
         if (id && arg === 'start') return await tasks.onTaskSelected(ctx, user, id)
+        if (id && arg === 'drop') return await tasks.onTaskDropped(ctx, user, id)
+        if (id && arg === 'restore') return await tasks.onTaskRestored(ctx, user, id)
+        break
+      case 'tasks':
+        if (arg) return await tasks.onTasksPage(ctx, user, arg)
         break
     }
   } catch (error) {

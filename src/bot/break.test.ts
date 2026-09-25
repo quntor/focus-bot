@@ -15,6 +15,7 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
 
     expect((bot.tg.sent.at(-1) as { replyKeyboard?: string[][] } | undefined)?.replyKeyboard).toEqual([
       ['Начать сессию', 'Перерыв'],
+      ['Мои задачи'],
     ])
   })
 
@@ -52,8 +53,8 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
       plannedMinutes: 40,
       minutesSource: 'bot',
     })
-    expect(bot.lastText(A)).toContain('«набросать план главы, 25 минут»')
-    expect(bot.lastText(A)).toContain('40 минут')
+    expect(bot.textsTo(A).some((text) => text.includes('«набросать план главы, 25 минут»'))).toBe(true)
+    expect(bot.textsTo(A).some((text) => text.includes('40 минут'))).toBe(true)
   })
 
   it('после старта меняет работу и общую длительность без перезапуска сессии', async () => {
@@ -111,6 +112,7 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
     expect((paused as { pausedAt?: Date | null }).pausedAt).toEqual(bot.now())
     expect((bot.tg.sent.at(-1) as { replyKeyboard?: string[][] } | undefined)?.replyKeyboard).toEqual([
       ['Вернуться к работе', 'Начать новую сессию'],
+      ['Мои задачи'],
     ])
     expect(await prisma.outboxMessage.findFirstOrThrow({ where: { idempotencyKey: `session_end:${running.id}` } })).toMatchObject({
       status: 'paused',
@@ -132,6 +134,7 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
     })
     expect((bot.tg.sent.at(-1) as { replyKeyboard?: string[][] } | undefined)?.replyKeyboard).toEqual([
       ['Начать сессию', 'Перерыв'],
+      ['Мои задачи'],
     ])
 
     bot.advance(30)
@@ -164,7 +167,7 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
     ).toEqual([])
     const next = await prisma.focusSession.findFirstOrThrow({ where: { userId: old.userId, state: 'running' } })
     expect(next).toMatchObject({ intentText: old.intentText, taskId: old.taskId, plannedMinutes: 40 })
-    expect(bot.lastText(A)).toContain('40 минут')
+    expect(bot.lastText(A)).toContain('Таймер уже идёт')
 
     const stopped = await prisma.event.findFirstOrThrow({ where: { sessionId: old.id, type: 'session_stopped' } })
     expect(stopped.payload).toMatchObject({ session_id: old.id, elapsed_minutes: 10 })

@@ -9,7 +9,7 @@ import { StaleTransition, transition } from '../session/fsm.js'
 import { TelegramError, type Keyboard } from '../tg/client.js'
 import { cb } from './callbacks.js'
 import { reply, type Ctx } from './context.js'
-import { activeElapsedMinutes, activeSession, onIntentText, startTaskSession } from './session-flow.js'
+import { activeElapsedMinutes, activeSession, onIntentText, onStartButton, startTaskSession } from './session-flow.js'
 import { T } from './texts.js'
 
 export type TaskInputSource = 'text' | 'voice'
@@ -53,14 +53,102 @@ export function shouldParseTaskMessage(text: string): boolean {
   ].some((pattern) => pattern.test(compact))
 }
 
-function taskKeyboard(tasks: { id: string; title: string }[]): Keyboard {
-  return tasks.slice(0, 10).map((task) => [
-    { text: `▶️ ${task.title.replace(/\s+/g, ' ').trim().slice(0, 48)}`, data: cb('task', task.id, 'start') },
+const TASKS_PER_PAGE = 6
+
+function taskLabel(title: string): string {
+  return title.replace(/\s+/g, ' ').trim().slice(0, 42)
+}
+
+function taskKeyboard(
+  tasks: { id: string; title: string }[],
+  page: number,
+  pages: number,
+  restore?: { id: string },
+): Keyboard {
+  const keyboard: Keyboard = tasks.map((task) => [
+    { text: `▶️ ${taskLabel(task.title)}`, data: cb('task', task.id, 'start') },
+    { text: '🗑', data: cb('task', task.id, 'drop') },
   ])
+  const navigation = []
+  if (page > 0) navigation.push({ text: '← Назад', data: cb('tasks', null, `p${page - 1}`) })
+  if (page + 1 < pages) navigation.push({ text: 'Дальше →', data: cb('tasks', null, `p${page + 1}`) })
+  if (navigation.length) keyboard.push(navigation)
+  if (restore) keyboard.push([{ text: T.taskRestoreButton, data: cb('task', restore.id, 'restore') }])
+  return keyboard
+}
+
+export async function showTasks(ctx: Ctx, user: User, page = 0, notice?: string, restore?: { id: string }): Promise<void> {
+  const count = await ctx.db.task.count({ where: { userId: user.id, status: 'active' } })
+  if (count === 0) {
+    await reply(ctx, user, notice ? `${notice}\n${T.tasksEmpty}` : T.tasksEmpty, restore ? [[{ text: T.taskRestoreButton, data: cb('task', restore.id, 'restore') }]] : undefined)
+    return
+  }
+  const pages = Math.ceil(count / TASKS_PER_PAGE)
+  const safePage = Math.max(0, Math.min(page, pages - 1))
+  const tasks = await ctx.db.task.findMany({
+    where: { userId: user.id, status: 'active' },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    skip: safePage * TASKS_PER_PAGE,
+    take: TASKS_PER_PAGE,
+    select: { id: true, title: true },
+  })
+  await reply(ctx, user, T.tasksList(tasks.map((task) => task.title), safePage, pages, notice), taskKeyboard(tasks, safePage, pages, restore))
+}
+
+export async function onSessionStart(ctx: Ctx, user: User): Promise<void> {
+  await onStartButton(ctx, user)
+  const running = await activeSession(ctx, user.id)
+  if (running?.state !== 'running') return
+  const count = await ctx.db.task.count({ where: { userId: user.id, status: 'active' } })
+  if (count > 0) await showTasks(ctx, user, 0, T.tasksChoose)
+}
+
+export async function onTasksPage(ctx: Ctx, user: User, arg: string): Promise<void> {
+  const match = /^p(\d{1,4})$/.exec(arg)
+  if (!match) return reply(ctx, user, T.stale)
+  await showTasks(ctx, user, Number(match[1]))
 }
 
 export async function onTaskSelected(ctx: Ctx, user: User, taskId: string): Promise<void> {
   await startTaskSession(ctx, user, taskId)
+}
+
+export async function onTaskDropped(ctx: Ctx, user: User, taskId: string): Promise<void> {
+  let title: string | null = null
+  let isCurrent = false
+  await ctx.db.$transaction(async (tx) => {
+    const locked = await tx.task.updateMany({
+      where: { id: taskId, userId: user.id, status: 'active' },
+      data: { status: 'active' },
+    })
+    if (locked.count !== 1) return
+    const task = await tx.task.findFirst({ where: { id: taskId, userId: user.id, status: 'active' }, select: { title: true } })
+    if (!task) return
+    title = task.title
+    const current = await tx.focusSession.findFirst({
+      where: { userId: user.id, taskId, state: { in: ['collecting_intent', 'running', 'paused'] } },
+      select: { id: true },
+    })
+    if (current) {
+      isCurrent = true
+      return
+    }
+    await tx.task.update({ where: { id: taskId }, data: { status: 'dropped' } })
+  })
+  if (!title) return reply(ctx, user, T.stale)
+  if (isCurrent) return reply(ctx, user, T.taskDropActive)
+  await showTasks(ctx, user, 0, T.taskDropped(title), { id: taskId })
+}
+
+export async function onTaskRestored(ctx: Ctx, user: User, taskId: string): Promise<void> {
+  const task = await ctx.db.task.findFirst({ where: { id: taskId, userId: user.id, status: 'dropped' } })
+  if (!task) return reply(ctx, user, T.stale)
+  const restored = await ctx.db.task.updateMany({
+    where: { id: task.id, userId: user.id, status: 'dropped' },
+    data: { status: 'active' },
+  })
+  if (restored.count !== 1) return reply(ctx, user, T.stale)
+  await showTasks(ctx, user, 0, T.taskRestored(task.title))
 }
 
 async function captureTasks(ctx: Ctx, user: User, titles: string[], source: TaskInputSource) {
@@ -203,7 +291,7 @@ export async function onTaskMessage(ctx: Ctx, user: User, text: string, source: 
       await reply(ctx, user, T.tasksParseFailed)
       return true
     }
-    await reply(ctx, user, T.tasksCaptured(tasks.map((task) => task.title)), taskKeyboard(tasks))
+    await showTasks(ctx, user, 0, T.tasksCaptured(tasks.map((task) => task.title)))
     return true
   }
 
