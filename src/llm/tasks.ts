@@ -31,6 +31,7 @@ const SYSTEM = [
   'Разные действия с разными глаголами разделяй, даже если соединены «и».',
   'Фрагмент без личной формы глагола, который уточняет предыдущую задачу, не новая задача: объедини их.',
   'Контекст «про X» присоединяй к следующей задаче и сохраняй X в названии.',
+  'Не копируй active_tasks в new_tasks: new_tasks содержит только явно названные новые работы.',
   'Пример 1: «закончить отчёт и отправить его» → new_tasks=["Закончить отчёт","Отправить отчёт"].',
   'Пример 2: «нужно сделать оплату. функцию оплаты» → new_tasks=["Сделать функцию оплаты"].',
   'Пример 3: «второе про сайт. нужно исправить форму» → new_tasks=["Исправить форму сайта"].',
@@ -52,18 +53,20 @@ const words = (title: string) =>
     .match(/[\p{L}\p{N}]+/gu) ?? []
 
 const wordKey = (word: string) => (word.length >= 6 ? word.slice(0, 6) : word)
+const isActionWord = (word: string) => /(?:ть|ти|чь)$/u.test(word)
 
 const titleSignature = (title: string) => {
   const tokens = words(title)
+  const hasAction = isActionWord(tokens[0] ?? '')
   return {
-    action: wordKey(tokens[0] ?? ''),
-    content: new Set(tokens.slice(1).filter((word) => word.length >= 3).map(wordKey)),
+    action: hasAction ? wordKey(tokens[0]!) : '',
+    content: new Set(tokens.slice(hasAction ? 1 : 0).filter((word) => word.length >= 3).map(wordKey)),
     exact: tokens.join(' '),
   }
 }
 
 const nearDuplicate = (left: ReturnType<typeof titleSignature>, right: ReturnType<typeof titleSignature>) => {
-  if (!left.action || left.action !== right.action) return false
+  if (left.action && right.action && left.action !== right.action) return false
   const smaller = left.content.size <= right.content.size ? left.content : right.content
   const larger = smaller === left.content ? right.content : left.content
   if (smaller.size < 2) return false
@@ -83,7 +86,8 @@ const dedupeTitles = (titles: string[]) => {
       signatures.push(signature)
       continue
     }
-    if (signature.content.size > signatures[duplicate]!.content.size) {
+    const existing = signatures[duplicate]!
+    if (signature.content.size > existing.content.size || (signature.content.size === existing.content.size && signature.action && !existing.action)) {
       result[duplicate] = title
       signatures[duplicate] = signature
     }
@@ -122,7 +126,10 @@ export async function parseTaskMessage(
     if (!value.new_tasks.length || value.complete_task || value.start_task || value.start_title) {
       return { result: null, failure: { ok: false, reason: 'invalid' } }
     }
-    const titles = dedupeTitles(value.new_tasks.map(clean).filter(Boolean))
+    const deduped = dedupeTitles(value.new_tasks.map(clean).filter(Boolean))
+    const activeTitles = new Set(input.tasks.map((task) => titleSignature(task.title).exact))
+    const newTitles = deduped.filter((title) => !activeTitles.has(titleSignature(title).exact))
+    const titles = newTitles.length ? newTitles : deduped
     if (!titles.length) return { result: null, failure: { ok: false, reason: 'invalid' } }
     return { result: { kind: 'capture', titles, llmUsed: true }, failure: null }
   }
