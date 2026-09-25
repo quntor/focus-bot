@@ -11,6 +11,7 @@ type Options = {
 }
 
 const responseSchema = z.object({ text: z.string().min(1).max(20_000) })
+const TRANSCRIPTION_PROMPT = 'Милавица, VDS, FocusBot, фокус-бот, планирование дня.'
 
 class SafeSttError extends Error {}
 
@@ -24,6 +25,7 @@ export function createOpenAiCompatibleSttProvider(options: Options): SttProvider
       const form = new FormData()
       form.append('model', options.model)
       form.append('language', 'ru')
+      form.append('prompt', TRANSCRIPTION_PROMPT)
       const audioBuffer = new ArrayBuffer(req.audio.byteLength)
       new Uint8Array(audioBuffer).set(req.audio)
       form.append('file', new File([audioBuffer], req.filename, { type: req.mimeType }))

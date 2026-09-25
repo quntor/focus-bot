@@ -7,6 +7,7 @@ describe('OpenAI-compatible STT', () => {
       const form = init?.body as FormData
       expect(form.get('model')).toBe('openai/whisper-large-v3')
       expect(form.get('language')).toBe('ru')
+      expect(form.get('prompt')).toBe('Милавица, VDS, FocusBot, фокус-бот, планирование дня.')
       expect(form.get('file')).toBeInstanceOf(File)
       return new Response(JSON.stringify({ text: 'добавь задачу купить корм' }), { status: 200 })
     })
@@ -24,6 +25,27 @@ describe('OpenAI-compatible STT', () => {
       'https://foundation-models.example/v1/audio/transcriptions',
       expect.objectContaining({ method: 'POST', headers: { authorization: 'Bearer secret' } }),
     )
+  })
+
+  it('передаёт короткий словарь продукта без пользовательской расшифровки', async () => {
+    const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const form = init?.body as FormData
+      const prompt = form.get('prompt')
+      expect(prompt).toBeTypeOf('string')
+      expect(prompt).toContain('Милавица')
+      expect(prompt).toContain('VDS')
+      expect(prompt).toContain('FocusBot')
+      expect(prompt).not.toContain('поправить все косяки')
+      return new Response(JSON.stringify({ text: 'доделать выкат Милавицы на VDS' }), { status: 200 })
+    })
+    const stt = createOpenAiCompatibleSttProvider({
+      apiKey: 'secret',
+      baseUrl: 'https://foundation-models.example/v1',
+      model: 'openai/whisper-large-v3',
+      fetchFn,
+    })
+
+    await stt.transcribe({ audio: new Uint8Array([1]), filename: 'voice.ogg', mimeType: 'audio/ogg', timeoutMs: 1_000 })
   })
 
   it('не пробрасывает тело ошибки провайдера', async () => {

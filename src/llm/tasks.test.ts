@@ -61,6 +61,113 @@ describe('разбор сообщения со списком задач', () =>
     expect(parsed.result).toEqual({ kind: 'capture', titles: ['Доделать выкат', 'Поправить ошибки'], llmUsed: true })
   })
 
+  it('сохраняет самостоятельные действия и объединяет близкие переформулировки', async () => {
+    const qualityAware: LlmProvider = {
+      enabled: true,
+      async complete(req) {
+        const hasCoverageRule = req.system.includes('каждое явно названное самостоятельное действие')
+        const hasDedupeRule = req.system.includes('Фрагмент без личной формы глагола')
+        return hasCoverageRule && hasDedupeRule
+          ? JSON.stringify({
+              kind: 'capture',
+              new_tasks: [
+                'Доделать выкат Милавицы на VDS',
+                'Поправить все косяки',
+                'Запустить умные функции FocusBot',
+                'Сделать планирование дня',
+                'Сделать функцию планирования дня',
+              ],
+            })
+          : JSON.stringify({
+              kind: 'capture',
+              new_tasks: [
+                'Доделать выкат Милавицы на VDS',
+                'Запустить умные функции',
+                'Сделать планирование дня',
+                'Функция планирования дня',
+              ],
+            })
+      },
+    }
+    const parsed = await parseTaskMessage(qualityAware, {
+      text:
+        'Мне завтра нужно доделать выкат Милавицы на VDS и поправить все косяки. Второе про FocusBot. Нужно запустить умные функции. Надо сделать планирование дня. Функцию планирования дня.',
+      tasks,
+      currentTaskId: null,
+    })
+
+    expect(parsed.failure).toBeNull()
+    expect(parsed.result).toEqual({
+      kind: 'capture',
+      titles: [
+        'Доделать выкат Милавицы на VDS',
+        'Поправить все косяки',
+        'Запустить умные функции FocusBot',
+        'Сделать функцию планирования дня',
+      ],
+      llmUsed: true,
+    })
+  })
+
+  it('не склеивает разные действия над одним объектом', async () => {
+    const parsed = await parseTaskMessage(
+      provider('{"kind":"capture","new_tasks":["Сделать форму оплаты","Проверить форму оплаты"]}'),
+      { text: 'Сделать форму оплаты и проверить форму оплаты', tasks, currentTaskId: null },
+    )
+
+    expect(parsed.result).toEqual({
+      kind: 'capture',
+      titles: ['Сделать форму оплаты', 'Проверить форму оплаты'],
+      llmUsed: true,
+    })
+  })
+
+  it('один раз повторяет только структурно невалидный ответ', async () => {
+    let calls = 0
+    const flaky: LlmProvider = {
+      enabled: true,
+      async complete() {
+        calls += 1
+        if (calls === 1) return '{"kind":"capture","new_tasks":"Сделать отчёт","start_task":"t1"}'
+        return '{"kind":"capture","new_tasks":["Сделать отчёт","Отправить отчёт"]}'
+      },
+    }
+
+    const parsed = await parseTaskMessage(flaky, {
+      text: 'Сделать отчёт и отправить отчёт',
+      tasks,
+      currentTaskId: null,
+    })
+
+    expect(calls).toBe(2)
+    expect(parsed.result).toEqual({
+      kind: 'capture',
+      titles: ['Сделать отчёт', 'Отправить отчёт'],
+      llmUsed: true,
+    })
+  })
+
+  it('не повторяет ошибку провайдера', async () => {
+    let calls = 0
+    const unavailable: LlmProvider = {
+      enabled: true,
+      async complete() {
+        calls += 1
+        throw new Error('provider unavailable')
+      },
+    }
+
+    const parsed = await parseTaskMessage(unavailable, {
+      text: 'Сделать отчёт и отправить отчёт',
+      tasks,
+      currentTaskId: null,
+    })
+
+    expect(calls).toBe(1)
+    expect(parsed.result).toBeNull()
+    expect(parsed.failure).toMatchObject({ ok: false, reason: 'error' })
+  })
+
   it('переводит только временные метки своих задач в id', async () => {
     const parsed = await parseTaskMessage(
       provider('{"kind":"complete_and_start","new_tasks":[],"complete_task":"t1","start_task":"t2","start_title":null}'),
