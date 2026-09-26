@@ -55,6 +55,12 @@ export function shouldParseTaskMessage(text: string): boolean {
 
 const TASKS_PER_PAGE = 6
 
+type TaskPage = {
+  tasks: { id: string; title: string }[]
+  page: number
+  pages: number
+}
+
 function taskLabel(title: string): string {
   const chars = Array.from(title.replace(/\s+/g, ' ').trim())
   return chars.length <= 60 ? chars.join('') : `${chars.slice(0, 59).join('')}…`
@@ -65,24 +71,21 @@ function taskKeyboard(
   page: number,
   pages: number,
   restore?: { id: string },
+  mode: 'actions' | 'start' = 'actions',
 ): Keyboard {
   const keyboard: Keyboard = tasks.map((task) => [
-    { text: taskLabel(task.title), data: cb('task', task.id, `view${page}`) },
+    { text: taskLabel(task.title), data: cb('task', task.id, mode === 'start' ? 'start' : `view${page}`) },
   ])
-  const navigation = []
-  if (page > 0) navigation.push({ text: '← Назад', data: cb('tasks', null, `p${page - 1}`) })
-  if (page + 1 < pages) navigation.push({ text: 'Дальше →', data: cb('tasks', null, `p${page + 1}`) })
-  if (navigation.length) keyboard.push(navigation)
+  const pageMode = mode === 'start' ? 's' : 'p'
+  if (page > 0) keyboard.push([{ text: '← Назад', data: cb('tasks', null, `${pageMode}${page - 1}`) }])
+  if (page + 1 < pages) keyboard.push([{ text: 'Дальше →', data: cb('tasks', null, `${pageMode}${page + 1}`) }])
   if (restore) keyboard.push([{ text: T.taskRestoreButton, data: cb('task', restore.id, 'restore') }])
   return keyboard
 }
 
-export async function showTasks(ctx: Ctx, user: User, page = 0, notice?: string, restore?: { id: string }): Promise<void> {
+async function activeTaskPage(ctx: Ctx, user: User, page: number): Promise<TaskPage | null> {
   const count = await ctx.db.task.count({ where: { userId: user.id, status: 'active' } })
-  if (count === 0) {
-    await reply(ctx, user, notice ? `${notice}\n${T.tasksEmpty}` : T.tasksEmpty, restore ? [[{ text: T.taskRestoreButton, data: cb('task', restore.id, 'restore') }]] : undefined)
-    return
-  }
+  if (count === 0) return null
   const pages = Math.ceil(count / TASKS_PER_PAGE)
   const safePage = Math.max(0, Math.min(page, pages - 1))
   const tasks = await ctx.db.task.findMany({
@@ -92,7 +95,41 @@ export async function showTasks(ctx: Ctx, user: User, page = 0, notice?: string,
     take: TASKS_PER_PAGE,
     select: { id: true, title: true },
   })
-  await reply(ctx, user, T.tasksList(tasks.map((task) => task.title), safePage, pages, notice), taskKeyboard(tasks, safePage, pages, restore))
+  return { tasks, page: safePage, pages }
+}
+
+export async function buildTaskStartPrompt(
+  ctx: Ctx,
+  user: User,
+  prefix: string,
+  page = 0,
+): Promise<{ text: string; keyboard: Keyboard } | null> {
+  const list = await activeTaskPage(ctx, user, page)
+  if (!list) return null
+  return {
+    text: T.tasksStartList(list.tasks.map((task) => task.title), list.page, list.pages, prefix),
+    keyboard: taskKeyboard(list.tasks, list.page, list.pages, undefined, 'start'),
+  }
+}
+
+async function showTaskStartPrompt(ctx: Ctx, user: User, page: number): Promise<void> {
+  const prompt = await buildTaskStartPrompt(ctx, user, T.meetingPlain, page)
+  if (!prompt) return reply(ctx, user, T.tasksEmpty)
+  await reply(ctx, user, prompt.text, prompt.keyboard)
+}
+
+export async function showTasks(ctx: Ctx, user: User, page = 0, notice?: string, restore?: { id: string }): Promise<void> {
+  const list = await activeTaskPage(ctx, user, page)
+  if (!list) {
+    await reply(ctx, user, notice ? `${notice}\n${T.tasksEmpty}` : T.tasksEmpty, restore ? [[{ text: T.taskRestoreButton, data: cb('task', restore.id, 'restore') }]] : undefined)
+    return
+  }
+  await reply(
+    ctx,
+    user,
+    T.tasksList(list.tasks.map((task) => task.title), list.page, list.pages, notice),
+    taskKeyboard(list.tasks, list.page, list.pages, restore),
+  )
 }
 
 export async function onSessionStart(ctx: Ctx, user: User): Promise<void> {
@@ -104,9 +141,11 @@ export async function onSessionStart(ctx: Ctx, user: User): Promise<void> {
 }
 
 export async function onTasksPage(ctx: Ctx, user: User, arg: string): Promise<void> {
-  const match = /^p(\d{1,4})$/.exec(arg)
+  const match = /^([ps])(\d{1,4})$/.exec(arg)
   if (!match) return reply(ctx, user, T.stale)
-  await showTasks(ctx, user, Number(match[1]))
+  const page = Number(match[2])
+  if (match[1] === 's') return showTaskStartPrompt(ctx, user, page)
+  await showTasks(ctx, user, page)
 }
 
 export async function onTaskOpened(ctx: Ctx, user: User, taskId: string, page: number): Promise<void> {

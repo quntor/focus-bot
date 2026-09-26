@@ -87,6 +87,15 @@ export const T = {
       '',
       'Нажми на задачу, чтобы выбрать действие.',
     ].filter(Boolean).join('\n'),
+  tasksStartList: (tasks: string[], page: number, pages: number, prefix: string) =>
+    [
+      prefix,
+      '',
+      `Активные задачи${pages > 1 ? ` — страница ${page + 1} из ${pages}` : ''}:`,
+      ...tasks.map((task, i) => `${page * 6 + i + 1}. ${task}`),
+      '',
+      'Нажми на задачу — сразу запущу таймер.',
+    ].join('\n'),
   taskActions: (task: string) => `Задача: «${task}»\n\nЧто сделать?`,
   taskStartButton: '▶️ Начать',
   taskDropButton: '🗑 Удалить',

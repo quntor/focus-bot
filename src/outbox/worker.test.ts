@@ -16,6 +16,82 @@ async function runningSession(bot: ReturnType<typeof makeBot>) {
 describe.skipIf(!hasDb)('outbox', () => {
   beforeEach(resetDb)
 
+  it('утром показывает активные задачи и запускает выбранную одним нажатием', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    await prisma.dailyGoal.create({ data: { userId: user.id, dayKey: '2026-09-22', targetSessions: 3 } })
+    const first = await prisma.task.create({ data: { userId: user.id, title: 'Подготовить отчёт' } })
+    const second = await prisma.task.create({ data: { userId: user.id, title: 'Позвонить Ивану' } })
+    await enqueue(prisma, {
+      userId: user.id,
+      kind: 'meeting',
+      key: `meeting:${user.id}:morning-with-tasks`,
+      sendAfter: bot.now(),
+      payload: { defaulted: false, morning: true },
+    })
+
+    await runOutboxOnce(bot.ctx)
+
+    const prompt = bot.tg.sent.filter((message) => message.chatId === BigInt(A)).at(-1)
+    expect(prompt?.text).toContain('Привет! С чего начнёшь?')
+    expect(prompt?.keyboard?.slice(0, 2)).toEqual([
+      [{ text: first.title, data: `task:${first.id}:start` }],
+      [{ text: second.title, data: `task:${second.id}:start` }],
+    ])
+    expect(bot.buttons(A).filter((button) => button.data.includes(':view'))).toHaveLength(0)
+
+    await bot.press(A, `task:${second.id}:start`)
+
+    const running = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })
+    expect(running).toMatchObject({ taskId: second.id, intentText: second.title, plannedMinutes: 40 })
+    expect(running.startedAt).not.toBeNull()
+    expect(running.plannedEndAt).not.toBeNull()
+    expect(await prisma.outboxMessage.count({ where: { userId: user.id, kind: 'session_end', status: 'pending' } })).toBe(1)
+  })
+
+  it('после выбора утренней цели показывает задачи с прямым запуском', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    const task = await prisma.task.create({ data: { userId: user.id, title: 'Сделать план дня' } })
+    await enqueue(prisma, {
+      userId: user.id,
+      kind: 'meeting',
+      key: `meeting:${user.id}:morning-goal`,
+      sendAfter: bot.now(),
+      payload: { defaulted: false, morning: true },
+    })
+
+    await runOutboxOnce(bot.ctx)
+    expect(bot.lastText(A)).toBe('Доброе утро. Сколько заходов сегодня?')
+    await bot.press(A, 'goal::3')
+
+    const prompt = bot.tg.sent.filter((message) => message.chatId === BigInt(A)).at(-1)
+    expect(prompt?.text).toContain('Цель на сегодня — 3 захода.')
+    expect(prompt?.text).toContain('С чего начнёшь?')
+    expect(prompt?.keyboard).toEqual([[{ text: task.title, data: `task:${task.id}:start` }]])
+  })
+
+  it('утром без задач сохраняет обычный вопрос и кнопки напоминания', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    await prisma.dailyGoal.create({ data: { userId: user.id, dayKey: '2026-09-22', targetSessions: 1 } })
+    await enqueue(prisma, {
+      userId: user.id,
+      kind: 'meeting',
+      key: `meeting:${user.id}:morning-empty`,
+      sendAfter: bot.now(),
+      payload: { defaulted: false, morning: true },
+    })
+
+    await runOutboxOnce(bot.ctx)
+
+    expect(bot.lastText(A)).toBe('Привет! С чего начнёшь?')
+    expect(bot.lastButton(A, 'mtg:', ':postpone')).toBe('mtg::postpone')
+  })
+
   it('два воркера одновременно не отправляют одно сообщение дважды', async () => {
     const bot = makeBot()
     await runningSession(bot)

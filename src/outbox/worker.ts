@@ -6,6 +6,7 @@ import { cb } from '../bot/callbacks.js'
 import { markBlocked, type Ctx } from '../bot/context.js'
 import { buildSummary, declineKeyboard, DECLINES_BEFORE_ASK, goalKeyboard, putDefaultMeeting, reminderKeyboard } from '../bot/day-flow.js'
 import { openCollecting, outcomeKeyboard } from '../bot/session-flow.js'
+import { buildTaskStartPrompt } from '../bot/tasks.js'
 import { T } from '../bot/texts.js'
 import { DeliveryError, TelegramError, type Keyboard } from '../tg/client.js'
 import { enqueue } from './queue.js'
@@ -161,9 +162,12 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
     const askGoal = p.morning === true && (goal?.targetSessions ?? null) === null
     // Понедельник — новый старт недели, и это стоит сказать.
     const monday = new Date(`${today}T00:00:00Z`).getUTCDay() === 1
+    const taskPrompt = p.morning === true && !askGoal
+      ? await buildTaskStartPrompt(ctx, user, T.meetingPlain)
+      : null
     const r = askGoal
       ? await renderReminder(ctx, user, monday ? T.meetingMonday : T.meetingMorning, goalKeyboard(), false)
-      : await renderReminder(ctx, user, T.meetingPlain, reminderKeyboard(), true)
+      : await renderReminder(ctx, user, taskPrompt?.text ?? T.meetingPlain, taskPrompt?.keyboard ?? reminderKeyboard(), true)
     return withEvent(r, async (tx) => {
       await logEvent(tx, user.id, 'meeting_sent', {}, { at: now })
       if (p.defaulted === true) await logEvent(tx, user.id, 'meeting_defaulted', { minutes_ahead: 0 }, { at: now })

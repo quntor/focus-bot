@@ -6,7 +6,8 @@ import { cancelPending, enqueue } from '../outbox/queue.js'
 import { DAYS_OFF_PER_WEEK } from '../retention/rules.js'
 import { cb } from './callbacks.js'
 import { reply, type Ctx } from './context.js'
-import { askIntent } from './session-flow.js'
+import { activeSession, askIntent, openCollecting } from './session-flow.js'
+import { buildTaskStartPrompt } from './tasks.js'
 import { T, hhmm, type DaySummary } from './texts.js'
 import type { Keyboard } from '../tg/client.js'
 
@@ -304,5 +305,13 @@ export async function onGoal(ctx: Ctx, user: User, arg: string): Promise<void> {
     })
     await logEvent(tx, user.id, 'daily_goal_set', { target_sessions: target }, { at: now })
   })
+  const active = await activeSession(ctx, user.id)
+  if (!active || active.state === 'collecting_intent') {
+    const prompt = await buildTaskStartPrompt(ctx, user, T.goalSet(target))
+    if (prompt) {
+      await openCollecting(ctx, user.id)
+      return reply(ctx, user, prompt.text, prompt.keyboard)
+    }
+  }
   await askIntent(ctx, user, { prefix: T.goalSet(target).replace(/\s*С чего начнёшь\?$/, '') })
 }
