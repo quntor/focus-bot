@@ -247,6 +247,107 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     expect(running.intentText).toBe('Позвонить Ивану')
   })
 
+  it('по voice отмечает названную задачу готовой, не закрывая день', async () => {
+    const transcript = 'Я сделал одну из своих задач — планирование дня'
+    const bot = makeBot({
+      stt: { enabled: true, async transcribe() { return transcript } },
+      llm: conversational(
+        () => '{"kind":"complete_task","new_tasks":[],"start_title":null,"complete_title":"Сделать планирование дня"}',
+        (_intent, active) => JSON.stringify({ task: active[0]?.label ?? null, title: 'Сделать планирование дня', scope: 'step' }),
+      ),
+    })
+    bot.tg.downloads.set('voice-complete', new Uint8Array([1, 2, 3]))
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    const task = await prisma.task.create({ data: { userId: user.id, title: 'Сделать планирование дня' } })
+
+    await bot.voice(A, { fileId: 'voice-complete', duration: 6, mimeType: 'audio/ogg', fileSize: 3 })
+
+    expect(await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).toMatchObject({ status: 'done' })
+    expect(await prisma.event.findFirst({ where: { type: 'day_closed' } })).toBeNull()
+    expect(await prisma.event.findFirst({ where: { type: 'task_completed' } })).not.toBeNull()
+    expect(bot.lastText(A)).toContain('отметил готовой')
+  })
+
+  it('в точной production-фразе завершает и задачу, и день', async () => {
+    const transcript = 'Все, я закончил на сегодня работу. Меловицу я выкатил.'
+    const bot = makeBot({
+      stt: { enabled: true, async transcribe() { return transcript } },
+      llm: conversational(
+        () => '{"kind":"complete_and_close_day","new_tasks":[],"start_title":null,"complete_title":"Выкатить Милавицу"}',
+        (_intent, active) => JSON.stringify({ task: active[0]?.label ?? null, title: 'Выкатить Милавицу', scope: 'step' }),
+      ),
+    })
+    bot.tg.downloads.set('voice-complete-day', new Uint8Array([1, 2, 3]))
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    const task = await prisma.task.create({ data: { userId: user.id, title: 'Выкатить Милавицу' } })
+
+    await bot.voice(A, { fileId: 'voice-complete-day', duration: 6, mimeType: 'audio/ogg', fileSize: 3 })
+
+    expect(await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).toMatchObject({ status: 'done' })
+    expect(await prisma.event.findFirst({ where: { type: 'task_completed' } })).not.toBeNull()
+    expect(await prisma.event.findFirst({ where: { type: 'day_closed' } })).not.toBeNull()
+    expect(bot.textsTo(A).some((text) => text.includes('отметил готовой'))).toBe(true)
+    expect(bot.lastText(A)).toContain('Когда встретимся')
+  })
+
+  it('завершает текущую задачу и её таймер по слову «эту»', async () => {
+    const bot = makeBot({
+      llm: conversational(() => '{"kind":"complete_task","new_tasks":[],"start_title":null,"complete_title":null}'),
+    })
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    const task = await prisma.task.create({ data: { userId: user.id, title: 'Подготовить презентацию' } })
+    await bot.press(A, `task:${task.id}:start`)
+    bot.advance(12)
+
+    await bot.text(A, 'Эту закончил')
+
+    expect(await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).toMatchObject({ status: 'done' })
+    expect(await prisma.focusSession.findFirstOrThrow({ where: { taskId: task.id } })).toMatchObject({
+      state: 'finished',
+      outcome: 'done',
+      progress: 'moved',
+    })
+    expect(await prisma.outboxMessage.count({ where: { userId: user.id, status: { in: ['pending', 'paused'] }, kind: { in: ['ping', 'session_end'] } } })).toBe(0)
+  })
+
+  it('не создаёт задачу, если завершить названную задачу не удалось сопоставить', async () => {
+    const bot = makeBot({
+      llm: conversational(
+        () => '{"kind":"complete_task","new_tasks":[],"start_title":null,"complete_title":"Несуществующая задача"}',
+        () => JSON.stringify({ task: null, title: 'Несуществующая задача', scope: 'step' }),
+      ),
+    })
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    await prisma.task.create({ data: { userId: user.id, title: 'Подготовить презентацию' } })
+
+    await bot.text(A, 'Я закончил несуществующую задачу')
+
+    expect(await prisma.task.count({ where: { userId: user.id } })).toBe(1)
+    expect(bot.lastText(A)).toContain('какую задачу отметить готовой')
+  })
+
+  it('не закрывает день частично, если задача из составной команды не найдена', async () => {
+    const bot = makeBot({
+      llm: conversational(
+        () => '{"kind":"complete_and_close_day","new_tasks":[],"start_title":null,"complete_title":"Несуществующая задача"}',
+        () => JSON.stringify({ task: null, title: 'Несуществующая задача', scope: 'step' }),
+      ),
+    })
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    await prisma.task.create({ data: { userId: user.id, title: 'Подготовить презентацию' } })
+
+    await bot.text(A, 'На сегодня всё, несуществующую задачу закончил')
+
+    expect(await prisma.task.count({ where: { userId: user.id, status: 'done' } })).toBe(0)
+    expect(await prisma.event.findFirst({ where: { type: 'day_closed' } })).toBeNull()
+    expect(bot.lastText(A)).toContain('какую задачу отметить готовой')
+  })
+
   it('не создаёт следующую задачу, если текущей задачи для завершения нет', async () => {
     const bot = makeBot({
       llm: conversational(() => '{"kind":"complete_and_start","new_tasks":[],"start_title":"Новая задача"}'),

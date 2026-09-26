@@ -254,6 +254,111 @@ async function resolveOrCreateTask(
   })
 }
 
+async function resolveExistingTask(
+  ctx: Ctx,
+  user: User,
+  title: string | null,
+  activeTasks: { id: string; title: string }[],
+  currentTaskId: string | null,
+): Promise<{ id: string; title: string } | null> {
+  if (title === null) {
+    if (!currentTaskId) return null
+    return ctx.db.task.findFirst({
+      where: { id: currentTaskId, userId: user.id, status: 'active' },
+      select: { id: true, title: true },
+    })
+  }
+  if (!activeTasks.length) return null
+
+  const parsed = await parseIntent(ctx.llm, { text: title, tasks: activeTasks, profile: user.profileText })
+  if (parsed.failure && !parsed.failure.ok) {
+    await logEvent(ctx.db, user.id, 'llm_fallback', { stage: 'intent', reason: parsed.failure.reason }, { at: ctx.now() })
+  }
+  if (parsed.result.taskId) {
+    const matched = await ctx.db.task.findFirst({
+      where: { id: parsed.result.taskId, userId: user.id, status: 'active' },
+      select: { id: true, title: true },
+    })
+    if (matched) return matched
+  }
+
+  const candidates = [title, parsed.result.title].map(normalize)
+  return activeTasks.find((task) => candidates.includes(normalize(task.title))) ?? null
+}
+
+async function completeTask(
+  ctx: Ctx,
+  user: User,
+  task: { id: string; title: string },
+  source: TaskInputSource,
+): Promise<boolean> {
+  const now = ctx.now()
+  let doneTitle = task.title
+  try {
+    await ctx.db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
+      const completed = await tx.task.findFirst({
+        where: { id: task.id, userId: user.id, status: 'active' },
+        select: { id: true, title: true },
+      })
+      if (!completed) throw new StaleTransition()
+      doneTitle = completed.title
+
+      const current = await tx.focusSession.findFirst({
+        where: { userId: user.id, state: { in: ['collecting_intent', 'running', 'paused'] } },
+      })
+      if (current?.taskId === completed.id && current.state === 'collecting_intent') {
+        await transition(tx, { sessionId: current.id, userId: user.id }, 'collecting_intent', 'cancelled', { finishedAt: now })
+        await logEvent(tx, user.id, 'session_cancelled', {}, { at: now, sessionId: current.id })
+      } else if (current?.taskId === completed.id && (current.state === 'running' || current.state === 'paused')) {
+        const openPauseSeconds =
+          current.state === 'paused' && current.pausedAt
+            ? Math.floor(Math.max(0, now.getTime() - current.pausedAt.getTime()) / 1000)
+            : 0
+        const elapsed = activeElapsedMinutes(current, now)
+        const counted = isCounted('finished', elapsed)
+        const early = current.plannedEndAt !== null && now < current.plannedEndAt
+        await transition(tx, { sessionId: current.id, userId: user.id }, current.state, 'finished', {
+          outcome: 'done',
+          pausedAt: null,
+          pausedSeconds: current.pausedSeconds + openPauseSeconds,
+          finishedAt: now,
+          counted,
+          progress: 'moved',
+        })
+        await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `ping:${current.id}` } })
+        await cancelPending(tx, { userId: user.id, idempotencyKey: `session_end:${current.id}` })
+        await logEvent(
+          tx,
+          user.id,
+          'session_completed',
+          { session_id: current.id, outcome: 'done', elapsed_minutes: elapsed, early, counted },
+          { at: now, sessionId: current.id },
+        )
+        if (counted) {
+          await creditCountedSession(tx, { userId: user.id, sessionId: current.id, dayKey: dayKey(now, user.timezone), at: now })
+        }
+      }
+
+      const marked = await tx.task.updateMany({
+        where: { id: completed.id, userId: user.id, status: 'active' },
+        data: { status: 'done', lastProgressAt: now, sessionsSinceProgress: 0 },
+      })
+      if (marked.count !== 1) throw new StaleTransition()
+      await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
+      await logEvent(tx, user.id, 'task_completed', { task_id: completed.id, source }, { at: now, sessionId: current?.id })
+    })
+  } catch (error) {
+    if (error instanceof StaleTransition) {
+      await reply(ctx, user, T.stale)
+      return false
+    }
+    throw error
+  }
+  await reply(ctx, user, T.taskCompleted(doneTitle))
+  return true
+}
+
 async function completeAndStart(
   ctx: Ctx,
   user: User,
@@ -363,7 +468,11 @@ export async function onTaskMessage(ctx: Ctx, user: User, text: string, source: 
     return 'handled'
   }
 
-  const count = parsed.result.kind === 'capture' ? parsed.result.titles.length : ['start_task', 'complete_and_start'].includes(parsed.result.kind) ? 1 : 0
+  const count = parsed.result.kind === 'capture'
+    ? parsed.result.titles.length
+    : ['start_task', 'complete_task', 'complete_and_start', 'complete_and_close_day'].includes(parsed.result.kind)
+      ? 1
+      : 0
   await logEvent(ctx.db, user.id, 'tasks_parsed', { kind: parsed.result.kind, count }, { at: ctx.now(), sessionId: current?.id })
   if (parsed.result.kind === 'session_intent') return 'session_intent'
   if (parsed.result.kind === 'close_day') return 'close_day'
@@ -375,6 +484,17 @@ export async function onTaskMessage(ctx: Ctx, user: User, text: string, source: 
     }
     await showTasks(ctx, user, 0, T.tasksCaptured(tasks.map((task) => task.title)))
     return 'handled'
+  }
+
+  if (parsed.result.kind === 'complete_task' || parsed.result.kind === 'complete_and_close_day') {
+    const completed = await resolveExistingTask(ctx, user, parsed.result.title, activeTasks, current?.taskId ?? null)
+    if (!completed) {
+      await reply(ctx, user, T.taskCompleteUnknown)
+      return 'handled'
+    }
+    const completedNow = await completeTask(ctx, user, completed, source)
+    if (!completedNow) return 'handled'
+    return parsed.result.kind === 'complete_and_close_day' ? 'close_day' : 'handled'
   }
 
   if (parsed.result.kind === 'start_task') {

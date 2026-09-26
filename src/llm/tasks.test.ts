@@ -279,6 +279,46 @@ describe('разбор сообщения со списком задач', () =>
     expect(parsed.result).toEqual({ kind: 'complete_and_start', title: 'Позвонить Ивану', llmUsed: true })
   })
 
+  it('отличает завершение одной названной задачи от завершения дня', async () => {
+    const parsed = await parseTaskMessage(
+      provider('{"kind":"complete_task","new_tasks":[],"start_title":null,"complete_title":"Сделать планирование дня"}'),
+      { text: 'Я сделал одну из своих задач — планирование дня', tasks, currentTaskId: null },
+    )
+
+    expect(parsed.failure).toBeNull()
+    expect(parsed.result).toEqual({ kind: 'complete_task', title: 'Сделать планирование дня', llmUsed: true })
+  })
+
+  it('разрешает завершить текущую задачу по слову «эту»', async () => {
+    const parsed = await parseTaskMessage(
+      provider('{"kind":"complete_task","new_tasks":[],"start_title":null,"complete_title":null}'),
+      { text: 'Эту закончил', tasks, currentTaskId: 'own-a' },
+    )
+
+    expect(parsed.failure).toBeNull()
+    expect(parsed.result).toEqual({ kind: 'complete_task', title: null, llmUsed: true })
+  })
+
+  it('сохраняет оба действия из production-фразы: завершить задачу и день', async () => {
+    const parsed = await parseTaskMessage(
+      provider('{"kind":"complete_and_close_day","new_tasks":[],"start_title":null,"complete_title":"Выкатить Милавицу"}'),
+      { text: 'Все, я закончил на сегодня работу. Меловицу я выкатил.', tasks, currentTaskId: null },
+    )
+
+    expect(parsed.failure).toBeNull()
+    expect(parsed.result).toEqual({ kind: 'complete_and_close_day', title: 'Выкатить Милавицу', llmUsed: true })
+  })
+
+  it('отвергает завершение без названия и без текущей задачи', async () => {
+    const parsed = await parseTaskMessage(
+      provider('{"kind":"complete_task","new_tasks":[],"start_title":null,"complete_title":null}'),
+      { text: 'Одну задачу закончил', tasks, currentTaskId: null },
+    )
+
+    expect(parsed.result).toBeNull()
+    expect(parsed.failure).toMatchObject({ ok: false, reason: 'invalid' })
+  })
+
   it('понимает произвольную фразу как конец дня', async () => {
     const parsed = await parseTaskMessage(
       provider('{"kind":"close_day","new_tasks":[],"start_title":null}'),
