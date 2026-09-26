@@ -11,21 +11,18 @@ import { T, hhmm } from './texts.js'
 const RITUAL_MAX = 200
 const PROFILE_MAX = 2000
 
-// --- Знакомство: согласие, пояс, ритуал. Три действия, дальше сразу работа.
+// --- Знакомство: пояс и ритуал, затем сразу работа.
 
-export async function sendConsent(ctx: Ctx, user: User): Promise<void> {
-  await reply(ctx, user, T.consent(ctx.policyUrl), [[{ text: T.consentButton, data: cb('consent') }]])
+export async function beginOnboarding(ctx: Ctx, user: User): Promise<void> {
+  await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: 'timezone' } })
+  await reply(ctx, user, T.welcome)
 }
 
-export async function onConsent(ctx: Ctx, user: User): Promise<void> {
-  const now = ctx.now()
-  const res = await ctx.db.$transaction(async (tx) => {
-    const r = await tx.user.updateMany({ where: { id: user.id, consentAt: null }, data: { consentAt: now, pendingInput: 'timezone' } })
-    if (r.count === 1) await logEvent(tx, user.id, 'consent_given', {}, { at: now })
-    return r.count
-  })
-  if (res !== 1) return reply(ctx, user, T.stale)
-  await reply(ctx, user, T.askTimezone)
+export async function resumeOnboarding(ctx: Ctx, user: User): Promise<void> {
+  if (user.pendingInput === 'ritual') {
+    return reply(ctx, user, T.askRitual, [[{ text: T.skip, data: cb('skip', null, 'ritual') }]])
+  }
+  await beginOnboarding(ctx, user)
 }
 
 async function isOnboarding(ctx: Ctx, userId: string): Promise<boolean> {

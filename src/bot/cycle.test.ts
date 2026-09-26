@@ -15,7 +15,7 @@ describe.skipIf(!hasDb)('полный цикл сессии', () => {
     expect(bot.lastText(A)).toContain('С чего начнёшь?')
 
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
-    expect(user.consentAt).not.toBeNull()
+    expect(user.consentAt).toBeNull()
     expect(user.timezone).toBe('Europe/Moscow')
 
     await bot.text(A, 'набросать план главы')

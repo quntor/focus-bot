@@ -110,10 +110,8 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
     if (cq) await onCallback(ctx, user, cq.id, cq.data, cq.message?.message_id)
     else if (command) await onCommand(ctx, user, command.command, command.args, created)
     else if (msg?.voice) {
-      if (!user.consentAt) {
-        if (created) await account.sendConsent(ctx, user)
-        else await reply(ctx, user, T.consentRequired)
-      } else {
+      if (created) await account.beginOnboarding(ctx, user)
+      else {
         const parsedVoice = await tasks.onVoice(ctx, user, msg.voice)
         if (parsedVoice?.outcome === 'session_intent') await session.onIntentText(ctx, user, parsedVoice.text)
         else if (parsedVoice?.outcome === 'close_day') await day.closeDay(ctx, user, 'voice')
@@ -131,14 +129,12 @@ async function onCommand(ctx: Ctx, user: User, command: string, args: string, cr
   const now = ctx.now()
   if (command === 'start') {
     await logEvent(ctx.db, user.id, 'bot_started', { source: user.source, returning: !created }, { at: now })
-    if (!user.consentAt) return account.sendConsent(ctx, user)
+    if (created) return account.beginOnboarding(ctx, user)
+    if (user.pendingInput === 'timezone' || user.pendingInput === 'ritual') return account.resumeOnboarding(ctx, user)
     return session.askIntent(ctx, user, { prefix: T.welcomeBack })
   }
   if (command === 'delete_me') return account.askDelete(ctx, user)
-  if (!user.consentAt) {
-    if (created) return account.sendConsent(ctx, user)
-    return reply(ctx, user, T.consentRequired)
-  }
+  if (created) return account.beginOnboarding(ctx, user)
   switch (command) {
     case 'focus':
       if (args) return session.onIntentText(ctx, user, args)
@@ -168,11 +164,7 @@ async function onCommand(ctx: Ctx, user: User, command: string, args: string, cr
 }
 
 async function onText(ctx: Ctx, user: User, text: string, created: boolean): Promise<void> {
-  if (!user.consentAt) {
-    // До согласия текст не обрабатывается и не сохраняется.
-    if (created) return account.sendConsent(ctx, user)
-    return reply(ctx, user, T.consentRequired)
-  }
+  if (created) return account.beginOnboarding(ctx, user)
   if (text === T.sessionStartButton) return tasks.onSessionStart(ctx, user)
   if (text === T.tasksButton) return tasks.showTasks(ctx, user)
   if (text === T.sessionBreakButton) return session.onBreak(ctx, user)
@@ -212,8 +204,7 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
   const { action, id, arg } = parsed
 
   if (action === 'del' && arg === 'confirm') return account.onDeleteConfirm(ctx, user)
-  if (action === 'consent') return account.onConsent(ctx, user)
-  if (!user.consentAt) return reply(ctx, user, T.consentRequired)
+  if (action === 'consent') return account.beginOnboarding(ctx, user)
 
   try {
     switch (action) {

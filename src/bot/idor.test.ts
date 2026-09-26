@@ -49,8 +49,8 @@ describe.skipIf(!hasDb)('IDOR: чужие идентификаторы во вс
       await bot.text(A, t)
     }
     const args = ['ok', 'up', 'down', 'cancel', 'work', 'duration', 'here', 'back', 'done', 'not_done', 'other', 'rest', 'continue', 'later', 'day_end', 'confirm']
-    // del проверяется отдельно: он удаляет самого нажавшего, и дальше A был бы
-    // новым пользователем без согласия — проверки стали бы пустыми.
+    // del проверяется отдельно: он удаляет самого нажавшего, и дальше проверки
+    // выполнялись бы уже от имени заново созданного пользователя.
     for (const action of ACTIONS.filter((a) => a !== 'del')) {
       for (const id of ids) {
         for (const arg of args) await press(`${action}:${id}:${arg}`)
@@ -67,10 +67,9 @@ describe.skipIf(!hasDb)('IDOR: чужие идентификаторы во вс
     expect(bot.textsTo(A).slice(aSentBefore)).not.toContain('Слишком быстро — подожди минуту.')
     expect(bot.textsTo(A).length - aSentBefore).toBeGreaterThanOrEqual(n - ids.length * 9)
 
-    // A всё это время оставался собой, с согласием, — значит, обработчики реально
-    // отрабатывали, а не отвечали «нужно согласие».
+    // A всё это время оставался собой — значит, обработчики реально отрабатывали.
     const aUser = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
-    expect(aUser.consentAt).not.toBeNull()
+    expect(aUser.id).toBeTruthy()
 
     // Состояние B не изменилось ни на байт, очков у B не прибавилось.
     const after = JSON.stringify(await prisma.focusSession.findMany({ where: { userId: bUser.id }, orderBy: { id: 'asc' } }))

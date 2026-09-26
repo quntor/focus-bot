@@ -70,10 +70,12 @@ describe.skipIf(!hasDb)('/delete_me', () => {
     expect(bot.lastText(A)).toContain('удалено')
   })
 
-  it('до согласия текст не обрабатывается и не сохраняется', async () => {
+  it('новый пользователь проходит настройку времени без согласия и не сохраняет её как задачу', async () => {
     const bot = makeBot()
     await bot.text(A, '/start')
-    await bot.text(A, 'написать Кате про увольнение')
+    expect(bot.lastText(A)).toContain('Сколько у тебя сейчас времени?')
+    expect(bot.lastText(A)).not.toContain('согласие')
+    await bot.text(A, '10:00')
     expect(await prisma.focusSession.count()).toBe(0)
     expect(await prisma.task.count()).toBe(0)
   })

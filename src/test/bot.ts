@@ -95,10 +95,9 @@ export function makeBot(opts: { now?: Date; llm?: LlmProvider; stt?: SttProvider
   const lastText = (tgId: number) => tg.sent.filter((s) => s.chatId === BigInt(tgId)).at(-1)?.text ?? ''
   const textsTo = (tgId: number) => tg.sent.filter((s) => s.chatId === BigInt(tgId)).map((s) => s.text)
 
-  // Пройти знакомство: /start, согласие, пояс (сейчас 10:00 в Москве), без ритуала.
+  // Пройти знакомство: /start, пояс (сейчас 10:00 в Москве), без ритуала.
   async function onboard(tgId: number, localTime = '10:00') {
     await text(tgId, '/start')
-    await press(tgId, 'consent::')
     await text(tgId, localTime)
     await press(tgId, 'skip::ritual')
   }

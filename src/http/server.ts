@@ -1,7 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { log } from '../lib/log.js'
-import { renderPrivacyPolicy, type PrivacyPolicyConfig } from './privacy.js'
 
 // Апдейт Telegram — килобайты. Мегабайт с запасом покрывает любое сообщение и
 // не даёт забить память тем, кто нашёл адрес.
@@ -11,7 +10,6 @@ type Options = {
   secret: string
   path: string
   onUpdate: (update: unknown) => Promise<void>
-  privacy?: PrivacyPolicyConfig | undefined
 }
 
 // Сравнение за постоянное время. Хэшируем обе строки, чтобы длины совпадали:
@@ -44,15 +42,6 @@ export function createWebhookServer(opts: Options): Server {
   const server = createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/healthz') {
       res.writeHead(200, { 'Content-Type': 'text/plain' }).end('ok')
-      return
-    }
-
-    if (req.method === 'GET' && req.url === '/privacy' && opts.privacy) {
-      res.writeHead(200, {
-        'Content-Type': 'text/html; charset=utf-8',
-        'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
-        'X-Content-Type-Options': 'nosniff',
-      }).end(renderPrivacyPolicy(opts.privacy))
       return
     }
 

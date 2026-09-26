@@ -103,7 +103,7 @@ UPDATE и DELETE запрещены триггером.
 | Тип | Когда | Обращение | Полезная нагрузка |
 |---|---|---|---|
 | `bot_started` | `/start` | да | `source`, `returning` |
-| `consent_given` | согласие на обработку данных | да | — |
+| `consent_given` | историческое событие старого онбординга, больше не создаётся | да | — |
 | `timezone_set` | человек назвал своё время | да | `offset_minutes` |
 | `intent_submitted` | ответ на «с чего начнёшь» | да | `length_chars`, `named_minutes` |
 | `intent_parsed` | намерение разобрано | нет | `llm_used`, `task_id`, `is_new_task`, `scope` |

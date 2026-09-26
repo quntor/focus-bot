@@ -5,8 +5,8 @@ import { createWebhookServer, safeEqual } from './server.js'
 const SECRET = 's'.repeat(40)
 const PATH = 'p'.repeat(40)
 
-async function start(onUpdate = vi.fn(async () => {}), privacy?: { operatorName: string; contactEmail: string }) {
-  const server = createWebhookServer({ secret: SECRET, path: PATH, onUpdate, privacy })
+async function start(onUpdate = vi.fn(async () => {})) {
+  const server = createWebhookServer({ secret: SECRET, path: PATH, onUpdate })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const { port } = server.address() as AddressInfo
   return { server, onUpdate, base: `http://127.0.0.1:${port}` }
@@ -19,19 +19,6 @@ afterEach(async () => {
 })
 
 describe('вебхук', () => {
-  it('публикует политику без HTML-инъекции из конфигурации', async () => {
-    current = await start(undefined, { operatorName: 'ИП <Оператор>', contactEmail: 'privacy@example.test' })
-    const res = await fetch(`${current.base}/privacy`)
-    const body = await res.text()
-
-    expect(res.status).toBe(200)
-    expect(res.headers.get('content-type')).toContain('text/html')
-    expect(body).toContain('ИП &lt;Оператор&gt;')
-    expect(body).toContain('privacy@example.test')
-    expect(body).not.toContain('ИП <Оператор>')
-    expect(body).toContain('/delete_me')
-  })
-
   it('без правильного секрета — 401, тело не разобрано', async () => {
     current = await start()
     for (const headers of [{}, { 'x-telegram-bot-api-secret-token': 'wrong' }]) {
@@ -54,6 +41,7 @@ describe('вебхук', () => {
 
   it('чужой путь — 404, не POST — 405', async () => {
     current = await start()
+    expect((await fetch(`${current.base}/privacy`)).status).toBe(404)
     expect((await fetch(`${current.base}/tg/${SECRET}`, { method: 'POST' })).status).toBe(404)
     expect((await fetch(`${current.base}/tg/${PATH}`)).status).toBe(405)
   })

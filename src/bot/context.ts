@@ -16,7 +16,6 @@ export type Ctx = {
   llm: LlmProvider
   stt: SttProvider
   now: () => Date
-  policyUrl?: string | undefined
 }
 
 // Бот заблокирован пользователем (403): помечаем и прекращаем отправку, а не
@@ -46,8 +45,8 @@ export async function reply(ctx: Ctx, user: Pick<User, 'id' | 'tgId'>, text: str
 }
 
 async function sessionKeyboard(ctx: Ctx, userId: string): Promise<ReplyKeyboard | undefined> {
-  const user = await ctx.db.user.findUnique({ where: { id: userId }, select: { consentAt: true } })
-  if (!user?.consentAt) return undefined
+  const user = await ctx.db.user.findUnique({ where: { id: userId }, select: { pendingInput: true } })
+  if (!user || user.pendingInput === 'timezone' || user.pendingInput === 'ritual') return undefined
   const paused = await ctx.db.focusSession.count({ where: { userId, state: 'paused' } })
   return paused > 0
     ? [[T.sessionResumeButton, T.sessionNewButton], [T.tasksButton]]

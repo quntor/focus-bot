@@ -28,16 +28,12 @@ const ctx: Ctx = {
   llm,
   stt,
   now: () => new Date(),
-  policyUrl: cfg.PRIVACY_POLICY_URL,
 }
 
 const server = createWebhookServer({
   secret: cfg.TELEGRAM_WEBHOOK_SECRET,
   path: cfg.TELEGRAM_WEBHOOK_PATH,
   onUpdate: (update) => handleUpdate(ctx, update),
-  privacy: cfg.PRIVACY_OPERATOR_NAME && cfg.PRIVACY_CONTACT_EMAIL
-    ? { operatorName: cfg.PRIVACY_OPERATOR_NAME, contactEmail: cfg.PRIVACY_CONTACT_EMAIL }
-    : undefined,
 })
 
 startLoops(ctx, { outbox: () => runOutboxOnce(ctx) })
