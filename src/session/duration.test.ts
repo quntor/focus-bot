@@ -51,6 +51,7 @@ describe('автомат сессии', () => {
       'collecting_intent>cancelled',
       'collecting_intent>running',
       'paused>abandoned',
+      'paused>finished',
       'paused>running',
       'running>abandoned',
       'running>finished',

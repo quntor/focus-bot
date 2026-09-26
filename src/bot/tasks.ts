@@ -1,6 +1,7 @@
 import type { User } from '@prisma/client'
 import { logEvent } from '../analytics/log.js'
 import { dayKey } from '../lib/day.js'
+import { parseIntent } from '../llm/intent.js'
 import { parseTaskMessage } from '../llm/tasks.js'
 import { cancelPending } from '../outbox/queue.js'
 import { creditCountedSession } from '../retention/credit.js'
@@ -9,10 +10,11 @@ import { StaleTransition, transition } from '../session/fsm.js'
 import { TelegramError, type Keyboard } from '../tg/client.js'
 import { cb } from './callbacks.js'
 import { reply, type Ctx } from './context.js'
-import { activeElapsedMinutes, activeSession, onIntentText, onStartButton, startTaskSession } from './session-flow.js'
+import { activeElapsedMinutes, activeSession, onStartButton, startTaskSession } from './session-flow.js'
 import { T } from './texts.js'
 
 export type TaskInputSource = 'text' | 'voice'
+export type TaskMessageOutcome = 'handled' | 'session_intent' | 'close_day'
 
 export const MAX_VOICE_SECONDS = 180
 export const MAX_VOICE_BYTES = 5 * 1024 * 1024
@@ -40,18 +42,6 @@ const normalize = (value: string) =>
     .replace(/ё/g, 'е')
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim()
-
-// Обычное «поработаю над отчётом» сохраняет старый быстрый сценарий. Парсер
-// списка зовём, только когда человек явно управляет задачами; voice проверяется
-// всегда, потому что это новый вход и одна запись часто содержит целый список.
-export function shouldParseTaskMessage(text: string): boolean {
-  const compact = text.replace(/\s+/g, ' ').trim()
-  return [
-    /(?:добавь|добавить|запиши|записать|создай|создать).{0,30}задач/iu,
-    /(?:сегодня|на сегодня).{0,30}(?:хочу|нужно|надо|планирую).{0,30}(?:сделать|задач|дел)/iu,
-    /(?:сделал|сделала|закончил|закончила|готово).{0,100}(?:приступаю|перехожу|начинаю)/iu,
-  ].some((pattern) => pattern.test(compact))
-}
 
 const TASKS_PER_PAGE = 6
 
@@ -230,6 +220,40 @@ async function captureTasks(ctx: Ctx, user: User, titles: string[], source: Task
   })
 }
 
+async function resolveOrCreateTask(
+  ctx: Ctx,
+  user: User,
+  title: string,
+  activeTasks: { id: string; title: string }[],
+  source: TaskInputSource,
+): Promise<{ id: string; title: string }> {
+  const parsed = activeTasks.length
+    ? await parseIntent(ctx.llm, { text: title, tasks: activeTasks, profile: user.profileText })
+    : { result: { taskId: null, title, scope: 'step' as const, llmUsed: false }, failure: null }
+  if (parsed.failure && !parsed.failure.ok) {
+    await logEvent(ctx.db, user.id, 'llm_fallback', { stage: 'intent', reason: parsed.failure.reason }, { at: ctx.now() })
+  }
+
+  const candidate = parsed.result.title.replace(/\s+/g, ' ').trim().slice(0, 80) || title.replace(/\s+/g, ' ').trim().slice(0, 80)
+  return ctx.db.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
+    if (parsed.result.taskId) {
+      const matched = await tx.task.findFirst({
+        where: { id: parsed.result.taskId, userId: user.id, status: 'active' },
+        select: { id: true, title: true },
+      })
+      if (matched) return matched
+    }
+
+    const tasks = await tx.task.findMany({ where: { userId: user.id, status: 'active' }, select: { id: true, title: true } })
+    const existing = tasks.find((task) => normalize(task.title) === normalize(candidate) || normalize(task.title) === normalize(title))
+    if (existing) return existing
+    const created = await tx.task.create({ data: { userId: user.id, title: candidate, createdAt: ctx.now() }, select: { id: true, title: true } })
+    await logEvent(tx, user.id, 'tasks_captured', { count: 1, source }, { at: ctx.now() })
+    return created
+  })
+}
+
 async function completeAndStart(
   ctx: Ctx,
   user: User,
@@ -313,9 +337,9 @@ async function completeAndStart(
   await startTaskSession(ctx, user, selectedNext.id)
 }
 
-// true — сообщение полностью обработано как управление задачами; false — это
-// обычное намерение, вызывающий продолжает прежний session-flow.
-export async function onTaskMessage(ctx: Ctx, user: User, text: string, source: TaskInputSource): Promise<boolean> {
+// Модель только классифицирует свободную речь. Вызывающий выполняет
+// обычное намерение или закрытие дня; операции с задачами делаются здесь.
+export async function onTaskMessage(ctx: Ctx, user: User, text: string, source: TaskInputSource): Promise<TaskMessageOutcome> {
   const current = await activeSession(ctx, user.id)
   const storedTasks = await ctx.db.task.findMany({
     where: { userId: user.id, status: 'active' },
@@ -332,36 +356,54 @@ export async function onTaskMessage(ctx: Ctx, user: User, text: string, source: 
   if (!parsed.result) {
     const reason = parsed.failure && !parsed.failure.ok ? parsed.failure.reason : 'invalid'
     await logEvent(ctx.db, user.id, 'llm_fallback', { stage: 'tasks', reason }, { at: ctx.now(), sessionId: current?.id })
+    // В сборке без LLM сохраняем базовый текстовый старт сессии. Ошибка
+    // включённой модели не даёт частичных операций: просим повторить.
+    if (reason === 'disabled') return 'session_intent'
     await reply(ctx, user, T.tasksParseFailed)
-    return true
+    return 'handled'
   }
 
-  const count = parsed.result.kind === 'capture' ? parsed.result.titles.length : parsed.result.kind === 'complete_and_start' ? 1 : 0
+  const count = parsed.result.kind === 'capture' ? parsed.result.titles.length : ['start_task', 'complete_and_start'].includes(parsed.result.kind) ? 1 : 0
   await logEvent(ctx.db, user.id, 'tasks_parsed', { kind: parsed.result.kind, count }, { at: ctx.now(), sessionId: current?.id })
-  if (parsed.result.kind === 'session_intent') return false
+  if (parsed.result.kind === 'session_intent') return 'session_intent'
+  if (parsed.result.kind === 'close_day') return 'close_day'
   if (parsed.result.kind === 'capture') {
     const tasks = await captureTasks(ctx, user, parsed.result.titles, source)
     if (!tasks.length) {
       await reply(ctx, user, T.tasksParseFailed)
-      return true
+      return 'handled'
     }
     await showTasks(ctx, user, 0, T.tasksCaptured(tasks.map((task) => task.title)))
-    return true
+    return 'handled'
   }
 
-  await completeAndStart(ctx, user, parsed.result, source)
-  return true
+  if (parsed.result.kind === 'start_task') {
+    const next = await resolveOrCreateTask(ctx, user, parsed.result.title, activeTasks, source)
+    await startTaskSession(ctx, user, next.id)
+    return 'handled'
+  }
+  if (!current?.taskId) {
+    await reply(ctx, user, T.taskSwitchNoCurrent)
+    return 'handled'
+  }
+  if (current.state === 'paused') {
+    await reply(ctx, user, T.taskSwitchPaused)
+    return 'handled'
+  }
+  const next = await resolveOrCreateTask(ctx, user, parsed.result.title, activeTasks, source)
+  await completeAndStart(ctx, user, { completeTaskId: current.taskId, start: { taskId: next.id, title: next.title } }, source)
+  return 'handled'
 }
 
 export async function onVoice(
   ctx: Ctx,
   user: User,
   voice: { file_id: string; duration: number; mime_type?: string | undefined; file_size?: number | undefined },
-): Promise<void> {
-  if (voice.duration > MAX_VOICE_SECONDS) return reply(ctx, user, T.voiceTooLong)
-  if (voice.file_size !== undefined && voice.file_size > MAX_VOICE_BYTES) return reply(ctx, user, T.voiceTooLarge)
-  if (!ctx.stt.enabled) return reply(ctx, user, T.voiceDisabled)
-  if (!allowVoice(user.tgId, ctx.now())) return reply(ctx, user, T.voiceRateLimited)
+): Promise<{ outcome: Exclude<TaskMessageOutcome, 'handled'>; text: string } | null> {
+  if (voice.duration > MAX_VOICE_SECONDS) { await reply(ctx, user, T.voiceTooLong); return null }
+  if (voice.file_size !== undefined && voice.file_size > MAX_VOICE_BYTES) { await reply(ctx, user, T.voiceTooLarge); return null }
+  if (!ctx.stt.enabled) { await reply(ctx, user, T.voiceDisabled); return null }
+  if (!allowVoice(user.tgId, ctx.now())) { await reply(ctx, user, T.voiceRateLimited); return null }
 
   let transcript: string
   try {
@@ -373,12 +415,13 @@ export async function onVoice(
       timeoutMs: 30_000,
     })
   } catch (error) {
-    if (error instanceof TelegramError && error.code === 413) return reply(ctx, user, T.voiceTooLarge)
-    return reply(ctx, user, T.voiceFailed)
+    if (error instanceof TelegramError && error.code === 413) await reply(ctx, user, T.voiceTooLarge)
+    else await reply(ctx, user, T.voiceFailed)
+    return null
   }
 
   const text = transcript.replace(/\s+/g, ' ').trim().slice(0, 2_000)
-  if (!text) return reply(ctx, user, T.voiceFailed)
+  if (!text) { await reply(ctx, user, T.voiceFailed); return null }
   await logEvent(
     ctx.db,
     user.id,
@@ -387,5 +430,6 @@ export async function onVoice(
     { at: ctx.now() },
   )
   await reply(ctx, user, T.voiceTranscript(text))
-  if (!(await onTaskMessage(ctx, user, text, 'voice'))) await onIntentText(ctx, user, text)
+  const outcome = await onTaskMessage(ctx, user, text, 'voice')
+  return outcome === 'handled' ? null : { outcome, text }
 }

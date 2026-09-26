@@ -16,8 +16,20 @@ const llm = (answer: string): LlmProvider => ({
   },
 })
 
+const conversational = (classify: (text: string) => string, resolve?: (intent: string, tasks: { label: string; title: string }[]) => string): LlmProvider => ({
+  enabled: true,
+  async complete(req) {
+    if (req.system.includes('сообщение пользователя фокус-боту')) return classify(JSON.parse(req.input).text)
+    if (req.system.includes('намерение пользователя перед рабочей сессией')) {
+      const input = JSON.parse(req.input)
+      return resolve?.(input.intent, input.tasks) ?? JSON.stringify({ task: null, title: input.intent, scope: 'step' })
+    }
+    throw new Error('unexpected LLM call')
+  },
+})
+
 const capture = llm(
-  '{"kind":"capture","new_tasks":["Подготовить отчёт","Купить корм"],"complete_task":null,"start_task":null,"start_title":null}',
+  '{"kind":"capture","new_tasks":["Подготовить отчёт","Купить корм"],"start_title":null}',
 )
 
 describe.skipIf(!hasDb)('список задач из текста и голоса', () => {
@@ -214,8 +226,9 @@ describe.skipIf(!hasDb)('список задач из текста и голос
   })
 
   it('явно завершает текущую задачу и сразу запускает следующую', async () => {
-    const switchLlm = llm(
-      '{"kind":"complete_and_start","new_tasks":[],"complete_task":"t1","start_task":"t2","start_title":null}',
+    const switchLlm = conversational(
+      () => '{"kind":"complete_and_start","new_tasks":[],"start_title":"Позвонить Ивану"}',
+      (_intent, active) => JSON.stringify({ task: active.find((task) => task.title === 'Позвонить Ивану')?.label ?? null, title: 'Позвонить Ивану', scope: 'step' }),
     )
     const bot = makeBot({ llm: switchLlm })
     await bot.onboard(A)
@@ -232,6 +245,54 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     expect(finished).toMatchObject({ state: 'finished', outcome: 'done', progress: 'moved', restChoice: 'continue' })
     const running = await prisma.focusSession.findFirstOrThrow({ where: { taskId: second.id, state: 'running' } })
     expect(running.intentText).toBe('Позвонить Ивану')
+  })
+
+  it('не создаёт следующую задачу, если текущей задачи для завершения нет', async () => {
+    const bot = makeBot({
+      llm: conversational(() => '{"kind":"complete_and_start","new_tasks":[],"start_title":"Новая задача"}'),
+    })
+    await bot.onboard(A)
+
+    await bot.text(A, 'С этим всё, перехожу к новой задаче')
+
+    expect(await prisma.task.count()).toBe(0)
+    expect(bot.lastText(A)).toContain('нет текущей задачи')
+  })
+
+  it('по произвольной фразе находит задачу и сразу запускает таймер', async () => {
+    const bot = makeBot({
+      llm: conversational(
+        () => '{"kind":"start_task","new_tasks":[],"start_title":"Подготовить презентацию"}',
+        (_intent, active) => JSON.stringify({ task: active[0]?.label ?? null, title: 'Подготовить презентацию', scope: 'step' }),
+      ),
+    })
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    const task = await prisma.task.create({ data: { userId: user.id, title: 'Подготовить презентацию' } })
+
+    await bot.text(A, 'Всё, налетаю на слайды')
+
+    const running = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })
+    expect(running).toMatchObject({ taskId: task.id, intentText: task.title, plannedMinutes: 40 })
+    expect(bot.lastText(A)).toContain('Поехали')
+  })
+
+  it('по голосовой команде создаёт отсутствующую задачу и сразу запускает таймер', async () => {
+    const transcript = 'Хорош тянуть, берусь за макет лендинга'
+    const stt: SttProvider = { enabled: true, async transcribe() { return transcript } }
+    const bot = makeBot({
+      stt,
+      llm: conversational(() => '{"kind":"start_task","new_tasks":[],"start_title":"Сделать макет лендинга"}'),
+    })
+    bot.tg.downloads.set('voice-start', new Uint8Array([1, 2, 3]))
+    await bot.onboard(B)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(B) } })
+
+    await bot.voice(B, { fileId: 'voice-start', duration: 8, mimeType: 'audio/ogg', fileSize: 3 })
+
+    const task = await prisma.task.findFirstOrThrow({ where: { userId: user.id, title: 'Сделать макет лендинга' } })
+    expect(await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })).toMatchObject({ taskId: task.id })
+    expect(bot.textsTo(B)).toContain(`Распознал: «${transcript}».`)
   })
 
   it('не запускает чужую задачу из поддельного callback', async () => {

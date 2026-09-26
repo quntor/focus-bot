@@ -47,7 +47,7 @@ UPDATE и DELETE запрещены триггером.
 | `intent_submitted` | ответ на «с чего начнёшь» | да | `length_chars`, `named_minutes` |
 | `intent_parsed` | намерение разобрано | нет | `llm_used`, `task_id`, `is_new_task`, `scope` |
 | `voice_transcribed` | голосовое распознано | да | `duration_seconds`, `length_chars` |
-| `tasks_parsed` | модель классифицировала управление задачами | нет | `kind`, `count` |
+| `tasks_parsed` | модель классифицировала свободную речь | нет | `kind`, `count` (`session_intent`, `capture`, `start_task`, `complete_and_start`, `close_day`) |
 | `tasks_captured` | человек добавил список задач | да | `count`, `source` |
 | `task_selected` | выбрал задачу для сессии | да | `task_id` |
 | `task_switched` | завершил одну задачу и начал другую | да | `from_task_id`, `to_task_id`, `source` |
@@ -76,7 +76,7 @@ UPDATE и DELETE запрещены триггером.
 | `decline_check_sent` | третий отказ подряд, бот спросил вслух | нет | `declines_in_row` |
 | `daily_goal_set` | поставил цель на день | да | `target_sessions` |
 | `goal_reached` | цель дня выполнена | нет | `day_key`, `target_sessions` |
-| `day_closed` | «всё, на сегодня» | да | `day_key`, `via` |
+| `day_closed` | «всё, на сегодня» | да | `day_key`, `via` (`button`, `command`, `text`, `voice`) |
 | `daily_summary_sent` | вечерняя сводка ушла | нет | `day_key` |
 | `daily_summary_confirmed` | закрыл день по сводке | да | `day_key`, `sessions` |
 | `streak_extended` | серия выросла | нет | `day_key`, `current` |

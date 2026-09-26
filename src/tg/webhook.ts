@@ -114,7 +114,9 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
         if (created) await account.sendConsent(ctx, user)
         else await reply(ctx, user, T.consentRequired)
       } else {
-        await tasks.onVoice(ctx, user, msg.voice)
+        const parsedVoice = await tasks.onVoice(ctx, user, msg.voice)
+        if (parsedVoice?.outcome === 'session_intent') await session.onIntentText(ctx, user, parsedVoice.text)
+        else if (parsedVoice?.outcome === 'close_day') await day.closeDay(ctx, user, 'voice')
       }
     }
     else if (msg?.text) await onText(ctx, user, msg.text, created)
@@ -194,8 +196,9 @@ async function onText(ctx: Ctx, user: User, text: string, created: boolean): Pro
       if (await session.onReportText(ctx, user, text)) return
       break
   }
-  if (tasks.shouldParseTaskMessage(text) && (await tasks.onTaskMessage(ctx, user, text, 'text'))) return
-  return session.onIntentText(ctx, user, text)
+  const outcome = await tasks.onTaskMessage(ctx, user, text, 'text')
+  if (outcome === 'session_intent') return session.onIntentText(ctx, user, text)
+  if (outcome === 'close_day') return day.closeDay(ctx, user, 'text')
 }
 
 async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string | undefined, messageId: number | undefined): Promise<void> {

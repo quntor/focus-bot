@@ -17,7 +17,7 @@ const tasks = [
 describe('разбор сообщения со списком задач', () => {
   it('извлекает несколько новых задач', async () => {
     const parsed = await parseTaskMessage(
-      provider('{"kind":"capture","new_tasks":["Подготовить отчёт","Купить корм"],"complete_task":null,"start_task":null,"start_title":null}'),
+      provider('{"kind":"capture","new_tasks":["Подготовить отчёт","Купить корм"],"start_title":null}'),
       { text: 'Сегодня хочу подготовить отчёт и купить корм', tasks, currentTaskId: null },
     )
 
@@ -65,11 +65,7 @@ describe('разбор сообщения со списком задач', () =>
     const observed: LlmProvider = {
       enabled: true,
       async complete(req) {
-        expect(JSON.parse(req.input)).toEqual({
-          text: 'Нужно доделать выкат и поправить ошибки',
-          active_tasks: [],
-          current_task: null,
-        })
+        expect(JSON.parse(req.input)).toEqual({ text: 'Нужно доделать выкат и поправить ошибки', has_current_task: false })
         expect(req.system).toContain('полного упорядоченного списка')
         return '{"kind":"capture","new_tasks":["Доделать выкат","Поправить ошибки"]}'
       },
@@ -90,7 +86,7 @@ describe('разбор сообщения со списком задач', () =>
       async complete(req) {
         const hasCoverageRule = req.system.includes('каждое явно названное самостоятельное действие')
         const hasDedupeRule = req.system.includes('Фрагмент без личной формы глагола')
-        expect(JSON.parse(req.input).active_tasks).toEqual([])
+        expect(JSON.parse(req.input)).toMatchObject({ has_current_task: false })
         return hasCoverageRule && hasDedupeRule
           ? JSON.stringify({
               kind: 'capture',
@@ -231,19 +227,15 @@ describe('разбор сообщения со списком задач', () =>
     expect(parsed.failure).toMatchObject({ ok: false, reason: 'error' })
   })
 
-  it('переводит только временные метки своих задач в id', async () => {
+  it('не передаёт модели список задач даже при переключении', async () => {
     const switching: LlmProvider = {
       enabled: true,
       async complete(req) {
         expect(JSON.parse(req.input)).toEqual({
           text: 'Первую сделал, перехожу ко второй',
-          active_tasks: [
-            { label: 't1', title: 'Подготовить презентацию' },
-            { label: 't2', title: 'Позвонить Ивану' },
-          ],
-          current_task: 't1',
+          has_current_task: true,
         })
-        return '{"kind":"complete_and_start","new_tasks":[],"complete_task":"t1","start_task":"t2","start_title":null}'
+        return '{"kind":"complete_and_start","new_tasks":[],"start_title":"Позвонить Ивану"}'
       },
     }
     const parsed = await parseTaskMessage(
@@ -252,17 +244,54 @@ describe('разбор сообщения со списком задач', () =>
     )
 
     expect(parsed.failure).toBeNull()
-    expect(parsed.result).toEqual({
-      kind: 'complete_and_start',
-      completeTaskId: 'own-a',
-      start: { taskId: 'own-b', title: 'Позвонить Ивану' },
-      llmUsed: true,
-    })
+    expect(parsed.result).toEqual({ kind: 'complete_and_start', title: 'Позвонить Ивану', llmUsed: true })
   })
 
-  it('отвергает выдуманную метку без частичного действия', async () => {
+  it('понимает произвольную фразу как старт задачи без передачи списка задач', async () => {
+    const observed: LlmProvider = {
+      enabled: true,
+      async complete(req) {
+        expect(JSON.parse(req.input)).toEqual({
+          text: 'Всё, налетаю на презентацию',
+          has_current_task: false,
+        })
+        return '{"kind":"start_task","new_tasks":[],"start_title":"Подготовить презентацию"}'
+      },
+    }
+
+    const parsed = await parseTaskMessage(observed, {
+      text: 'Всё, налетаю на презентацию',
+      tasks,
+      currentTaskId: null,
+    })
+
+    expect(parsed.failure).toBeNull()
+    expect(parsed.result).toEqual({ kind: 'start_task', title: 'Подготовить презентацию', llmUsed: true })
+  })
+
+  it('понимает свободную фразу о завершении текущей задачи и переходе', async () => {
     const parsed = await parseTaskMessage(
-      provider('{"kind":"complete_and_start","new_tasks":[],"complete_task":"t99","start_task":null,"start_title":"Новая задача"}'),
+      provider('{"kind":"complete_and_start","new_tasks":[],"start_title":"Позвонить Ивану"}'),
+      { text: 'С этим разобрался, теперь наберу Ивана', tasks, currentTaskId: 'own-a' },
+    )
+
+    expect(parsed.failure).toBeNull()
+    expect(parsed.result).toEqual({ kind: 'complete_and_start', title: 'Позвонить Ивану', llmUsed: true })
+  })
+
+  it('понимает произвольную фразу как конец дня', async () => {
+    const parsed = await parseTaskMessage(
+      provider('{"kind":"close_day","new_tasks":[],"start_title":null}'),
+      { text: 'С меня хватит, закругляемся до завтра', tasks, currentTaskId: 'own-a' },
+    )
+
+    expect(parsed.failure).toBeNull()
+    expect(parsed.result).toEqual({ kind: 'close_day', llmUsed: true })
+  })
+
+  it('отвергает старт без названия задачи', async () => {
+    const parsed = await parseTaskMessage(
+      provider('{"kind":"start_task","new_tasks":[],"start_title":null}'),
       { text: 'Сделал старую, начинаю новую', tasks, currentTaskId: 'own-a' },
     )
 
@@ -272,7 +301,7 @@ describe('разбор сообщения со списком задач', () =>
 
   it('возвращает обычное намерение без операций с задачами', async () => {
     const parsed = await parseTaskMessage(
-      provider('{"kind":"session_intent","new_tasks":[],"complete_task":null,"start_task":null,"start_title":null}'),
+      provider('{"kind":"session_intent","new_tasks":[],"start_title":null}'),
       { text: 'Поработаю над презентацией', tasks, currentTaskId: null },
     )
 

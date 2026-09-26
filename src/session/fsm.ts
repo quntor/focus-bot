@@ -4,7 +4,7 @@ import type { Db } from '../lib/db.js'
 // Конечный автомат сессии. Состояния и разрешённые переходы — только здесь.
 //
 //   collecting_intent ── подтверждение ──> running ── отчёт ──> finished(outcome)
-//                                      └─> paused ──> running | abandoned
+//                                      └─> paused ──> running | finished | abandoned
 //   collecting_intent ── отмена/таймаут ──> cancelled
 //   running ── /stop, таймаут+1ч, молчание на пинги ──> abandoned
 //
@@ -21,7 +21,7 @@ export type Outcome = (typeof OUTCOMES)[number]
 const TRANSITIONS: Record<State, readonly State[]> = {
   collecting_intent: ['running', 'cancelled'],
   running: ['paused', 'finished', 'abandoned'],
-  paused: ['running', 'abandoned'],
+  paused: ['running', 'finished', 'abandoned'],
   finished: [],
   abandoned: [],
   cancelled: [],

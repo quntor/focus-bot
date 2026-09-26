@@ -46,7 +46,7 @@ export const PAYLOADS = {
   }),
   voice_transcribed: z.strictObject({ duration_seconds: z.int().min(0).max(180), length_chars: z.int().min(0) }),
   tasks_parsed: z.strictObject({
-    kind: z.enum(['session_intent', 'capture', 'complete_and_start']),
+    kind: z.enum(['session_intent', 'capture', 'start_task', 'complete_and_start', 'close_day']),
     count: z.int().min(0).max(10),
   }),
   tasks_captured: z.strictObject({ count: z.int().min(1).max(10), source: z.enum(['text', 'voice']) }),
@@ -94,7 +94,7 @@ export const PAYLOADS = {
   decline_check_sent: z.strictObject({ declines_in_row: z.int().min(0) }),
   daily_goal_set: z.strictObject({ target_sessions: z.int().min(1).max(20) }),
   goal_reached: z.strictObject({ day_key: dayKey, target_sessions: z.int().min(1) }),
-  day_closed: z.strictObject({ day_key: dayKey, via: z.enum(['button', 'command']) }),
+  day_closed: z.strictObject({ day_key: dayKey, via: z.enum(['button', 'command', 'text', 'voice']) }),
   daily_summary_sent: z.strictObject({ day_key: dayKey }),
   daily_summary_confirmed: z.strictObject({ day_key: dayKey, sessions: z.int().min(0) }),
   streak_extended: z.strictObject({ day_key: dayKey, current: z.int().min(0) }),

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { hasDb, prisma, resetDb } from '../test/db.js'
 import { makeBot } from '../test/bot.js'
 import { runOutboxOnce } from '../outbox/worker.js'
+import type { LlmProvider } from '../llm/provider.js'
 
 const A = 1001
 
@@ -76,6 +77,39 @@ describe.skipIf(!hasDb)('полный цикл сессии', () => {
     expect(bot.lastText(A)).toContain('Когда встретимся')
     const meeting = await prisma.outboxMessage.findFirst({ where: { kind: 'meeting', status: 'pending' } })
     expect(meeting).not.toBeNull()
+  })
+
+  it('свободная фраза закрывает день, останавливает таймер и показывает время по задачам', async () => {
+    const llm: LlmProvider = {
+      enabled: true,
+      async complete(req) {
+        if (req.system.includes('сообщение пользователя фокус-боту')) {
+          return '{"kind":"close_day","new_tasks":[],"start_title":null}'
+        }
+        throw new Error('unexpected LLM call')
+      },
+    }
+    const phrase = 'Мозг всё, лавочка закрыта до завтра'
+    const bot = makeBot({ llm, stt: { enabled: true, async transcribe() { return phrase } } })
+    bot.tg.downloads.set('voice-close-day', new Uint8Array([1, 2, 3]))
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    const task = await prisma.task.create({ data: { userId: user.id, title: 'Сделать презентацию' } })
+    await bot.press(A, `task:${task.id}:start`)
+    bot.advance(17)
+
+    await bot.voice(A, { fileId: 'voice-close-day', duration: 4, mimeType: 'audio/ogg', fileSize: 3 })
+
+    expect(await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id } })).toMatchObject({
+      state: 'finished',
+      outcome: 'not_done',
+      restChoice: 'day_end',
+      finishedAt: bot.now(),
+    })
+    expect(await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).toMatchObject({ status: 'active' })
+    expect(bot.lastText(A)).toContain('По задачам:')
+    expect(bot.lastText(A)).toContain('• Сделать презентацию — 17 минут')
+    expect(await prisma.outboxMessage.count({ where: { userId: user.id, status: { in: ['pending', 'paused'] }, kind: { in: ['ping', 'session_end'] } } })).toBe(0)
   })
 
   it('подтверждение времени встречи не отменяет такую же встречу по умолчанию', async () => {

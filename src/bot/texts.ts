@@ -107,6 +107,7 @@ export const T = {
   taskSelectedRunning: (task: string, end: string | null) =>
     `Текущая сессия теперь по задаче «${task}». Таймер продолжает идти${end ? ` до ${end}` : ''}.`,
   taskSwitchMismatch: 'Не уверен, какую текущую задачу завершить. Назови её точнее — ничего пока не менял.',
+  taskSwitchNoCurrent: 'Сейчас нет текущей задачи, которую можно отметить готовой. Назови, с чего начать.',
   taskSwitchPaused: 'Сессия на перерыве. Сначала вернись к работе, затем напиши, что закончил и к чему переходишь.',
   taskSwitched: (done: string, next: string) => `«${done}» отметил готовой. Перехожу к «${next}».`,
 
@@ -237,6 +238,9 @@ export const T = {
           outcomesLine(s),
       s.target ? `Цель: ${s.counted} из ${s.target}.` : null,
       s.abandoned > 0 ? `Брошено: ${s.abandoned}.` : null,
+      s.taskTimes.length
+        ? ['По задачам:', ...s.taskTimes.map((task) => `• ${task.title} — ${task.minutes === 0 ? 'меньше минуты' : minutesText(task.minutes)}`)].join('\n')
+        : null,
       `Серия: ${s.streak} ${plural(s.streak, 'день', 'дня', 'дней')}. Очки за сегодня: ${s.points}.`,
       weekLine(s),
       `Активных дней за последние 7: ${s.activeDays} из 7.`,
@@ -318,6 +322,7 @@ export type DaySummary = {
   prevWeekPoints: number | null
   bestWeek: boolean
   activeDays: number
+  taskTimes: { title: string; minutes: number }[]
 }
 
 // Очки — сведения о прогрессе, а не плата и не угроза: сравнение с собой же

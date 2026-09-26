@@ -3,7 +3,9 @@ import { logEvent } from '../analytics/log.js'
 import { addDays, dayKey, daysBetween, weekStart } from '../lib/day.js'
 import { nextLocalTime, parseClock } from '../lib/time.js'
 import { cancelPending, enqueue } from '../outbox/queue.js'
-import { DAYS_OFF_PER_WEEK } from '../retention/rules.js'
+import { creditCountedSession } from '../retention/credit.js'
+import { DAYS_OFF_PER_WEEK, isCounted } from '../retention/rules.js'
+import { transition } from '../session/fsm.js'
 import { cb } from './callbacks.js'
 import { reply, type Ctx } from './context.js'
 import { activeSession, askIntent, openCollecting } from './session-flow.js'
@@ -24,10 +26,27 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
   const since = new Date(Date.parse(`${day}T00:00:00Z`) - 36 * 60 * MIN)
   const sessions = await db.focusSession.findMany({
     where: { userId: user.id, createdAt: { gte: since }, state: { in: ['finished', 'abandoned'] } },
-    select: { state: true, outcome: true, counted: true, finishedAt: true },
+    select: {
+      state: true,
+      outcome: true,
+      counted: true,
+      startedAt: true,
+      finishedAt: true,
+      pausedSeconds: true,
+      task: { select: { title: true } },
+    },
   })
   const today = sessions.filter((s) => s.finishedAt && dayKey(s.finishedAt, user.timezone) === day)
   const finished = today.filter((s) => s.state === 'finished')
+  const timeByTask = new Map<string, number>()
+  for (const session of today) {
+    if (!session.startedAt || !session.finishedAt || !session.task?.title) continue
+    const activeMs = Math.max(0, session.finishedAt.getTime() - session.startedAt.getTime() - session.pausedSeconds * 1000)
+    if (activeMs > 0) timeByTask.set(session.task.title, (timeByTask.get(session.task.title) ?? 0) + activeMs)
+  }
+  const taskTimes = [...timeByTask.entries()]
+    .map(([title, duration]) => ({ title, minutes: Math.floor(duration / MIN) }))
+    .sort((left, right) => right.minutes - left.minutes || left.title.localeCompare(right.title, 'ru'))
   const goal = await db.dailyGoal.findUnique({ where: { userId_dayKey: { userId: user.id, dayKey: day } } })
   const streak = await db.streak.findUnique({ where: { userId: user.id } })
   const points = await db.pointsEntry.aggregate({ where: { userId: user.id, dayKey: day }, _sum: { amount: true } })
@@ -69,6 +88,7 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
     prevWeekPoints,
     bestWeek,
     activeDays: recent,
+    taskTimes,
   }
 }
 
@@ -146,10 +166,52 @@ export async function putDefaultMeeting(tx: Prisma.TransactionClient, user: User
 
 // «Всё, на сегодня» — работает всегда и без уговоров, но заканчивается итогом
 // дня и назначением следующей встречи. Тишиной — никогда.
-export async function closeDay(ctx: Ctx, user: User, via: 'button' | 'command'): Promise<void> {
+export async function closeDay(ctx: Ctx, user: User, via: 'button' | 'command' | 'text' | 'voice'): Promise<void> {
   const now = ctx.now()
   const day = dayKey(now, user.timezone)
   const summary = await ctx.db.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'day:' + user.id}))`
+    const active = await tx.focusSession.findFirst({
+      where: { userId: user.id, state: { in: ['collecting_intent', 'running', 'paused'] } },
+    })
+    if (active?.state === 'collecting_intent') {
+      await transition(tx, { sessionId: active.id, userId: user.id }, 'collecting_intent', 'cancelled', { finishedAt: now })
+      await logEvent(tx, user.id, 'session_cancelled', {}, { at: now, sessionId: active.id })
+    } else if (active?.state === 'running' || active?.state === 'paused') {
+      const openPauseSeconds =
+        active.state === 'paused' && active.pausedAt
+          ? Math.floor(Math.max(0, now.getTime() - active.pausedAt.getTime()) / 1000)
+          : 0
+      const elapsed = active.startedAt
+        ? Math.floor(Math.max(0, now.getTime() - active.startedAt.getTime() - (active.pausedSeconds + openPauseSeconds) * 1000) / MIN)
+        : 0
+      const counted = isCounted('finished', elapsed)
+      const early = active.plannedEndAt !== null && now < active.plannedEndAt
+      await transition(tx, { sessionId: active.id, userId: user.id }, active.state, 'finished', {
+        outcome: 'not_done',
+        pausedAt: null,
+        pausedSeconds: active.pausedSeconds + openPauseSeconds,
+        finishedAt: now,
+        counted,
+        restChoice: 'day_end',
+      })
+      await tx.outboxMessage.updateMany({
+        where: {
+          userId: user.id,
+          status: { in: ['pending', 'paused'] },
+          OR: [{ idempotencyKey: { startsWith: `ping:${active.id}` } }, { idempotencyKey: `session_end:${active.id}` }],
+        },
+        data: { status: 'canceled' },
+      })
+      await logEvent(
+        tx,
+        user.id,
+        'session_completed',
+        { session_id: active.id, outcome: 'not_done', elapsed_minutes: elapsed, early, counted },
+        { at: now, sessionId: active.id },
+      )
+      if (counted) await creditCountedSession(tx, { userId: user.id, sessionId: active.id, dayKey: day, at: now })
+    }
     await tx.dailyGoal.upsert({
       where: { userId_dayKey: { userId: user.id, dayKey: day } },
       create: { userId: user.id, dayKey: day, summarySentAt: now },
