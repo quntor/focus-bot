@@ -5,7 +5,7 @@ describe('OpenAI-compatible STT', () => {
   it('отправляет аудио multipart-запросом на transcription endpoint', async () => {
     const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const form = init?.body as FormData
-      expect(form.get('model')).toBe('openai/whisper-large-v3')
+      expect(form.get('model')).toBe('whisper-large-v3')
       expect(form.get('language')).toBe('ru')
       expect(form.get('prompt')).toBe('Милавица, VDS, FocusBot, фокус-бот, планирование дня.')
       expect(form.get('file')).toBeInstanceOf(File)
@@ -13,8 +13,8 @@ describe('OpenAI-compatible STT', () => {
     })
     const stt = createOpenAiCompatibleSttProvider({
       apiKey: 'secret',
-      baseUrl: 'https://foundation-models.example/v1',
-      model: 'openai/whisper-large-v3',
+      baseUrl: 'https://shared1.multitool.works:4000/v1',
+      model: 'whisper-large-v3',
       fetchFn,
     })
 
@@ -22,7 +22,7 @@ describe('OpenAI-compatible STT', () => {
       stt.transcribe({ audio: new Uint8Array([1, 2, 3]), filename: 'voice.ogg', mimeType: 'audio/ogg', timeoutMs: 1_000 }),
     ).resolves.toBe('добавь задачу купить корм')
     expect(fetchFn).toHaveBeenCalledWith(
-      'https://foundation-models.example/v1/audio/transcriptions',
+      'https://shared1.multitool.works:4000/v1/audio/transcriptions',
       expect.objectContaining({ method: 'POST', headers: { authorization: 'Bearer secret' } }),
     )
   })
@@ -40,8 +40,8 @@ describe('OpenAI-compatible STT', () => {
     })
     const stt = createOpenAiCompatibleSttProvider({
       apiKey: 'secret',
-      baseUrl: 'https://foundation-models.example/v1',
-      model: 'openai/whisper-large-v3',
+      baseUrl: 'https://shared1.multitool.works:4000/v1',
+      model: 'whisper-large-v3',
       fetchFn,
     })
 
@@ -51,8 +51,8 @@ describe('OpenAI-compatible STT', () => {
   it('не пробрасывает тело ошибки провайдера', async () => {
     const stt = createOpenAiCompatibleSttProvider({
       apiKey: 'secret',
-      baseUrl: 'https://foundation-models.example/v1',
-      model: 'openai/whisper-large-v3',
+      baseUrl: 'https://shared1.multitool.works:4000/v1',
+      model: 'whisper-large-v3',
       fetchFn: async () => new Response('user audio reflected here', { status: 422 }),
     })
 

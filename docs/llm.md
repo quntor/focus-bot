@@ -23,15 +23,20 @@ Voice сначала переводится в текст отдельной Aud
 встроенный `fetch`. Это сохраняет текущий `LlmProvider`, не добавляет SDK и
 позволяет менять OpenAI-compatible провайдера конфигурацией.
 
-Для Cloud.ru:
+Для API моделей Сбер 500:
 
 ```env
-LLM_BASE_URL=https://foundation-models.api.cloud.ru/v1
-LLM_MODEL=ai-sage/GigaChat3-10B-A1.8B
+LLM_BASE_URL=https://shared1.multitool.works:4000/v1
+LLM_MODEL=gigachat3-10b-a1.8b
 # Опционально: включает голосовые сообщения. Использует тот же API key/base URL.
-STT_MODEL=openai/whisper-large-v3
-LLM_API_KEY=<Key Secret>
+STT_MODEL=whisper-large-v3
+LLM_API_KEY=<SBER_API_TOKEN>
 ```
+
+На 26.09.2026 `/models` возвращает обе выбранные модели. Реальные проверки
+трёх текстовых касаний прошли строгие продуктовые схемы без fallback;
+синтетическая русская речь также дошла до `whisper-large-v3`. Перед включением
+voice в production всё равно нужен smoke-тест обычного сообщения из Telegram.
 
 Текстовая модель включается только полным набором трёх `LLM_*`. Если не задана ни одна,
 бот работает как раньше. Неполный набор останавливает старт приложения, чтобы

@@ -18,21 +18,21 @@ describe('OpenAI-compatible provider', () => {
     )
     const provider = createOpenAiCompatibleProvider({
       apiKey: 'test-secret',
-      baseUrl: 'https://foundation-models.api.cloud.ru/v1',
-      model: 'ai-sage/GigaChat3-10B-A1.8B',
+      baseUrl: 'https://shared1.multitool.works:4000/v1',
+      model: 'gigachat3-10b-a1.8b',
       fetchFn,
     })
 
     await expect(provider.complete(request)).resolves.toBe('{"ok":true}')
     expect(fetchFn).toHaveBeenCalledOnce()
     const [url, init] = fetchFn.mock.calls[0]!
-    expect(url).toBe('https://foundation-models.api.cloud.ru/v1/chat/completions')
+    expect(url).toBe('https://shared1.multitool.works:4000/v1/chat/completions')
     expect(init?.headers).toEqual({
       authorization: 'Bearer test-secret',
       'content-type': 'application/json',
     })
     expect(JSON.parse(String(init?.body))).toEqual({
-      model: 'ai-sage/GigaChat3-10B-A1.8B',
+      model: 'gigachat3-10b-a1.8b',
       max_tokens: 200,
       temperature: 0,
       messages: [
@@ -48,7 +48,7 @@ describe('OpenAI-compatible provider', () => {
     )
     const provider = createOpenAiCompatibleProvider({
       apiKey: 'test-secret',
-      baseUrl: 'https://foundation-models.api.cloud.ru/v1/',
+      baseUrl: 'https://shared1.multitool.works:4000/v1/',
       model: 'model',
       fetchFn,
     })
@@ -63,7 +63,7 @@ describe('OpenAI-compatible provider', () => {
     )
     const provider = createOpenAiCompatibleProvider({
       apiKey: 'test-secret',
-      baseUrl: 'https://foundation-models.api.cloud.ru/v1',
+      baseUrl: 'https://shared1.multitool.works:4000/v1',
       model: 'model',
       fetchFn,
     })
@@ -80,7 +80,7 @@ describe('OpenAI-compatible provider', () => {
     )
     const provider = createOpenAiCompatibleProvider({
       apiKey: 'test-secret',
-      baseUrl: 'https://foundation-models.api.cloud.ru/v1',
+      baseUrl: 'https://shared1.multitool.works:4000/v1',
       model: 'model',
       fetchFn,
     })

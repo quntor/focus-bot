@@ -7,8 +7,9 @@
 
 Модель включается только полным набором `LLM_API_KEY`, `LLM_BASE_URL` и
 `LLM_MODEL`. Если не задана ни одна из них, бот использует детерминированный
-fallback. Для Cloud.ru значения адреса и модели приведены в
-[llm.md](llm.md); ключ хранится только в root-only `.env.production`.
+fallback. Значения API моделей Сбер 500 приведены в [llm.md](llm.md); защищённый
+`SBER_API_TOKEN` записывается в `LLM_API_KEY` только в root-only
+`.env.production`.
 
 `TELEGRAM_WEBHOOK_SECRET` и `TELEGRAM_WEBHOOK_PATH` — две разные случайные строки
 из `A-Z a-z 0-9 _ -` длиной 32–256 символов. Например:
@@ -90,16 +91,16 @@ docker compose --env-file .env.production -f compose.prod.yml run --rm app \
 перезапускает приложение, ждёт валидный HTTPS `/healthz` и только затем
 регистрирует webhook. Сам токен не печатается.
 
-Ключ Cloud.ru Foundation Models вводится тем же безопасным способом:
+Токен API моделей Сбер 500 вводится тем же безопасным способом:
 
 ```bash
 ./deploy/set-llm-key.sh
 ```
 
-Скрипт сначала проверяет ключ коротким запросом к Cloud.ru, затем атомарно
-добавляет полный набор `LLM_*`, пересоздаёт приложение и ждёт внешний
-`/healthz`. При ошибке запуска или healthcheck прежний environment
-восстанавливается; ключ не попадает в argv или shell history.
+Скрипт сначала проверяет токен через `/models` и короткий `chat/completions`,
+затем атомарно добавляет полный набор `LLM_*` и `STT_MODEL`, пересоздаёт
+приложение и ждёт внешний `/healthz`. При ошибке запуска или healthcheck прежний
+environment восстанавливается; токен не попадает в argv или shell history.
 
 Проверить `getWebhookInfo` и пройти `/start` нужно до приглашения тестировщиков.
 При откате приложение останавливается тем же compose-файлом; volume `pgdata` не
