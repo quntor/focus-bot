@@ -52,3 +52,22 @@ describe('LLM config', () => {
     ).toThrow('LLM_BASE_URL')
   })
 })
+
+describe('privacy config', () => {
+  it('не запускает production без опубликованной политики и реквизитов оператора', () => {
+    expect(() => parseConfig({ ...base, NODE_ENV: 'production' })).toThrow(
+      'PRIVACY_POLICY_URL, PRIVACY_OPERATOR_NAME, PRIVACY_CONTACT_EMAIL',
+    )
+  })
+
+  it('принимает полный production-набор', () => {
+    const config = parseConfig({
+      ...base,
+      NODE_ENV: 'production',
+      PRIVACY_POLICY_URL: 'https://agent07.ru/privacy',
+      PRIVACY_OPERATOR_NAME: 'ИП Иванов Иван Иванович',
+      PRIVACY_CONTACT_EMAIL: 'privacy@example.test',
+    })
+    expect(config.PRIVACY_POLICY_URL).toBe('https://agent07.ru/privacy')
+  })
+})

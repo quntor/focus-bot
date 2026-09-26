@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { LlmProvider } from './provider.js'
-import { runLlm, type LlmOutcome } from './run.js'
+import { runLlm, type CallMeter, type LlmOutcome } from './run.js'
 
 export type TaskRef = { id: string; title: string }
 
@@ -106,16 +106,17 @@ const dedupeTitles = (titles: string[]) => {
 export async function parseTaskMessage(
   provider: LlmProvider,
   input: { text: string; tasks: TaskRef[]; currentTaskId: string | null },
+  meter?: CallMeter,
 ): Promise<{ result: TaskMessageResult | null; failure: LlmOutcome<never> | null }> {
   const payload = JSON.stringify({
     text: input.text,
     has_current_task: input.currentTaskId !== null,
   })
   const deadline = Date.now() + TASK_LLM_TIMEOUT_MS
-  let out = await runLlm(provider, { system: SYSTEM, input: payload, maxTokens: 400, timeoutMs: TASK_LLM_TIMEOUT_MS }, answer)
+  let out = await runLlm(provider, { system: SYSTEM, input: payload, maxTokens: 400, timeoutMs: TASK_LLM_TIMEOUT_MS }, answer, meter)
   const retryBudget = deadline - Date.now()
   if (!out.ok && out.reason === 'invalid' && retryBudget >= MIN_RETRY_BUDGET_MS) {
-    out = await runLlm(provider, { system: RETRY_SYSTEM, input: payload, maxTokens: 400, timeoutMs: retryBudget }, answer)
+    out = await runLlm(provider, { system: RETRY_SYSTEM, input: payload, maxTokens: 400, timeoutMs: retryBudget }, answer, meter)
   }
   if (!out.ok) return { result: null, failure: out }
 

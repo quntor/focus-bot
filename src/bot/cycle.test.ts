@@ -82,15 +82,16 @@ describe.skipIf(!hasDb)('полный цикл сессии', () => {
   it('свободная фраза закрывает день, останавливает таймер и показывает время по задачам', async () => {
     const llm: LlmProvider = {
       enabled: true,
+      model: 'test-model',
       async complete(req) {
         if (req.system.includes('сообщение пользователя фокус-боту')) {
-          return '{"kind":"close_day","new_tasks":[],"start_title":null}'
+          return { text: '{"kind":"close_day","new_tasks":[],"start_title":null}', usage: null }
         }
         throw new Error('unexpected LLM call')
       },
     }
     const phrase = 'Мозг всё, лавочка закрыта до завтра'
-    const bot = makeBot({ llm, stt: { enabled: true, async transcribe() { return phrase } } })
+    const bot = makeBot({ llm, stt: { enabled: true, model: 'test-stt', async transcribe() { return phrase } } })
     bot.tg.downloads.set('voice-close-day', new Uint8Array([1, 2, 3]))
     await bot.onboard(A)
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })

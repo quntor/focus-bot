@@ -8,21 +8,25 @@ const A = 2085
 const B = 2086
 const C = 2087
 
+const reply = (text: string) => ({ text, usage: null })
+
 const llm = (answer: string): LlmProvider => ({
   enabled: true,
+  model: 'test-model',
   async complete(req) {
-    if (req.system.includes('сообщение пользователя фокус-боту')) return answer
+    if (req.system.includes('сообщение пользователя фокус-боту')) return reply(answer)
     throw new Error('unexpected LLM call')
   },
 })
 
 const conversational = (classify: (text: string) => string, resolve?: (intent: string, tasks: { label: string; title: string }[]) => string): LlmProvider => ({
   enabled: true,
+  model: 'test-model',
   async complete(req) {
-    if (req.system.includes('сообщение пользователя фокус-боту')) return classify(JSON.parse(req.input).text)
+    if (req.system.includes('сообщение пользователя фокус-боту')) return reply(classify(JSON.parse(req.input).text))
     if (req.system.includes('намерение пользователя перед рабочей сессией')) {
       const input = JSON.parse(req.input)
-      return resolve?.(input.intent, input.tasks) ?? JSON.stringify({ task: null, title: input.intent, scope: 'step' })
+      return reply(resolve?.(input.intent, input.tasks) ?? JSON.stringify({ task: null, title: input.intent, scope: 'step' }))
     }
     throw new Error('unexpected LLM call')
   },
@@ -157,7 +161,7 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     )
     const transcript =
       'Мне завтра нужно доделать выкат Милавицы на VDS и поправить все косяки. Второе про FocusBot. Нужно запустить умные функции. Надо сделать функцию планирования дня.'
-    const stt: SttProvider = { enabled: true, async transcribe() { return transcript } }
+    const stt: SttProvider = { enabled: true, model: 'test-stt', async transcribe() { return transcript } }
     const bot = makeBot({ llm: repeated, stt })
     bot.tg.downloads.set('voice-repeat', new Uint8Array([1, 2, 3]))
     await bot.onboard(B)
@@ -182,6 +186,7 @@ describe.skipIf(!hasDb)('список задач из текста и голос
   it('распознаёт voice в памяти и пропускает через тот же парсер', async () => {
     const stt: SttProvider = {
       enabled: true,
+      model: 'test-stt',
       async transcribe(req) {
         expect([...req.audio]).toEqual([1, 2, 3])
         expect(req.mimeType).toBe('audio/ogg')
@@ -197,6 +202,12 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     expect(await prisma.task.count()).toBe(2)
     expect(bot.textsTo(A)).toContain('Распознал: «Сегодня хочу сделать отчёт и купить корм».')
     expect(await prisma.event.findFirst({ where: { type: 'voice_transcribed' } })).not.toBeNull()
+    expect(
+      (await prisma.componentCall.findMany({ orderBy: { id: 'asc' } })).map((call) => [call.name, call.model, call.status]),
+    ).toEqual([
+      ['voice_transcription', 'test-stt', 'ok'],
+      ['tasks', 'test-model', 'ok'],
+    ])
   })
 
   it('не скачивает слишком длинный voice и безопасно отвечает при выключенном STT', async () => {
@@ -213,7 +224,7 @@ describe.skipIf(!hasDb)('список задач из текста и голос
   })
 
   it('ограничивает платное распознавание пятью voice в час до скачивания шестого', async () => {
-    const stt: SttProvider = { enabled: true, async transcribe() { return 'Сегодня хочу сделать отчёт и купить корм' } }
+    const stt: SttProvider = { enabled: true, model: 'test-stt', async transcribe() { return 'Сегодня хочу сделать отчёт и купить корм' } }
     const bot = makeBot({ llm: capture, stt })
     await bot.onboard(C)
     for (let i = 1; i <= 6; i++) {
@@ -250,7 +261,7 @@ describe.skipIf(!hasDb)('список задач из текста и голос
   it('по voice отмечает названную задачу готовой, не закрывая день', async () => {
     const transcript = 'Я сделал одну из своих задач — планирование дня'
     const bot = makeBot({
-      stt: { enabled: true, async transcribe() { return transcript } },
+      stt: { enabled: true, model: 'test-stt', async transcribe() { return transcript } },
       llm: conversational(
         () => '{"kind":"complete_task","new_tasks":[],"start_title":null,"complete_title":"Сделать планирование дня"}',
         (_intent, active) => JSON.stringify({ task: active[0]?.label ?? null, title: 'Сделать планирование дня', scope: 'step' }),
@@ -272,7 +283,7 @@ describe.skipIf(!hasDb)('список задач из текста и голос
   it('в точной production-фразе завершает и задачу, и день', async () => {
     const transcript = 'Все, я закончил на сегодня работу. Меловицу я выкатил.'
     const bot = makeBot({
-      stt: { enabled: true, async transcribe() { return transcript } },
+      stt: { enabled: true, model: 'test-stt', async transcribe() { return transcript } },
       llm: conversational(
         () => '{"kind":"complete_and_close_day","new_tasks":[],"start_title":null,"complete_title":"Выкатить Милавицу"}',
         (_intent, active) => JSON.stringify({ task: active[0]?.label ?? null, title: 'Выкатить Милавицу', scope: 'step' }),
@@ -380,7 +391,7 @@ describe.skipIf(!hasDb)('список задач из текста и голос
 
   it('по голосовой команде создаёт отсутствующую задачу и сразу запускает таймер', async () => {
     const transcript = 'Хорош тянуть, берусь за макет лендинга'
-    const stt: SttProvider = { enabled: true, async transcribe() { return transcript } }
+    const stt: SttProvider = { enabled: true, model: 'test-stt', async transcribe() { return transcript } }
     const bot = makeBot({
       stt,
       llm: conversational(() => '{"kind":"start_task","new_tasks":[],"start_title":"Сделать макет лендинга"}'),

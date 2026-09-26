@@ -13,9 +13,11 @@ const optionalHttpsUrl = z.preprocess(
   (value) => (value === '' ? undefined : value),
   z.string().url().refine((value) => value.startsWith('https://'), 'должен использовать https').optional(),
 )
+const optionalEmail = z.preprocess((value) => (value === '' ? undefined : value), z.string().email().optional())
 
 const schema = z
   .object({
+    NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
     TELEGRAM_BOT_TOKEN: z.string().min(1),
     TELEGRAM_WEBHOOK_SECRET: token,
     // Отдельный непредсказуемый сегмент пути. Путь оседает в логах прокси и
@@ -26,7 +28,11 @@ const schema = z
     PORT: z.coerce.number().default(3000),
     // Ссылка на политику обработки персональных данных, показывается при
     // согласии. Необязательна в разработке, в бою без неё согласие неполное.
-    PRIVACY_POLICY_URL: z.string().url().optional(),
+    PRIVACY_POLICY_URL: optionalHttpsUrl,
+    // Публичные реквизиты страницы /privacy. В production весь набор обязателен:
+    // бот не должен стартовать с формальным согласием без действующей политики.
+    PRIVACY_OPERATOR_NAME: optionalString,
+    PRIVACY_CONTACT_EMAIL: optionalEmail,
     // Модель включается только полным набором. Пустые значения из скопированного
     // .env.example считаются отсутствующими и сохраняют детерминированный режим.
     LLM_API_KEY: optionalString,
@@ -37,6 +43,14 @@ const schema = z
     STT_MODEL: optionalString,
   })
   .superRefine((value, ctx) => {
+    const privacyFields = ['PRIVACY_POLICY_URL', 'PRIVACY_OPERATOR_NAME', 'PRIVACY_CONTACT_EMAIL'] as const
+    const privacyConfigured = privacyFields.filter((field) => value[field] !== undefined)
+    if (value.NODE_ENV === 'production' || privacyConfigured.length !== 0) {
+      for (const field of privacyFields) {
+        if (value[field] === undefined) ctx.addIssue({ code: 'custom', path: [field], message: 'нужен полный набор PRIVACY_*' })
+      }
+    }
+
     const fields = ['LLM_API_KEY', 'LLM_BASE_URL', 'LLM_MODEL'] as const
     const configured = fields.filter((field) => value[field] !== undefined)
     if (configured.length !== 0 && configured.length !== fields.length) {

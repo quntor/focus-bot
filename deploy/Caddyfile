@@ -10,6 +10,11 @@
 		reverse_proxy app:3000
 	}
 
+	@privacy path /privacy
+	handle @privacy {
+		reverse_proxy app:3000
+	}
+
 	@telegram {
 		path /tg/*
 		method POST

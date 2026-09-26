@@ -488,7 +488,7 @@ export async function onRunningWorkText(ctx: Ctx, user: User, sessionId: string,
     take: 20,
     select: { id: true, title: true },
   })
-  const parsed = await parseIntent(ctx.llm, { text, tasks, profile: user.profileText })
+  const parsed = await parseIntent(ctx.llm, { text, tasks, profile: user.profileText }, llmMeter(ctx, user.id, 'intent', session.id))
   const failure = parsed.failure && !parsed.failure.ok ? parsed.failure.reason : null
 
   try {

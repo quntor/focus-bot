@@ -55,8 +55,13 @@ location = /healthz {
 
 ## Перед первой выкаткой
 
-- Заменить заглушку текста согласия и ссылку на политику (`src/bot/texts.ts`,
-  `PRIVACY_POLICY_URL`) — текст пишет человек.
+- Заполнить `PRIVACY_POLICY_URL`, `PRIVACY_OPERATOR_NAME` и
+  `PRIVACY_CONTACT_EMAIL`. Production без полного набора не стартует; политика
+  публикуется приложением на `/privacy`, а Caddy пропускает только этот публичный
+  путь, `/healthz` и защищённый webhook.
+- Проверить содержание политики с ответственным за персональные данные. Код
+  обеспечивает публикацию и блокирует неполную конфигурацию, но не заменяет
+  юридическую проверку оператора и трансграничной обработки.
 - Прогнать миграции: `npx prisma migrate deploy`.
 
 ## Production Compose
@@ -68,7 +73,7 @@ Caddy. Сервис `migrate` должен успешно применить м�
 ```bash
 cp .env.production.example .env.production
 chmod 600 .env.production
-# заполнить значения; пустой PRIVACY_POLICY_URL не оставлять
+# заполнить значения; пустой PRIVACY_* не оставлять
 docker compose --env-file .env.production -f compose.prod.yml config --quiet
 docker compose --env-file .env.production -f compose.prod.yml up -d --build
 ```

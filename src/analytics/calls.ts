@@ -4,7 +4,7 @@ import type { CallMeta, CallMeter } from '../llm/run.js'
 
 // Касания, в которых решение вызывает модель. Закрытый список: имя уходит в
 // выгрузку организаторам, и произвольной строки там быть не должно.
-export const CALL_NAMES = ['intent', 'report'] as const
+export const CALL_NAMES = ['intent', 'report', 'tasks', 'task_match', 'voice_transcription'] as const
 export type CallName = (typeof CALL_NAMES)[number]
 
 // Замер вызова модели для конкретного пользователя и касания.

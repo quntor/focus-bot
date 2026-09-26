@@ -1,11 +1,15 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { LlmProvider } from './provider.js'
+import type { CallMeta } from './run.js'
 import { parseTaskMessage } from './tasks.js'
+
+const reply = (text: string) => ({ text, usage: null })
 
 const provider = (content: string): LlmProvider => ({
   enabled: true,
+  model: 'test-model',
   async complete() {
-    return content
+    return reply(content)
   },
 })
 
@@ -64,10 +68,11 @@ describe('разбор сообщения со списком задач', () =>
   it('не передаёт активные задачи модели при захвате списка', async () => {
     const observed: LlmProvider = {
       enabled: true,
+      model: 'test-model',
       async complete(req) {
         expect(JSON.parse(req.input)).toEqual({ text: 'Нужно доделать выкат и поправить ошибки', has_current_task: false })
         expect(req.system).toContain('полного упорядоченного списка')
-        return '{"kind":"capture","new_tasks":["Доделать выкат","Поправить ошибки"]}'
+        return reply('{"kind":"capture","new_tasks":["Доделать выкат","Поправить ошибки"]}')
       },
     }
     const parsed = await parseTaskMessage(observed, {
@@ -83,30 +88,33 @@ describe('разбор сообщения со списком задач', () =>
   it('сохраняет самостоятельные действия и объединяет близкие переформулировки', async () => {
     const qualityAware: LlmProvider = {
       enabled: true,
+      model: 'test-model',
       async complete(req) {
         const hasCoverageRule = req.system.includes('каждое явно названное самостоятельное действие')
         const hasDedupeRule = req.system.includes('Фрагмент без личной формы глагола')
         expect(JSON.parse(req.input)).toMatchObject({ has_current_task: false })
-        return hasCoverageRule && hasDedupeRule
-          ? JSON.stringify({
-              kind: 'capture',
-              new_tasks: [
-                'Доделать выкат Милавицы на VDS',
-                'Поправить все косяки',
-                'Запустить умные функции FocusBot',
-                'Сделать планирование дня',
-                'Планирование дня',
-              ],
-            })
-          : JSON.stringify({
-              kind: 'capture',
-              new_tasks: [
-                'Доделать выкат Милавицы на VDS',
-                'Запустить умные функции',
-                'Сделать планирование дня',
-                'Функция планирования дня',
-              ],
-            })
+        return reply(
+          hasCoverageRule && hasDedupeRule
+            ? JSON.stringify({
+                kind: 'capture',
+                new_tasks: [
+                  'Доделать выкат Милавицы на VDS',
+                  'Поправить все косяки',
+                  'Запустить умные функции FocusBot',
+                  'Сделать планирование дня',
+                  'Планирование дня',
+                ],
+              })
+            : JSON.stringify({
+                kind: 'capture',
+                new_tasks: [
+                  'Доделать выкат Милавицы на VDS',
+                  'Запустить умные функции',
+                  'Сделать планирование дня',
+                  'Функция планирования дня',
+                ],
+              }),
+        )
       },
     }
     const parsed = await parseTaskMessage(qualityAware, {
@@ -185,10 +193,11 @@ describe('разбор сообщения со списком задач', () =>
     let calls = 0
     const flaky: LlmProvider = {
       enabled: true,
+      model: 'test-model',
       async complete() {
         calls += 1
-        if (calls === 1) return '{"kind":"capture","new_tasks":"Сделать отчёт","start_task":"t1"}'
-        return '{"kind":"capture","new_tasks":["Сделать отчёт","Отправить отчёт"]}'
+        if (calls === 1) return reply('{"kind":"capture","new_tasks":"Сделать отчёт","start_task":"t1"}')
+        return reply('{"kind":"capture","new_tasks":["Сделать отчёт","Отправить отчёт"]}')
       },
     }
 
@@ -206,10 +215,28 @@ describe('разбор сообщения со списком задач', () =>
     })
   })
 
+  it('замеряет каждый фактический вызов, включая retry', async () => {
+    const meter = vi.fn(async (_meta: CallMeta) => {})
+    const flaky = provider('{"kind":"capture","new_tasks":"Сделать отчёт"}')
+
+    await parseTaskMessage(
+      flaky,
+      { text: 'Сделать отчёт', tasks, currentTaskId: null },
+      meter,
+    )
+
+    expect(meter).toHaveBeenCalledTimes(2)
+    expect(meter.mock.calls.map(([meta]) => [meta.status, meta.errorCode, meta.model])).toEqual([
+      ['invalid', 'schema', 'test-model'],
+      ['invalid', 'schema', 'test-model'],
+    ])
+  })
+
   it('не повторяет ошибку провайдера', async () => {
     let calls = 0
     const unavailable: LlmProvider = {
       enabled: true,
+      model: 'test-model',
       async complete() {
         calls += 1
         throw new Error('provider unavailable')
@@ -230,12 +257,13 @@ describe('разбор сообщения со списком задач', () =>
   it('не передаёт модели список задач даже при переключении', async () => {
     const switching: LlmProvider = {
       enabled: true,
+      model: 'test-model',
       async complete(req) {
         expect(JSON.parse(req.input)).toEqual({
           text: 'Первую сделал, перехожу ко второй',
           has_current_task: true,
         })
-        return '{"kind":"complete_and_start","new_tasks":[],"start_title":"Позвонить Ивану"}'
+        return reply('{"kind":"complete_and_start","new_tasks":[],"start_title":"Позвонить Ивану"}')
       },
     }
     const parsed = await parseTaskMessage(
@@ -250,12 +278,13 @@ describe('разбор сообщения со списком задач', () =>
   it('понимает произвольную фразу как старт задачи без передачи списка задач', async () => {
     const observed: LlmProvider = {
       enabled: true,
+      model: 'test-model',
       async complete(req) {
         expect(JSON.parse(req.input)).toEqual({
           text: 'Всё, налетаю на презентацию',
           has_current_task: false,
         })
-        return '{"kind":"start_task","new_tasks":[],"start_title":"Подготовить презентацию"}'
+        return reply('{"kind":"start_task","new_tasks":[],"start_title":"Подготовить презентацию"}')
       },
     }
 

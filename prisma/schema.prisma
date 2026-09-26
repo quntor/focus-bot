@@ -470,7 +470,7 @@ model ComponentCall {
   sessionId    String?  @map("session_id")
   // llm | tool | background
   component    String
-  // Касание, ради которого сделан вызов: intent, report.
+  // Касание, ради которого сделан вызов; закрытый список — analytics/calls.ts.
   name         String
   // Системный промт над моделью (skill). Положение считает skill отдельным
   // вызовом; храним его при вызове модели, а не отдельной выдуманной строкой.

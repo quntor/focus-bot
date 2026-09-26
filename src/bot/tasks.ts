@@ -1,8 +1,10 @@
 import type { User } from '@prisma/client'
+import { llmMeter } from '../analytics/calls.js'
 import { logEvent } from '../analytics/log.js'
 import { dayKey } from '../lib/day.js'
 import { parseIntent } from '../llm/intent.js'
 import { parseTaskMessage } from '../llm/tasks.js'
+import { SttCallError } from '../stt/provider.js'
 import { cancelPending } from '../outbox/queue.js'
 import { creditCountedSession } from '../retention/credit.js'
 import { isCounted } from '../retention/rules.js'
@@ -226,9 +228,10 @@ async function resolveOrCreateTask(
   title: string,
   activeTasks: { id: string; title: string }[],
   source: TaskInputSource,
+  sessionId: string | null,
 ): Promise<{ id: string; title: string }> {
   const parsed = activeTasks.length
-    ? await parseIntent(ctx.llm, { text: title, tasks: activeTasks, profile: user.profileText })
+    ? await parseIntent(ctx.llm, { text: title, tasks: activeTasks, profile: user.profileText }, llmMeter(ctx, user.id, 'task_match', sessionId))
     : { result: { taskId: null, title, scope: 'step' as const, llmUsed: false }, failure: null }
   if (parsed.failure && !parsed.failure.ok) {
     await logEvent(ctx.db, user.id, 'llm_fallback', { stage: 'intent', reason: parsed.failure.reason }, { at: ctx.now() })
@@ -260,6 +263,7 @@ async function resolveExistingTask(
   title: string | null,
   activeTasks: { id: string; title: string }[],
   currentTaskId: string | null,
+  sessionId: string | null,
 ): Promise<{ id: string; title: string } | null> {
   if (title === null) {
     if (!currentTaskId) return null
@@ -270,7 +274,7 @@ async function resolveExistingTask(
   }
   if (!activeTasks.length) return null
 
-  const parsed = await parseIntent(ctx.llm, { text: title, tasks: activeTasks, profile: user.profileText })
+  const parsed = await parseIntent(ctx.llm, { text: title, tasks: activeTasks, profile: user.profileText }, llmMeter(ctx, user.id, 'task_match', sessionId))
   if (parsed.failure && !parsed.failure.ok) {
     await logEvent(ctx.db, user.id, 'llm_fallback', { stage: 'intent', reason: parsed.failure.reason }, { at: ctx.now() })
   }
@@ -457,7 +461,11 @@ export async function onTaskMessage(ctx: Ctx, user: User, text: string, source: 
   const activeTasks = current?.taskId
     ? [...storedTasks.filter((task) => task.id === current.taskId), ...storedTasks.filter((task) => task.id !== current.taskId)]
     : storedTasks
-  const parsed = await parseTaskMessage(ctx.llm, { text, tasks: activeTasks, currentTaskId: current?.taskId ?? null })
+  const parsed = await parseTaskMessage(
+    ctx.llm,
+    { text, tasks: activeTasks, currentTaskId: current?.taskId ?? null },
+    llmMeter(ctx, user.id, 'tasks', current?.id ?? null),
+  )
   if (!parsed.result) {
     const reason = parsed.failure && !parsed.failure.ok ? parsed.failure.reason : 'invalid'
     await logEvent(ctx.db, user.id, 'llm_fallback', { stage: 'tasks', reason }, { at: ctx.now(), sessionId: current?.id })
@@ -487,7 +495,7 @@ export async function onTaskMessage(ctx: Ctx, user: User, text: string, source: 
   }
 
   if (parsed.result.kind === 'complete_task' || parsed.result.kind === 'complete_and_close_day') {
-    const completed = await resolveExistingTask(ctx, user, parsed.result.title, activeTasks, current?.taskId ?? null)
+    const completed = await resolveExistingTask(ctx, user, parsed.result.title, activeTasks, current?.taskId ?? null, current?.id ?? null)
     if (!completed) {
       await reply(ctx, user, T.taskCompleteUnknown)
       return 'handled'
@@ -498,7 +506,7 @@ export async function onTaskMessage(ctx: Ctx, user: User, text: string, source: 
   }
 
   if (parsed.result.kind === 'start_task') {
-    const next = await resolveOrCreateTask(ctx, user, parsed.result.title, activeTasks, source)
+    const next = await resolveOrCreateTask(ctx, user, parsed.result.title, activeTasks, source, current?.id ?? null)
     await startTaskSession(ctx, user, next.id)
     return 'handled'
   }
@@ -510,7 +518,7 @@ export async function onTaskMessage(ctx: Ctx, user: User, text: string, source: 
     await reply(ctx, user, T.taskSwitchPaused)
     return 'handled'
   }
-  const next = await resolveOrCreateTask(ctx, user, parsed.result.title, activeTasks, source)
+  const next = await resolveOrCreateTask(ctx, user, parsed.result.title, activeTasks, source, current.id)
   await completeAndStart(ctx, user, { completeTaskId: current.taskId, start: { taskId: next.id, title: next.title } }, source)
   return 'handled'
 }
@@ -525,22 +533,48 @@ export async function onVoice(
   if (!ctx.stt.enabled) { await reply(ctx, user, T.voiceDisabled); return null }
   if (!allowVoice(user.tgId, ctx.now())) { await reply(ctx, user, T.voiceRateLimited); return null }
 
-  let transcript: string
+  let audio: Uint8Array
   try {
-    const audio = await ctx.tg.download(voice.file_id, MAX_VOICE_BYTES)
-    transcript = await ctx.stt.transcribe({
-      audio,
-      filename: 'voice.ogg',
-      mimeType: voice.mime_type ?? 'audio/ogg',
-      timeoutMs: 30_000,
-    })
+    audio = await ctx.tg.download(voice.file_id, MAX_VOICE_BYTES)
   } catch (error) {
     if (error instanceof TelegramError && error.code === 413) await reply(ctx, user, T.voiceTooLarge)
     else await reply(ctx, user, T.voiceFailed)
     return null
   }
 
-  const text = transcript.replace(/\s+/g, ' ').trim().slice(0, 2_000)
+  const meter = llmMeter(ctx, user.id, 'voice_transcription', null)
+  const startedAt = performance.now()
+  let transcript: string
+  try {
+    transcript = await ctx.stt.transcribe({
+      audio,
+      filename: 'voice.ogg',
+      mimeType: voice.mime_type ?? 'audio/ogg',
+      timeoutMs: 30_000,
+    })
+    const normalized = transcript.replace(/\s+/g, ' ').trim().slice(0, 2_000)
+    await meter({
+      latencyMs: Math.round(performance.now() - startedAt),
+      status: normalized ? 'ok' : 'invalid',
+      errorCode: normalized ? null : 'schema',
+      model: ctx.stt.model,
+      usage: null,
+    })
+    transcript = normalized
+  } catch (error) {
+    const code = error instanceof SttCallError ? error.code : 'error'
+    await meter({
+      latencyMs: Math.round(performance.now() - startedAt),
+      status: code === 'timeout' ? 'timeout' : 'error',
+      errorCode: code,
+      model: ctx.stt.model,
+      usage: null,
+    })
+    await reply(ctx, user, T.voiceFailed)
+    return null
+  }
+
+  const text = transcript
   if (!text) { await reply(ctx, user, T.voiceFailed); return null }
   await logEvent(
     ctx.db,
