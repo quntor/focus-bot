@@ -51,7 +51,7 @@ export const PAYLOADS = {
   }),
   tasks_captured: z.strictObject({ count: z.int().min(1).max(10), source: z.enum(['text', 'voice']) }),
   task_selected: z.strictObject({ task_id: id }),
-  task_completed: z.strictObject({ task_id: id, source: z.enum(['text', 'voice']) }),
+  task_completed: z.strictObject({ task_id: id, source: z.enum(['text', 'voice', 'button']) }),
   task_switched: z.strictObject({ from_task_id: id, to_task_id: id, source: z.enum(['text', 'voice']) }),
   session_length_adjusted: z.strictObject({ direction: z.enum(['up', 'down']), planned_minutes: minutes }),
   session_started: z.strictObject({

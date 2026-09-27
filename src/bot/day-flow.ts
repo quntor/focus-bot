@@ -33,19 +33,45 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
       startedAt: true,
       finishedAt: true,
       pausedSeconds: true,
-      task: { select: { title: true } },
+      task: { select: { id: true, title: true } },
     },
   })
   const today = sessions.filter((s) => s.finishedAt && dayKey(s.finishedAt, user.timezone) === day)
   const finished = today.filter((s) => s.state === 'finished')
-  const timeByTask = new Map<string, number>()
+  const tasksById = new Map<string, { title: string; duration: number; completed: boolean }>()
   for (const session of today) {
-    if (!session.startedAt || !session.finishedAt || !session.task?.title) continue
+    if (!session.startedAt || !session.finishedAt || !session.task) continue
     const activeMs = Math.max(0, session.finishedAt.getTime() - session.startedAt.getTime() - session.pausedSeconds * 1000)
-    if (activeMs > 0) timeByTask.set(session.task.title, (timeByTask.get(session.task.title) ?? 0) + activeMs)
+    if (activeMs <= 0) continue
+    const tracked = tasksById.get(session.task.id)
+    tasksById.set(session.task.id, {
+      title: session.task.title,
+      duration: (tracked?.duration ?? 0) + activeMs,
+      completed: tracked?.completed ?? false,
+    })
   }
-  const taskTimes = [...timeByTask.entries()]
-    .map(([title, duration]) => ({ title, minutes: Math.floor(duration / MIN) }))
+  const completionEvents = await db.event.findMany({
+    where: { subjectId: user.subjectId, dayKey: day, type: 'task_completed' },
+    select: { payload: true },
+  })
+  const completedIds = [...new Set(completionEvents.flatMap((event) => {
+    const payload = event.payload
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return []
+    const taskId = (payload as Record<string, unknown>).task_id
+    return typeof taskId === 'string' ? [taskId] : []
+  }))]
+  if (completedIds.length > 0) {
+    const completedTasks = await db.task.findMany({
+      where: { userId: user.id, id: { in: completedIds } },
+      select: { id: true, title: true },
+    })
+    for (const task of completedTasks) {
+      const tracked = tasksById.get(task.id)
+      tasksById.set(task.id, { title: task.title, duration: tracked?.duration ?? 0, completed: true })
+    }
+  }
+  const taskTimes = [...tasksById.values()]
+    .map(({ title, duration, completed }) => ({ title, minutes: Math.floor(duration / MIN), completed }))
     .sort((left, right) => right.minutes - left.minutes || left.title.localeCompare(right.title, 'ru'))
   const goal = await db.dailyGoal.findUnique({ where: { userId_dayKey: { userId: user.id, dayKey: day } } })
   const streak = await db.streak.findUnique({ where: { userId: user.id } })

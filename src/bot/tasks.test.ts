@@ -61,6 +61,8 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     await bot.press(A, `task:${first.id}:view0`)
     expect(bot.lastText(A)).toContain(first.title)
     expect(bot.buttons(A).filter((button) => button.data === `task:${first.id}:start`)).toHaveLength(1)
+    expect(bot.buttons(A).filter((button) => button.data === `task:${first.id}:done`)).toHaveLength(1)
+    expect(bot.buttons(A).filter((button) => button.data === `task:${first.id}:edit`)).toHaveLength(1)
     expect(bot.buttons(A).filter((button) => button.data === `task:${first.id}:drop`)).toHaveLength(1)
     await bot.press(A, `task:${first.id}:start`)
     const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
@@ -131,6 +133,30 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     await bot.press(A, `task:${current.id}:drop`)
     expect(await prisma.task.findUniqueOrThrow({ where: { id: current.id } })).toMatchObject({ status: 'active' })
     expect(bot.lastText(A)).toContain('идёт в текущей сессии')
+  })
+
+  it('переименовывает активную задачу и текущую сессию через карточку', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    const task = await prisma.task.create({ data: { userId: user.id, title: 'Сделать отчёт' } })
+    await bot.press(A, `task:${task.id}:start`)
+
+    await bot.press(A, `task:${task.id}:edit`)
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ pendingInput: `task_edit:${task.id}` })
+    expect(bot.lastText(A)).toContain('новое название')
+
+    await bot.text(A, '  Подготовить   квартальный отчёт  ')
+
+    expect(await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).toMatchObject({
+      title: 'Подготовить квартальный отчёт',
+      status: 'active',
+    })
+    expect(await prisma.focusSession.findFirstOrThrow({ where: { taskId: task.id, state: 'running' } })).toMatchObject({
+      intentText: 'Подготовить квартальный отчёт',
+    })
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ pendingInput: 'none' })
+    expect(bot.lastText(A)).toContain('Переименовал')
   })
 
   it('создаёт список из текста, не дублирует его и запускает выбранную задачу', async () => {
@@ -423,6 +449,14 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     expect(bot.lastText(A)).toContain('неактуально')
 
     await bot.press(A, `task:${task.id}:drop`)
+    expect(await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).toMatchObject({ status: 'active' })
+    expect(bot.lastText(A)).toContain('неактуально')
+
+    await bot.press(A, `task:${task.id}:edit`)
+    expect(await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })).toMatchObject({ pendingInput: 'none' })
+    expect(bot.lastText(A)).toContain('неактуально')
+
+    await bot.press(A, `task:${task.id}:done`)
     expect(await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).toMatchObject({ status: 'active' })
     expect(bot.lastText(A)).toContain('неактуально')
   })

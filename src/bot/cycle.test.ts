@@ -159,6 +159,27 @@ describe.skipIf(!hasDb)('полный цикл сессии', () => {
     expect(await prisma.outboxMessage.count({ where: { userId: user.id, status: { in: ['pending', 'paused'] }, kind: { in: ['ping', 'session_end'] } } })).toBe(0)
   })
 
+  it('сохраняет завершённую без таймера задачу и включает её в итог дня', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    const task = await prisma.task.create({ data: { userId: user.id, title: 'Отправить документы' } })
+
+    await bot.press(A, `task:${task.id}:done`)
+
+    expect(await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).toMatchObject({ status: 'done' })
+    expect(await prisma.task.count({ where: { id: task.id } })).toBe(1)
+    expect(await prisma.event.findFirst({ where: { type: 'task_completed' } })).toMatchObject({
+      payload: { task_id: task.id, source: 'button' },
+    })
+
+    await bot.text(A, '/today')
+
+    const summary = bot.textsTo(A).find((text) => text.includes('По задачам:'))
+    expect(summary).toContain('• Отправить документы — выполнено без таймера')
+    expect(summary).not.toContain('Отправить документы — меньше минуты')
+  })
+
   it('подтверждение времени встречи не отменяет такую же встречу по умолчанию', async () => {
     const bot = makeBot({ now: new Date('2026-09-24T16:51:00Z') })
     await bot.onboard(A, '19:51')

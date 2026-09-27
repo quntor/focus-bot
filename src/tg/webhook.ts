@@ -115,6 +115,8 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
         const text = await tasks.transcribeVoice(ctx, user, msg.voice)
         if (!text) return
         if (user.pendingInput === 'meeting_time') return day.onMeetingTimeText(ctx, user, text)
+        const taskEdit = /^task_edit:([0-9a-f-]{36})$/.exec(user.pendingInput)
+        if (taskEdit?.[1]) return tasks.onTaskEditText(ctx, user, taskEdit[1], text)
         const outcome = await tasks.onTaskMessage(ctx, user, text, 'voice')
         if (outcome === 'session_intent') await session.onIntentText(ctx, user, text)
         else if (outcome === 'close_day') await day.closeDay(ctx, user, 'voice')
@@ -176,6 +178,8 @@ async function onText(ctx: Ctx, user: User, text: string, created: boolean): Pro
   const runningEdit = /^running_(work|duration):([0-9a-f-]{36})$/.exec(user.pendingInput)
   if (runningEdit?.[1] === 'work' && runningEdit[2]) return session.onRunningWorkText(ctx, user, runningEdit[2], text)
   if (runningEdit?.[1] === 'duration' && runningEdit[2]) return session.onRunningDurationText(ctx, user, runningEdit[2], text)
+  const taskEdit = /^task_edit:([0-9a-f-]{36})$/.exec(user.pendingInput)
+  if (taskEdit?.[1]) return tasks.onTaskEditText(ctx, user, taskEdit[1], text)
   switch (user.pendingInput) {
     case 'timezone':
       return account.onTimezoneText(ctx, user, text)
@@ -271,6 +275,8 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
           if (page) return await tasks.onTaskOpened(ctx, user, id, Number(page[1]))
         }
         if (id && arg === 'start') return await tasks.onTaskSelected(ctx, user, id)
+        if (id && arg === 'done') return await tasks.onTaskCompleted(ctx, user, id)
+        if (id && arg === 'edit') return await tasks.onTaskEditRequested(ctx, user, id)
         if (id && arg === 'drop') return await tasks.onTaskDropped(ctx, user, id)
         if (id && arg === 'restore') return await tasks.onTaskRestored(ctx, user, id)
         break

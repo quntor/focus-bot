@@ -86,6 +86,8 @@ export const T = {
   },
   taskActions: (task: string) => `Задача: «${task}»\n\nЧто сделать?`,
   taskStartButton: '▶️ Начать',
+  taskCompleteButton: '✅ Завершить',
+  taskEditButton: '✏️ Изменить',
   taskDropButton: '🗑 Удалить',
   tasksBackButton: '← К списку',
   taskDropped: (task: string) => `Убрал «${task}» из активных задач.`,
@@ -100,6 +102,10 @@ export const T = {
   taskSwitched: (done: string, next: string) => `«${done}» отметил готовой. Перехожу к «${next}».`,
   taskCompleted: (task: string) => `«${task}» отметил готовой.`,
   taskCompleteUnknown: 'Не понял, какую задачу отметить готовой. Назови её точнее или выбери в «Мои задачи».',
+  taskEditAsk: (task: string) => `Напиши новое название для задачи «${task}».`,
+  taskEditInvalid: 'Название не может быть пустым. Напиши новое название задачи.',
+  taskEditDuplicate: 'Такая активная задача уже есть. Напиши другое название.',
+  taskRenamed: (task: string) => `Переименовал задачу: «${task}».`,
 
   // --- Старт сессии. «С чего начнёшь», а не «над чем работаешь»: условная
   // формулировка указывает на конкретную точку входа.
@@ -229,7 +235,14 @@ export const T = {
       s.target ? `Цель: ${s.counted} из ${s.target}.` : null,
       s.abandoned > 0 ? `Брошено: ${s.abandoned}.` : null,
       s.taskTimes.length
-        ? ['По задачам:', ...s.taskTimes.map((task) => `• ${task.title} — ${task.minutes === 0 ? 'меньше минуты' : minutesText(task.minutes)}`)].join('\n')
+        ? [
+            'По задачам:',
+            ...s.taskTimes.map((task) => {
+              const time = task.minutes === 0 ? 'меньше минуты' : minutesText(task.minutes)
+              if (!task.completed) return `• ${task.title} — ${time}`
+              return `• ${task.title} — ${task.minutes === 0 ? 'выполнено без таймера' : `выполнено, ${time}`}`
+            }),
+          ].join('\n')
         : null,
       `Серия: ${s.streak} ${plural(s.streak, 'день', 'дня', 'дней')}. Очки за сегодня: ${s.points}.`,
       weekLine(s),
@@ -312,7 +325,7 @@ export type DaySummary = {
   prevWeekPoints: number | null
   bestWeek: boolean
   activeDays: number
-  taskTimes: { title: string; minutes: number }[]
+  taskTimes: { title: string; minutes: number; completed: boolean }[]
 }
 
 // Очки — сведения о прогрессе, а не плата и не угроза: сравнение с собой же

@@ -16,6 +16,7 @@ import { activeElapsedMinutes, activeSession, onStartButton, startTaskSession } 
 import { T } from './texts.js'
 
 export type TaskInputSource = 'text' | 'voice'
+type TaskCompletionSource = TaskInputSource | 'button'
 export type TaskMessageOutcome = 'handled' | 'session_intent' | 'close_day'
 
 export const MAX_VOICE_SECONDS = 180
@@ -149,6 +150,10 @@ export async function onTaskOpened(ctx: Ctx, user: User, taskId: string, page: n
   await reply(ctx, user, T.taskActions(task.title), [
     [
       { text: T.taskStartButton, data: cb('task', task.id, 'start') },
+      { text: T.taskCompleteButton, data: cb('task', task.id, 'done') },
+    ],
+    [
+      { text: T.taskEditButton, data: cb('task', task.id, 'edit') },
       { text: T.taskDropButton, data: cb('task', task.id, 'drop') },
     ],
     [{ text: T.tasksBackButton, data: cb('tasks', null, `p${page}`) }],
@@ -157,6 +162,55 @@ export async function onTaskOpened(ctx: Ctx, user: User, taskId: string, page: n
 
 export async function onTaskSelected(ctx: Ctx, user: User, taskId: string): Promise<void> {
   await startTaskSession(ctx, user, taskId)
+}
+
+export async function onTaskEditRequested(ctx: Ctx, user: User, taskId: string): Promise<void> {
+  const task = await ctx.db.task.findFirst({
+    where: { id: taskId, userId: user.id, status: 'active' },
+    select: { id: true, title: true },
+  })
+  if (!task) return reply(ctx, user, T.stale)
+  await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: `task_edit:${task.id}` } })
+  await reply(ctx, user, T.taskEditAsk(task.title))
+}
+
+export async function onTaskEditText(ctx: Ctx, user: User, taskId: string, rawTitle: string): Promise<void> {
+  const title = rawTitle.replace(/\s+/g, ' ').trim().slice(0, 80)
+  if (!title) return reply(ctx, user, T.taskEditInvalid)
+
+  const result = await ctx.db.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
+    const waiting = await tx.user.findFirst({
+      where: { id: user.id, pendingInput: `task_edit:${taskId}` },
+      select: { id: true },
+    })
+    if (!waiting) return 'stale' as const
+    const task = await tx.task.findFirst({
+      where: { id: taskId, userId: user.id, status: 'active' },
+      select: { id: true },
+    })
+    if (!task) {
+      await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
+      return 'stale' as const
+    }
+    const active = await tx.task.findMany({
+      where: { userId: user.id, status: 'active', id: { not: task.id } },
+      select: { title: true },
+    })
+    if (active.some((candidate) => normalize(candidate.title) === normalize(title))) return 'duplicate' as const
+
+    await tx.task.update({ where: { id: task.id }, data: { title } })
+    await tx.focusSession.updateMany({
+      where: { userId: user.id, taskId: task.id, state: { in: ['collecting_intent', 'running', 'paused'] } },
+      data: { intentText: title },
+    })
+    await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
+    return 'renamed' as const
+  })
+
+  if (result === 'stale') return reply(ctx, user, T.stale)
+  if (result === 'duplicate') return reply(ctx, user, T.taskEditDuplicate)
+  await reply(ctx, user, T.taskRenamed(title))
 }
 
 export async function onTaskDropped(ctx: Ctx, user: User, taskId: string): Promise<void> {
@@ -294,7 +348,8 @@ async function completeTask(
   ctx: Ctx,
   user: User,
   task: { id: string; title: string },
-  source: TaskInputSource,
+  source: TaskCompletionSource,
+  showList = false,
 ): Promise<boolean> {
   const now = ctx.now()
   let doneTitle = task.title
@@ -359,8 +414,18 @@ async function completeTask(
     }
     throw error
   }
-  await reply(ctx, user, T.taskCompleted(doneTitle))
+  if (showList) await showTasks(ctx, user, 0, T.taskCompleted(doneTitle))
+  else await reply(ctx, user, T.taskCompleted(doneTitle))
   return true
+}
+
+export async function onTaskCompleted(ctx: Ctx, user: User, taskId: string): Promise<void> {
+  const task = await ctx.db.task.findFirst({
+    where: { id: taskId, userId: user.id, status: 'active' },
+    select: { id: true, title: true },
+  })
+  if (!task) return reply(ctx, user, T.stale)
+  await completeTask(ctx, user, task, 'button', true)
 }
 
 async function completeAndStart(
