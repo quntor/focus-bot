@@ -34,7 +34,9 @@ describe.skipIf(!hasDb)('outbox', () => {
     await runOutboxOnce(bot.ctx)
 
     const prompt = bot.tg.sent.filter((message) => message.chatId === BigInt(A)).at(-1)
-    expect(prompt?.text).toContain('Привет! С чего начнёшь?')
+    expect(prompt?.text).toBe(
+      ['Привет! У тебя такие дела:', `1. ${first.title}`, `2. ${second.title}`, '', 'С чего начнёшь?'].join('\n'),
+    )
     expect(prompt?.keyboard?.slice(0, 2)).toEqual([
       [{ text: first.title, data: `task:${first.id}:start` }],
       [{ text: second.title, data: `task:${second.id}:start` }],
@@ -68,8 +70,9 @@ describe.skipIf(!hasDb)('outbox', () => {
     await bot.press(A, 'goal::3')
 
     const prompt = bot.tg.sent.filter((message) => message.chatId === BigInt(A)).at(-1)
-    expect(prompt?.text).toContain('Цель на сегодня — 3 захода.')
-    expect(prompt?.text).toContain('С чего начнёшь?')
+    expect(prompt?.text).toBe(
+      ['Цель на сегодня — 3 захода.', '', 'У тебя такие дела:', `1. ${task.title}`, '', 'С чего начнёшь?'].join('\n'),
+    )
     expect(prompt?.keyboard).toEqual([[{ text: task.title, data: `task:${task.id}:start` }]])
   })
 
