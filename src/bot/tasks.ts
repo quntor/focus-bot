@@ -523,11 +523,11 @@ export async function onTaskMessage(ctx: Ctx, user: User, text: string, source: 
   return 'handled'
 }
 
-export async function onVoice(
+export async function transcribeVoice(
   ctx: Ctx,
   user: User,
   voice: { file_id: string; duration: number; mime_type?: string | undefined; file_size?: number | undefined },
-): Promise<{ outcome: Exclude<TaskMessageOutcome, 'handled'>; text: string } | null> {
+): Promise<string | null> {
   if (voice.duration > MAX_VOICE_SECONDS) { await reply(ctx, user, T.voiceTooLong); return null }
   if (voice.file_size !== undefined && voice.file_size > MAX_VOICE_BYTES) { await reply(ctx, user, T.voiceTooLarge); return null }
   if (!ctx.stt.enabled) { await reply(ctx, user, T.voiceDisabled); return null }
@@ -584,6 +584,5 @@ export async function onVoice(
     { at: ctx.now() },
   )
   await reply(ctx, user, T.voiceTranscript(text))
-  const outcome = await onTaskMessage(ctx, user, text, 'voice')
-  return outcome === 'handled' ? null : { outcome, text }
+  return text
 }

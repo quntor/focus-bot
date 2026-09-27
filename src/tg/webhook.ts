@@ -112,9 +112,12 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
     else if (msg?.voice) {
       if (created) await account.beginOnboarding(ctx, user)
       else {
-        const parsedVoice = await tasks.onVoice(ctx, user, msg.voice)
-        if (parsedVoice?.outcome === 'session_intent') await session.onIntentText(ctx, user, parsedVoice.text)
-        else if (parsedVoice?.outcome === 'close_day') await day.closeDay(ctx, user, 'voice')
+        const text = await tasks.transcribeVoice(ctx, user, msg.voice)
+        if (!text) return
+        if (user.pendingInput === 'meeting_time') return day.onMeetingTimeText(ctx, user, text)
+        const outcome = await tasks.onTaskMessage(ctx, user, text, 'voice')
+        if (outcome === 'session_intent') await session.onIntentText(ctx, user, text)
+        else if (outcome === 'close_day') await day.closeDay(ctx, user, 'voice')
       }
     }
     else if (msg?.text) await onText(ctx, user, msg.text, created)

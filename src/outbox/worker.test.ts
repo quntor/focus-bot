@@ -21,6 +21,7 @@ describe.skipIf(!hasDb)('outbox', () => {
     await bot.onboard(A)
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     await prisma.dailyGoal.create({ data: { userId: user.id, dayKey: '2026-09-22', targetSessions: 3 } })
+    await prisma.user.update({ where: { id: user.id }, data: { pendingInput: 'meeting_time' } })
     const first = await prisma.task.create({ data: { userId: user.id, title: 'Подготовить отчёт' } })
     const second = await prisma.task.create({ data: { userId: user.id, title: 'Позвонить Ивану' } })
     await enqueue(prisma, {
@@ -42,6 +43,7 @@ describe.skipIf(!hasDb)('outbox', () => {
       [{ text: second.title, data: `task:${second.id}:start` }],
     ])
     expect(bot.buttons(A).filter((button) => button.data.includes(':view'))).toHaveLength(0)
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ pendingInput: 'none' })
 
     await bot.press(A, `task:${second.id}:start`)
 

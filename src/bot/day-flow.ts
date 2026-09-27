@@ -119,6 +119,7 @@ export async function planDayOff(ctx: Ctx, user: User): Promise<void> {
     await tx.dayOff.create({ data: { userId: user.id, dayKey: tomorrow, createdAt: now } })
     await logEvent(tx, user.id, 'day_off_planned', { day_key: tomorrow }, { at: now })
     await putMeeting(tx, user, at, { defaulted: false, morning: true })
+    await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
     return true
   })
   if (!ok) return reply(ctx, user, T.dayOffTaken)
@@ -218,7 +219,7 @@ export async function closeDay(ctx: Ctx, user: User, via: 'button' | 'command' |
       update: { summarySentAt: now },
     })
     await cancelPending(tx, { userId: user.id, kind: { in: ['summary', 'rest_over', 'meeting'] } })
-    await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none', declinesInRow: 0 } })
+    await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'meeting_time', declinesInRow: 0 } })
     await logEvent(tx, user.id, 'day_closed', { day_key: day, via }, { at: now })
     await putDefaultMeeting(tx, user, now)
     return buildSummary(tx, user, day)
@@ -237,6 +238,7 @@ export async function onSummaryConfirm(ctx: Ctx, user: User, arg: string): Promi
     })
     if (res.count !== 1) return false
     const s = await buildSummary(tx, user, day)
+    await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'meeting_time' } })
     await logEvent(tx, user.id, 'daily_summary_confirmed', { day_key: day, sessions: s.sessions }, { at: now })
     return true
   })
@@ -288,9 +290,26 @@ export async function onMeet(ctx: Ctx, user: User, arg: string): Promise<void> {
 }
 
 export async function onMeetingTimeText(ctx: Ctx, user: User, text: string): Promise<void> {
-  const clock = parseClock(text)
+  const now = ctx.now()
+  const normalized = text.toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/\s+/g, ' ').trim()
+  const embedded = /(?:^|\s)(?:в|к)\s*(\d{1,2})(?:[:.](\d{2}))?(?=$|[\s,.!?])/u.exec(normalized)
+    ?? /(?:^|\s)(\d{1,2})[:.](\d{2})(?=$|[\s,.!?])/u.exec(normalized)
+  const clock = parseClock(normalized) ?? (embedded
+    ? parseClock(`${embedded[1] ?? ''}:${embedded[2] ?? '00'}`)
+    : null)
   if (!clock) return reply(ctx, user, T.askCustomTime)
-  await scheduleMeeting(ctx, user, nextLocalTime(user.timezone, clock, ctx.now()), 'custom')
+
+  let at: Date
+  if (/\bзавтра\b/u.test(normalized)) {
+    const tomorrow = nextLocalTime(user.timezone, { h: 0, m: 0 }, now)
+    at = nextLocalTime(user.timezone, clock, new Date(tomorrow.getTime() - MIN))
+  } else {
+    at = nextLocalTime(user.timezone, clock, now)
+    if (/\bсегодня\b/u.test(normalized) && dayKey(at, user.timezone) !== dayKey(now, user.timezone)) {
+      return reply(ctx, user, T.askCustomTime)
+    }
+  }
+  await scheduleMeeting(ctx, user, at, 'custom')
 }
 
 // Кнопки под напоминанием. «Ещё отдохну» сдвигает встречу, а не отменяет её;

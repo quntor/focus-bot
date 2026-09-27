@@ -79,6 +79,52 @@ describe.skipIf(!hasDb)('полный цикл сессии', () => {
     expect(meeting).not.toBeNull()
   })
 
+  it('после вопроса о встрече понимает свободный текст «начну сегодня в 11»', async () => {
+    const bot = makeBot({ now: new Date('2026-09-27T06:55:00Z') })
+    await bot.onboard(A, '09:55')
+    await bot.text(A, '/today')
+
+    await bot.text(A, 'Начну сегодня в 11')
+
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    expect(await prisma.outboxMessage.findFirstOrThrow({ where: { userId: user.id, kind: 'meeting', status: 'pending' } })).toMatchObject({
+      sendAfter: new Date('2026-09-27T08:00:00Z'),
+      payload: { defaulted: false, morning: false },
+    })
+    expect(await prisma.focusSession.count({ where: { userId: user.id, state: { in: ['collecting_intent', 'running', 'paused'] } } })).toBe(0)
+    expect(bot.lastText(A)).toBe('Договорились: сегодня в 11:00.')
+  })
+
+  it('после вопроса о встрече voice «начну сегодня в 11» не запускает задачу', async () => {
+    const transcript = 'Начну сегодня в 11'
+    const llm: LlmProvider = {
+      enabled: true,
+      model: 'test-model',
+      async complete() {
+        return { text: '{"kind":"start_task","new_tasks":[],"start_title":"Запустить умные функции на фокус-бот","complete_title":null}', usage: null }
+      },
+    }
+    const bot = makeBot({
+      now: new Date('2026-09-27T06:55:00Z'),
+      llm,
+      stt: { enabled: true, model: 'test-stt', async transcribe() { return transcript } },
+    })
+    bot.tg.downloads.set('voice-meeting-time', new Uint8Array([1, 2, 3]))
+    await bot.onboard(A, '09:55')
+    await bot.text(A, '/today')
+
+    await bot.voice(A, { fileId: 'voice-meeting-time', duration: 6, mimeType: 'audio/ogg', fileSize: 3 })
+
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    expect(await prisma.outboxMessage.findFirstOrThrow({ where: { userId: user.id, kind: 'meeting', status: 'pending' } })).toMatchObject({
+      sendAfter: new Date('2026-09-27T08:00:00Z'),
+      payload: { defaulted: false, morning: false },
+    })
+    expect(await prisma.focusSession.count({ where: { userId: user.id, state: { in: ['collecting_intent', 'running', 'paused'] } } })).toBe(0)
+    expect(await prisma.task.count({ where: { userId: user.id } })).toBe(0)
+    expect(bot.lastText(A)).toBe('Договорились: сегодня в 11:00.')
+  })
+
   it('свободная фраза закрывает день, останавливает таймер и показывает время по задачам', async () => {
     const llm: LlmProvider = {
       enabled: true,

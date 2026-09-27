@@ -169,6 +169,10 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
       ? await renderReminder(ctx, user, monday ? T.meetingMonday : T.meetingMorning, goalKeyboard(), false)
       : await renderReminder(ctx, user, taskPrompt?.text ?? T.meetingPlain, taskPrompt?.keyboard ?? reminderKeyboard(), true)
     return withEvent(r, async (tx) => {
+      await tx.user.updateMany({
+        where: { id: user.id, pendingInput: 'meeting_time' },
+        data: { pendingInput: 'none' },
+      })
       await logEvent(tx, user.id, 'meeting_sent', {}, { at: now })
       if (p.defaulted === true) await logEvent(tx, user.id, 'meeting_defaulted', { minutes_ahead: 0 }, { at: now })
     })
