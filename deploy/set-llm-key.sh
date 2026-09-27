@@ -63,16 +63,16 @@ status=$(curl --silent --show-error --output "$response_file" --write-out '%{htt
   --connect-timeout 10 --max-time 30 \
   --header "@$header_file" --header 'Accept: application/json' \
   "$base_url/models")
-if [ "$status" != '200' ] || ! node -e '
+if [ "$status" != '200' ] || ! docker compose --env-file .env.production -f "$compose_file" exec -T app node -e '
   try {
     const fs = require("node:fs")
-    const body = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+    const body = JSON.parse(fs.readFileSync(0, "utf8"))
     const ids = Array.isArray(body.data) ? body.data.map((item) => item && item.id) : []
-    if (!ids.includes(process.argv[2]) || !ids.includes(process.argv[3])) process.exit(1)
+    if (!ids.includes(process.argv[1]) || !ids.includes(process.argv[2])) process.exit(1)
   } catch {
     process.exit(1)
   }
-' "$response_file" "$model" "$stt_model"; then
+' "$model" "$stt_model" < "$response_file"; then
   echo "Sber model-list check failed (HTTP $status); production was not changed." >&2
   exit 1
 fi
@@ -82,15 +82,15 @@ status=$(curl --silent --show-error --output "$response_file" --write-out '%{htt
   --header "@$header_file" --header 'Content-Type: application/json' \
   --data "{\"model\":\"$model\",\"max_tokens\":40,\"temperature\":0,\"messages\":[{\"role\":\"user\",\"content\":\"Ответь одним словом: ok\"}]}" \
   "$base_url/chat/completions")
-if [ "$status" != '200' ] || ! node -e '
+if [ "$status" != '200' ] || ! docker compose --env-file .env.production -f "$compose_file" exec -T app node -e '
   try {
     const fs = require("node:fs")
-    const body = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+    const body = JSON.parse(fs.readFileSync(0, "utf8"))
     if (typeof body?.choices?.[0]?.message?.content !== "string") process.exit(1)
   } catch {
     process.exit(1)
   }
-' "$response_file"; then
+' < "$response_file"; then
   echo "Sber chat check failed (HTTP $status); production was not changed." >&2
   exit 1
 fi
