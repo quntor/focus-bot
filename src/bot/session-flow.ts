@@ -764,7 +764,12 @@ function creditLines(credit: Credit | null): string[] {
 
 // Отчёт — пара слов после исхода. Привязывается к последней закрытой сессии
 // этого же пользователя, у которой отчёта ещё нет.
-export async function onReportText(ctx: Ctx, user: User, text: string): Promise<boolean> {
+export async function onReportText(
+  ctx: Ctx,
+  user: User,
+  text: string,
+  options: { endDay?: boolean } = {},
+): Promise<boolean> {
   const since = new Date(ctx.now().getTime() - REPORT_WINDOW_MS)
   const session = await ctx.db.focusSession.findFirst({
     where: { userId: user.id, state: 'finished', reportText: null, restChoice: null, finishedAt: { gte: since } },
@@ -774,7 +779,7 @@ export async function onReportText(ctx: Ctx, user: User, text: string): Promise<
     await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
     return false
   }
-  await finalizeReport(ctx, user, session, text.trim().slice(0, REPORT_MAX))
+  await finalizeReport(ctx, user, session, text.trim().slice(0, REPORT_MAX), options)
   return true
 }
 
@@ -788,7 +793,13 @@ export async function onSkipReport(ctx: Ctx, user: User, sessionId: string): Pro
 
 const STUCK_AFTER = 3
 
-async function finalizeReport(ctx: Ctx, user: User, session: FocusSession, text: string | null): Promise<void> {
+async function finalizeReport(
+  ctx: Ctx,
+  user: User,
+  session: FocusSession,
+  text: string | null,
+  options: { endDay?: boolean } = {},
+): Promise<void> {
   const now = ctx.now()
   const outcome = (session.outcome ?? 'other') as Outcome
   if (text !== null) {
@@ -812,12 +823,15 @@ async function finalizeReport(ctx: Ctx, user: User, session: FocusSession, text:
 
   await ctx.db.$transaction(async (tx) => {
     const res = await tx.focusSession.updateMany({
-      where: { id: session.id, userId: user.id, progress: null },
-      data: { progress: parsed.result.progress },
+      where: { id: session.id, userId: user.id, progress: null, ...(options.endDay ? { restChoice: null } : {}) },
+      data: { progress: parsed.result.progress, ...(options.endDay ? { restChoice: 'day_end' } : {}) },
     })
     if (res.count !== 1) return
     if (text === null) await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
     await logEvent(tx, user.id, 'report_parsed', { session_id: session.id, llm_used: parsed.result.llmUsed, progress: parsed.result.progress }, { at: now, sessionId: session.id })
+    if (options.endDay) {
+      await logEvent(tx, user.id, 'rest_chosen', { session_id: session.id, choice: 'day_end', rest_minutes: 0 }, { at: now, sessionId: session.id })
+    }
     if (failure) await logEvent(tx, user.id, 'llm_fallback', { stage: 'report', reason: failure }, { at: now })
 
     if (session.taskId && parsed.result.progress) {
@@ -841,7 +855,7 @@ async function finalizeReport(ctx: Ctx, user: User, session: FocusSession, text:
   })
 
   if (stuckTask) await reply(ctx, user, T.stuck(stuckTask))
-  await askRest(ctx, user, session)
+  if (!options.endDay) await askRest(ctx, user, session)
 }
 
 // После нескольких сессий бот сам замечает рисунок и предлагает технику одной

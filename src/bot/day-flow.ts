@@ -193,7 +193,12 @@ export async function putDefaultMeeting(tx: Prisma.TransactionClient, user: User
 
 // «Всё, на сегодня» — работает всегда и без уговоров, но заканчивается итогом
 // дня и назначением следующей встречи. Тишиной — никогда.
-export async function closeDay(ctx: Ctx, user: User, via: 'button' | 'command' | 'text' | 'voice'): Promise<void> {
+export async function closeDay(
+  ctx: Ctx,
+  user: User,
+  via: 'button' | 'command' | 'text' | 'voice',
+  options: { meetingAt?: Date } = {},
+): Promise<void> {
   const now = ctx.now()
   const day = dayKey(now, user.timezone)
   const summary = await ctx.db.$transaction(async (tx) => {
@@ -245,12 +250,31 @@ export async function closeDay(ctx: Ctx, user: User, via: 'button' | 'command' |
       update: { summarySentAt: now },
     })
     await cancelPending(tx, { userId: user.id, kind: { in: ['summary', 'rest_over', 'meeting'] } })
-    await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'meeting_time', declinesInRow: 0 } })
+    await tx.user.update({
+      where: { id: user.id },
+      data: { pendingInput: options.meetingAt ? 'none' : 'meeting_time', declinesInRow: 0 },
+    })
     await logEvent(tx, user.id, 'day_closed', { day_key: day, via }, { at: now })
-    await putDefaultMeeting(tx, user, now)
+    if (options.meetingAt) {
+      await putMeeting(tx, user, options.meetingAt, { defaulted: false, morning: false })
+      await logEvent(
+        tx,
+        user.id,
+        'meeting_scheduled',
+        { kind: 'custom', minutes_ahead: Math.max(0, Math.round((options.meetingAt.getTime() - now.getTime()) / MIN)) },
+        { at: now },
+      )
+    } else {
+      await putDefaultMeeting(tx, user, now)
+    }
     return buildSummary(tx, user, day)
   })
-  await reply(ctx, user, `${T.summary(summary)}\n\n${T.askNextMeeting}`, nextMeetingKeyboard(user))
+  if (options.meetingAt) {
+    const which = dayKey(options.meetingAt, user.timezone) === day ? 'today' : 'tomorrow'
+    await reply(ctx, user, `${T.summary(summary)}\n\n${T.meetingSet(hhmm(options.meetingAt, user.timezone), which)}`)
+  } else {
+    await reply(ctx, user, `${T.summary(summary)}\n\n${T.askNextMeeting}`, nextMeetingKeyboard(user))
+  }
 }
 
 export async function onSummaryConfirm(ctx: Ctx, user: User, arg: string): Promise<void> {
@@ -317,25 +341,41 @@ export async function onMeet(ctx: Ctx, user: User, arg: string): Promise<void> {
 
 export async function onMeetingTimeText(ctx: Ctx, user: User, text: string): Promise<void> {
   const now = ctx.now()
+  const at = meetingAtFromText(text, user, now)
+  if (!at) return reply(ctx, user, T.askCustomTime)
+  await scheduleMeeting(ctx, user, at, 'custom')
+}
+
+function meetingAtFromText(text: string, user: User, now: Date): Date | null {
   const normalized = text.toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/\s+/g, ' ').trim()
+  const hasToday = /(?:^|[^\p{L}\p{N}_])сегодня(?=$|[^\p{L}\p{N}_])/u.test(normalized)
+  const hasTomorrow = /(?:^|[^\p{L}\p{N}_])завтра(?=$|[^\p{L}\p{N}_])/u.test(normalized)
   const embedded = /(?:^|\s)(?:в|к)\s*(\d{1,2})(?:[:.](\d{2}))?(?=$|[\s,.!?])/u.exec(normalized)
     ?? /(?:^|\s)(\d{1,2})[:.](\d{2})(?=$|[\s,.!?])/u.exec(normalized)
   const clock = parseClock(normalized) ?? (embedded
     ? parseClock(`${embedded[1] ?? ''}:${embedded[2] ?? '00'}`)
     : null)
-  if (!clock) return reply(ctx, user, T.askCustomTime)
+  if (!clock) return null
 
   let at: Date
-  if (/\bзавтра\b/u.test(normalized)) {
+  if (hasTomorrow) {
     const tomorrow = nextLocalTime(user.timezone, { h: 0, m: 0 }, now)
     at = nextLocalTime(user.timezone, clock, new Date(tomorrow.getTime() - MIN))
   } else {
     at = nextLocalTime(user.timezone, clock, now)
-    if (/\bсегодня\b/u.test(normalized) && dayKey(at, user.timezone) !== dayKey(now, user.timezone)) {
-      return reply(ctx, user, T.askCustomTime)
+    if (hasToday && dayKey(at, user.timezone) !== dayKey(now, user.timezone)) {
+      return null
     }
   }
-  await scheduleMeeting(ctx, user, at, 'custom')
+  return at
+}
+
+// В отчёте число само по себе может быть длительностью или частью результата.
+// Встречу из той же реплики принимаем только при явном «сегодня/завтра».
+export function explicitMeetingAt(text: string, user: User, now: Date): Date | null {
+  const normalized = text.toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/\s+/g, ' ').trim()
+  if (!/(?:^|[^\p{L}\p{N}_])(?:сегодня|завтра)(?=$|[^\p{L}\p{N}_])/u.test(normalized)) return null
+  return meetingAtFromText(text, user, now)
 }
 
 // Кнопки под напоминанием. «Ещё отдохну» сдвигает встречу, а не отменяет её;

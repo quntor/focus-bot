@@ -125,6 +125,83 @@ describe.skipIf(!hasDb)('полный цикл сессии', () => {
     expect(bot.lastText(A)).toBe('Договорились: сегодня в 11:00.')
   })
 
+  it('voice-отчёт сохраняет результат и назначает явно названную встречу на завтра', async () => {
+    const transcript = 'релиз готов завтра надо будет тестировать начинаем завтра 8:30'
+    const bot = makeBot({
+      now: new Date('2026-09-27T12:20:00Z'),
+      stt: { enabled: true, model: 'test-stt', async transcribe() { return transcript } },
+    })
+    bot.tg.downloads.set('voice-report-and-meeting', new Uint8Array([1, 2, 3]))
+    await bot.onboard(A, '15:20')
+    await bot.text(A, 'Запустить умные функции на боте')
+    await bot.press(A, bot.lastButton(A, 'len:', ':ok'))
+    const session = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+    bot.advance(40)
+    await runOutboxOnce(bot.ctx)
+    await bot.press(A, `out:${session.id}:done`)
+
+    await bot.voice(A, { fileId: 'voice-report-and-meeting', duration: 14, mimeType: 'audio/ogg', fileSize: 3 })
+
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).toMatchObject({
+      reportText: transcript,
+      progress: 'moved',
+      restChoice: 'day_end',
+    })
+    expect(await prisma.focusSession.count({ where: { userId: user.id, state: { in: ['collecting_intent', 'running', 'paused'] } } })).toBe(0)
+    expect(await prisma.outboxMessage.findFirstOrThrow({ where: { userId: user.id, kind: 'meeting', status: 'pending' } })).toMatchObject({
+      sendAfter: new Date('2026-09-28T05:30:00Z'),
+      payload: { defaulted: false, morning: false },
+    })
+    expect(await prisma.outboxMessage.count({ where: { userId: user.id, kind: 'rest_over', status: 'pending' } })).toBe(0)
+    expect(bot.lastText(A)).toContain('Договорились: завтра в 08:30.')
+  })
+
+  it('обычный voice-отчёт не уходит в task-intent и сохраняет прежний вопрос про отдых', async () => {
+    const transcript = 'релиз готов, завтра проверю основные сценарии'
+    const bot = makeBot({
+      stt: { enabled: true, model: 'test-stt', async transcribe() { return transcript } },
+    })
+    bot.tg.downloads.set('voice-report', new Uint8Array([1, 2, 3]))
+    await bot.onboard(A)
+    await bot.text(A, 'Подготовить релиз')
+    await bot.press(A, bot.lastButton(A, 'len:', ':ok'))
+    const session = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+    bot.advance(40)
+    await runOutboxOnce(bot.ctx)
+    await bot.press(A, `out:${session.id}:done`)
+
+    await bot.voice(A, { fileId: 'voice-report', duration: 7, mimeType: 'audio/ogg', fileSize: 3 })
+
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).toMatchObject({
+      reportText: transcript,
+      progress: 'moved',
+      restChoice: null,
+    })
+    expect(await prisma.focusSession.count({ where: { state: { in: ['collecting_intent', 'running', 'paused'] } } })).toBe(0)
+    expect(bot.lastText(A)).toBe('Записал. Отдохнёшь 10 минут?')
+  })
+
+  it('число без явного «сегодня/завтра» в отчёте не превращается во встречу', async () => {
+    const bot = makeBot({ now: new Date('2026-09-27T12:20:00Z') })
+    await bot.onboard(A)
+    await bot.text(A, 'Подготовить релиз')
+    await bot.press(A, bot.lastButton(A, 'len:', ':ok'))
+    const session = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+    bot.advance(40)
+    await runOutboxOnce(bot.ctx)
+    await bot.press(A, `out:${session.id}:done`)
+
+    await bot.text(A, 'проверил 8:30 минут лога, проблема найдена')
+
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).toMatchObject({
+      reportText: 'проверил 8:30 минут лога, проблема найдена',
+      restChoice: null,
+    })
+    expect(await prisma.outboxMessage.count({ where: { kind: 'meeting', status: 'pending' } })).toBe(0)
+    expect(bot.lastText(A)).toBe('Записал. Отдохнёшь 10 минут?')
+  })
+
   it('свободная фраза закрывает день, останавливает таймер и показывает время по задачам', async () => {
     const llm: LlmProvider = {
       enabled: true,

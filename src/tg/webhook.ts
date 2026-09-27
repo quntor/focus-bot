@@ -115,6 +115,7 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
         const text = await tasks.transcribeVoice(ctx, user, msg.voice)
         if (!text) return
         if (user.pendingInput === 'meeting_time') return day.onMeetingTimeText(ctx, user, text)
+        if (user.pendingInput === 'report_text' && await onPendingReport(ctx, user, text, 'voice')) return
         const runningEdit = /^running_(work|duration):([0-9a-f-]{36})$/.exec(user.pendingInput)
         if (runningEdit?.[1] === 'work' && runningEdit[2]) return session.onRunningWorkText(ctx, user, runningEdit[2], text)
         if (runningEdit?.[1] === 'duration' && runningEdit[2]) return session.onRunningDurationText(ctx, user, runningEdit[2], text)
@@ -196,13 +197,21 @@ async function onText(ctx: Ctx, user: User, text: string, created: boolean): Pro
     case 'profile':
       return account.onProfileText(ctx, user, text)
     case 'report_text':
-      if (await session.onReportText(ctx, user, text)) return
+      if (await onPendingReport(ctx, user, text, 'text')) return
       break
   }
   if (await session.onRunningFreeText(ctx, user, text)) return
   const outcome = await tasks.onTaskMessage(ctx, user, text, 'text')
   if (outcome === 'session_intent') return session.onIntentText(ctx, user, text)
   if (outcome === 'close_day') return day.closeDay(ctx, user, 'text')
+}
+
+async function onPendingReport(ctx: Ctx, user: User, text: string, via: 'text' | 'voice'): Promise<boolean> {
+  const meetingAt = day.explicitMeetingAt(text, user, ctx.now())
+  const handled = await session.onReportText(ctx, user, text, { endDay: meetingAt !== null })
+  if (!handled) return false
+  if (meetingAt) await day.closeDay(ctx, user, via, { meetingAt })
+  return true
 }
 
 async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string | undefined, messageId: number | undefined): Promise<void> {
