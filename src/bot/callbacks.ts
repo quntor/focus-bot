@@ -10,6 +10,7 @@ export const ACTIONS = [
   'consent', // legacy-кнопка старых сообщений: продолжает онбординг без записи согласия
   'len', // предложение длины: ok | up | down | cancel
   'run', // правка уже запущенной сессии: work | duration
+  'help', // безопасное действие помощника: continue | step | finish
   'ping', // here | back
   'out', // исход: done | not_done | other
   'skiprep', // пропустить отчёт

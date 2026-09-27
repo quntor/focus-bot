@@ -20,7 +20,7 @@ export const TECHNIQUES = ['auto', 'pomodoro', 'medium', 'long', 'free'] as cons
 export const REST_CHOICES = ['rest', 'continue', 'later', 'day_end'] as const
 export const SCOPES = ['step', 'multi_session'] as const
 export const POINT_REASONS = ['session_completed', 'daily_goal', 'comeback'] as const
-export const LLM_STAGES = ['intent', 'report', 'tasks'] as const
+export const LLM_STAGES = ['intent', 'report', 'tasks', 'session_help'] as const
 export const LLM_FALLBACK_REASONS = ['disabled', 'error', 'timeout', 'invalid'] as const
 export const OUTBOX_KINDS = ['ping', 'session_end', 'rest_over', 'meeting', 'summary'] as const
 export const SETTINGS_KEYS = [
@@ -54,6 +54,11 @@ export const PAYLOADS = {
   task_completed: z.strictObject({ task_id: id, source: z.enum(['text', 'voice', 'button']) }),
   task_switched: z.strictObject({ from_task_id: id, to_task_id: id, source: z.enum(['text', 'voice']) }),
   session_length_adjusted: z.strictObject({ direction: z.enum(['up', 'down']), planned_minutes: minutes }),
+  session_help_requested: z.strictObject({
+    kind: z.enum(['distracted', 'stuck', 'finished_early', 'question']),
+    action: z.enum(['continue', 'change_step', 'finish']),
+    llm_used: z.boolean(),
+  }),
   session_started: z.strictObject({
     task_id: id.nullable(),
     is_new_task: z.boolean(),

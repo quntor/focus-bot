@@ -5,7 +5,7 @@ root_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 env_file="$root_dir/.env.production"
 compose_file="$root_dir/compose.prod.yml"
 base_url='https://shared1.multitool.works:4000/v1'
-model='gigachat3-10b-a1.8b'
+model='gpt-5.4-mini'
 stt_model='whisper-large-v3'
 
 if [ ! -f "$env_file" ]; then

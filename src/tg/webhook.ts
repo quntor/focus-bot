@@ -115,8 +115,12 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
         const text = await tasks.transcribeVoice(ctx, user, msg.voice)
         if (!text) return
         if (user.pendingInput === 'meeting_time') return day.onMeetingTimeText(ctx, user, text)
+        const runningEdit = /^running_(work|duration):([0-9a-f-]{36})$/.exec(user.pendingInput)
+        if (runningEdit?.[1] === 'work' && runningEdit[2]) return session.onRunningWorkText(ctx, user, runningEdit[2], text)
+        if (runningEdit?.[1] === 'duration' && runningEdit[2]) return session.onRunningDurationText(ctx, user, runningEdit[2], text)
         const taskEdit = /^task_edit:([0-9a-f-]{36})$/.exec(user.pendingInput)
         if (taskEdit?.[1]) return tasks.onTaskEditText(ctx, user, taskEdit[1], text)
+        if (await session.onRunningFreeText(ctx, user, text)) return
         const outcome = await tasks.onTaskMessage(ctx, user, text, 'voice')
         if (outcome === 'session_intent') await session.onIntentText(ctx, user, text)
         else if (outcome === 'close_day') await day.closeDay(ctx, user, 'voice')
@@ -195,6 +199,7 @@ async function onText(ctx: Ctx, user: User, text: string, created: boolean): Pro
       if (await session.onReportText(ctx, user, text)) return
       break
   }
+  if (await session.onRunningFreeText(ctx, user, text)) return
   const outcome = await tasks.onTaskMessage(ctx, user, text, 'text')
   if (outcome === 'session_intent') return session.onIntentText(ctx, user, text)
   if (outcome === 'close_day') return day.closeDay(ctx, user, 'text')
@@ -220,6 +225,9 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
         break
       case 'run':
         if (id && (arg === 'work' || arg === 'duration')) return await session.onRunningEdit(ctx, user, id, arg)
+        break
+      case 'help':
+        if (id && (arg === 'continue' || arg === 'step' || arg === 'finish')) return await session.onSessionHelpAction(ctx, user, id, arg)
         break
       case 'ping':
         if (id && arg) return await session.onPing(ctx, user, id, arg)

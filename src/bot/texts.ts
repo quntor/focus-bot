@@ -145,6 +145,12 @@ export const T = {
   cancelled: 'Отменил. Напиши, когда будет удобно.',
   alreadyRunning: (end: string | null) =>
     end ? `Сессия идёт до ${end}. Закончить раньше — /done, бросить — /stop.` : 'Сессия идёт. Закончить — /done, бросить — /stop.',
+  sessionHelpContinue: 'Продолжаем. Вернись к текущему маленькому шагу.',
+  sessionHelpAction: {
+    continue: 'Продолжить',
+    change_step: 'Изменить следующий шаг',
+    finish: 'Завершить',
+  },
   stopped: 'Остановил. Бывает — вернёмся, когда сможешь.',
   nothingRunning: 'Сейчас сессии нет. Напиши, с чего начнёшь.',
   breakStarted: 'Хорошо, отвлекись. Таймер остановлен.',

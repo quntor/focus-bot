@@ -1,0 +1,130 @@
+import { beforeEach, describe, expect, it } from 'vitest'
+import type { LlmProvider } from '../llm/provider.js'
+import { makeBot } from '../test/bot.js'
+import { hasDb, prisma, resetDb } from '../test/db.js'
+
+const A = 1091
+
+function helperProvider(answer: string): LlmProvider {
+  return {
+    enabled: true,
+    model: 'test-model',
+    async complete(req) {
+      if (req.system.includes('активной фокус-сессии')) return { text: answer, usage: null }
+      if (req.system.includes('сообщение пользователя фокус-боту')) {
+        return { text: '{"kind":"session_intent","new_tasks":[],"start_title":null,"complete_title":null}', usage: null }
+      }
+      return { text: '{"task":null,"title":"Подготовить черновик","scope":"step"}', usage: null }
+    },
+  }
+}
+
+describe.skipIf(!hasDb)('свободный текст во время активной сессии', () => {
+  beforeEach(resetDb)
+
+  it('на отвлечение отвечает fallback и предлагает продолжить без изменения сессии', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    await bot.text(A, 'подготовить черновик, 25 минут')
+    const before = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+
+    await bot.text(A, 'Опять отвлёкся на уведомления')
+
+    expect(bot.lastText(A)).toContain('вернись')
+    expect(bot.lastButton(A, 'help:', ':continue')).toBe(`help:${before.id}:continue`)
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: before.id } })).toMatchObject({
+      state: 'running',
+      intentText: before.intentText,
+      plannedEndAt: before.plannedEndAt,
+    })
+    await bot.press(A, `help:${before.id}:continue`)
+    expect(bot.lastText(A)).toContain('Продолжаем')
+  })
+
+  it('на застревание предлагает штатную правку текущего шага', async () => {
+    const bot = makeBot({
+      llm: helperProvider('{"kind":"stuck","reply":"Сделай шаг меньше: набросай три пункта без редактуры.","action":"change_step"}'),
+    })
+    await bot.onboard(A)
+    await bot.text(A, 'подготовить черновик, 25 минут')
+    const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+
+    await bot.text(A, 'Хожу по кругу и не вижу следующего хода')
+
+    expect(bot.lastText(A)).toBe('Сделай шаг меньше: набросай три пункта без редактуры.')
+    expect(bot.lastButton(A, 'help:', ':step')).toBe(`help:${running.id}:step`)
+    await bot.press(A, `help:${running.id}:step`)
+    expect(await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })).toMatchObject({ pendingInput: `running_work:${running.id}` })
+    expect(bot.lastText(A)).toContain('новую формулировку')
+    expect(await prisma.componentCall.findFirstOrThrow({ where: { name: 'session_help' } })).toMatchObject({
+      sessionId: running.id,
+      model: 'test-model',
+      status: 'ok',
+    })
+    expect(await prisma.event.findFirstOrThrow({ where: { type: 'session_help_requested' } })).toMatchObject({
+      sessionId: running.id,
+      payload: { kind: 'stuck', action: 'change_step', llm_used: true },
+      isUserAction: true,
+    })
+  })
+
+  it('на вопрос отвечает коротко и оставляет продолжение под контролем человека', async () => {
+    const bot = makeBot({
+      llm: helperProvider('{"kind":"question","reply":"Сначала набросай главную мысль одним предложением.","action":"continue"}'),
+    })
+    await bot.onboard(A)
+    await bot.text(A, 'подготовить черновик, 25 минут')
+    const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+
+    await bot.text(A, 'Как лучше начать первый абзац?')
+
+    expect(bot.lastText(A)).toBe('Сначала набросай главную мысль одним предложением.')
+    expect(bot.lastButton(A, 'help:', ':continue')).toBe(`help:${running.id}:continue`)
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })).toMatchObject({ state: 'running' })
+  })
+
+  it('на досрочное завершение только открывает штатный выбор исхода', async () => {
+    const bot = makeBot({
+      llm: helperProvider('{"kind":"finished_early","reply":"Готово раньше — зафиксируй результат.","action":"finish"}'),
+    })
+    await bot.onboard(A)
+    await bot.text(A, 'подготовить черновик, 25 минут')
+    const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+
+    await bot.text(A, 'Уложился раньше, результат уже отправлен')
+    await bot.press(A, `help:${running.id}:finish`)
+
+    expect(bot.lastText(A)).toBe('Как прошло?')
+    expect(bot.lastButton(A, 'out:', ':done')).toBe(`out:${running.id}:done`)
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })).toMatchObject({ state: 'running', outcome: null })
+    expect(await prisma.pointsEntry.count()).toBe(0)
+  })
+
+  it('other не перехватывает существующие команды задачам', async () => {
+    const bot = makeBot({
+      llm: {
+        enabled: true,
+        model: 'test-model',
+        async complete(req) {
+          if (req.system.includes('активной фокус-сессии')) {
+            return { text: '{"kind":"other","reply":null,"action":null}', usage: null }
+          }
+          if (req.system.includes('сообщение пользователя фокус-боту')) {
+            const text = JSON.parse(req.input).text as string
+            return text.startsWith('Добавь')
+              ? { text: '{"kind":"capture","new_tasks":["Позвонить поставщику"],"start_title":null,"complete_title":null}', usage: null }
+              : { text: '{"kind":"session_intent","new_tasks":[],"start_title":null,"complete_title":null}', usage: null }
+          }
+          return { text: '{"task":null,"title":"Подготовить черновик","scope":"step"}', usage: null }
+        },
+      },
+    })
+    await bot.onboard(A)
+    await bot.text(A, 'подготовить черновик, 25 минут')
+
+    await bot.text(A, 'Добавь задачу позвонить поставщику')
+
+    expect(await prisma.task.findFirst({ where: { title: 'Позвонить поставщику' } })).not.toBeNull()
+    expect(bot.lastText(A)).toContain('Позвонить поставщику')
+  })
+})

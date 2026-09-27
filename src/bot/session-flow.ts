@@ -4,6 +4,7 @@ import { dayKey } from '../lib/day.js'
 import { nextLocalTime, parseClock } from '../lib/time.js'
 import { parseIntent } from '../llm/intent.js'
 import { parseReport } from '../llm/report.js'
+import { parseSessionHelp, type SessionHelpAction } from '../llm/session-help.js'
 import { llmMeter } from '../analytics/calls.js'
 import { cancelPending, enqueue } from '../outbox/queue.js'
 import { creditCountedSession, type Credit } from '../retention/credit.js'
@@ -99,6 +100,51 @@ function runningEditKeyboard(sessionId: string): Keyboard {
     [{ text: T.changeRunningWork, data: cb('run', sessionId, 'work') }],
     [{ text: T.changeRunningDuration, data: cb('run', sessionId, 'duration') }],
   ]
+}
+
+function sessionHelpKeyboard(sessionId: string, action: SessionHelpAction): Keyboard {
+  const arg = action === 'change_step' ? 'step' : action
+  return [[{ text: T.sessionHelpAction[action], data: cb('help', sessionId, arg) }]]
+}
+
+export async function onRunningFreeText(ctx: Ctx, user: User, text: string): Promise<boolean> {
+  const session = await activeSession(ctx, user.id)
+  if (!session || session.state !== 'running') return false
+  const minutesLeft = session.plannedEndAt
+    ? Math.max(0, Math.ceil((session.plannedEndAt.getTime() - ctx.now().getTime()) / MIN))
+    : null
+  const parsed = await parseSessionHelp(
+    ctx.llm,
+    { text, currentWork: session.intentText, minutesLeft },
+    llmMeter(ctx, user.id, 'session_help', session.id),
+  )
+  if (parsed.result.kind === 'other') return false
+
+  await logEvent(
+    ctx.db,
+    user.id,
+    'session_help_requested',
+    { kind: parsed.result.kind, action: parsed.result.action, llm_used: parsed.result.llmUsed },
+    { at: ctx.now(), sessionId: session.id },
+  )
+  if (parsed.failure && !parsed.failure.ok) {
+    await logEvent(ctx.db, user.id, 'llm_fallback', { stage: 'session_help', reason: parsed.failure.reason }, { at: ctx.now(), sessionId: session.id })
+  }
+  await reply(ctx, user, parsed.result.reply, sessionHelpKeyboard(session.id, parsed.result.action))
+  return true
+}
+
+export async function onSessionHelpAction(
+  ctx: Ctx,
+  user: User,
+  sessionId: string,
+  action: 'continue' | 'step' | 'finish',
+): Promise<void> {
+  const session = await ownedSession(ctx, user.id, sessionId)
+  if (!session || session.state !== 'running') return reply(ctx, user, T.stale)
+  if (action === 'step') return onRunningEdit(ctx, user, sessionId, 'work')
+  if (action === 'finish') return onDone(ctx, user)
+  await reply(ctx, user, T.sessionHelpContinue)
 }
 
 // «С чего начнёшь?» — с ритуалом и подсказкой следующего шага. Если сессия уже

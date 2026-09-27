@@ -29,7 +29,7 @@
 
 Одна строка — один реальный вызов. Поля: псевдоним `subject_id`, `session_id`,
 `component` (`llm` | `tool` | `background`), касание `name` (`intent`, `report`,
-`tasks`, `task_match`, `voice_transcription`; закрытый список в
+`tasks`, `task_match`, `session_help`, `voice_transcription`; закрытый список в
 `src/analytics/calls.ts`), `skill`, `model`, `status` (`ok` | `error` | `timeout` |
 `invalid`), машинный `error_code` (`http_402`, `network`, `bad_response`,
 `timeout`, `not_json`, `schema`), `latency_ms`, токены, время. Свободного текста
@@ -114,6 +114,7 @@ UPDATE и DELETE запрещены триггером.
 | `task_completed` | отметил существующую задачу готовой | да | `task_id`, `source` (`text`, `voice`, `button`) |
 | `task_switched` | завершил одну задачу и начал другую | да | `from_task_id`, `to_task_id`, `source` |
 | `session_length_adjusted` | человек сдвинул предложенную длину | да | `direction`, `planned_minutes` |
+| `session_help_requested` | попросил помощи во время активной сессии | да | `kind`, `action`, `llm_used` |
 | `session_started` | подтвердил, таймер пошёл | да | `task_id`, `is_new_task`, `planned_minutes`, `planned_rest_minutes`, `minutes_source`, `technique`, `scope` |
 | `session_paused` | нажал «Перерыв» | да | `session_id`, `elapsed_minutes` |
 | `session_resumed` | вернулся к прежней сессии | да | `session_id`, `paused_minutes` |
