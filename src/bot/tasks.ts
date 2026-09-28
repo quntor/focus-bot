@@ -386,7 +386,7 @@ async function completeTask(
           progress: 'moved',
         })
         await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `ping:${current.id}` } })
-        await cancelPending(tx, { userId: user.id, idempotencyKey: `session_end:${current.id}` })
+        await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `session_end:${current.id}` } })
         await logEvent(
           tx,
           user.id,
@@ -443,6 +443,7 @@ async function completeAndStart(
   const now = ctx.now()
   let next: { id: string; title: string } | null = null
   let doneTitle = ''
+  let keptRunning = false
   try {
     await ctx.db.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
@@ -461,26 +462,20 @@ async function completeAndStart(
       if (!next || next.id === completed.id) throw new StaleTransition()
 
       if (current?.state === 'running') {
-        const elapsed = activeElapsedMinutes(current, now)
-        const counted = isCounted('finished', elapsed)
-        const early = current.plannedEndAt !== null && now < current.plannedEndAt
-        await transition(tx, { sessionId: current.id, userId: user.id }, 'running', 'finished', {
-          outcome: 'done',
-          finishedAt: now,
-          counted,
-          progress: 'moved',
-          restChoice: 'continue',
+        const changed = await tx.focusSession.updateMany({
+          where: { id: current.id, userId: user.id, state: 'running', taskId: completed.id },
+          data: { taskId: next.id, intentText: next.title, scope: 'step' },
         })
-        await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `ping:${current.id}` } })
-        await cancelPending(tx, { userId: user.id, idempotencyKey: `session_end:${current.id}` })
-        await logEvent(
-          tx,
-          user.id,
-          'session_completed',
-          { session_id: current.id, outcome: 'done', elapsed_minutes: elapsed, early, counted },
-          { at: now, sessionId: current.id },
-        )
-        if (counted) await creditCountedSession(tx, { userId: user.id, sessionId: current.id, dayKey: dayKey(now, user.timezone), at: now })
+        if (changed.count !== 1) throw new StaleTransition()
+        await tx.task.updateMany({
+          where: { id: completed.id, userId: user.id, sessionsCount: { gt: 0 } },
+          data: { sessionsCount: { decrement: 1 } },
+        })
+        await tx.task.updateMany({
+          where: { id: next.id, userId: user.id, status: 'active' },
+          data: { sessionsCount: { increment: 1 }, lastSessionAt: now },
+        })
+        keptRunning = true
       } else if (current?.state === 'collecting_intent') {
         await transition(tx, { sessionId: current.id, userId: user.id }, 'collecting_intent', 'cancelled', { finishedAt: now })
         await logEvent(tx, user.id, 'session_cancelled', {}, { at: now, sessionId: current.id })
@@ -492,6 +487,7 @@ async function completeAndStart(
       })
       if (marked.count !== 1) throw new StaleTransition()
       await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
+      await logEvent(tx, user.id, 'task_completed', { task_id: completed.id, source }, { at: now, sessionId: current?.id })
       await logEvent(
         tx,
         user.id,
@@ -507,6 +503,7 @@ async function completeAndStart(
 
   const selectedNext = next as { id: string; title: string } | null
   if (!selectedNext) return reply(ctx, user, T.stale)
+  if (keptRunning) return reply(ctx, user, T.taskSwitchedRunning(doneTitle, selectedNext.title))
   await reply(ctx, user, T.taskSwitched(doneTitle, selectedNext.title))
   await startTaskSession(ctx, user, selectedNext.id)
 }

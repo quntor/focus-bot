@@ -257,6 +257,51 @@ describe.skipIf(!hasDb)('полный цикл сессии', () => {
     expect(summary).not.toContain('Отправить документы — меньше минуты')
   })
 
+  it('делит время одной рабочей сессии между задачами без перезапуска таймера', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    const first = await prisma.task.create({ data: { userId: user.id, title: 'Разобрать обратную связь' } })
+    const second = await prisma.task.create({ data: { userId: user.id, title: 'Исправить макет' } })
+
+    await bot.press(A, `task:${first.id}:start`)
+    const session = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })
+    const originalEnd = session.plannedEndAt
+    bot.advance(12)
+    await bot.press(A, `task:${second.id}:start`)
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).toMatchObject({
+      state: 'running',
+      taskId: second.id,
+      plannedEndAt: originalEnd,
+    })
+    bot.advance(8)
+
+    await bot.text(A, '/today')
+
+    const summary = bot.textsTo(A).find((text) => text.includes('По задачам:'))
+    expect(summary).toContain('• Разобрать обратную связь — 12 минут')
+    expect(summary).toContain('• Исправить макет — 8 минут')
+  })
+
+  it('суммирует рабочие периоды одной сессии и не относит отдых ко времени задачи', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    const task = await prisma.task.create({ data: { userId: user.id, title: 'Подготовить релиз' } })
+
+    await bot.press(A, `task:${task.id}:start`)
+    bot.advance(10)
+    await bot.text(A, 'Перерыв')
+    bot.advance(20)
+    await bot.text(A, 'Вернуться к работе')
+    bot.advance(15)
+    await bot.text(A, '/today')
+
+    const summary = bot.textsTo(A).find((text) => text.includes('По задачам:'))
+    expect(summary).toContain('• Подготовить релиз — 25 минут')
+    expect(summary).not.toContain('45 минут')
+  })
+
   it('подтверждение времени встречи не отменяет такую же встречу по умолчанию', async () => {
     const bot = makeBot({ now: new Date('2026-09-24T16:51:00Z') })
     await bot.onboard(A, '19:51')

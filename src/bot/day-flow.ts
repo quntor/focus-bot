@@ -27,6 +27,7 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
   const sessions = await db.focusSession.findMany({
     where: { userId: user.id, createdAt: { gte: since }, state: { in: ['finished', 'abandoned'] } },
     select: {
+      id: true,
       state: true,
       outcome: true,
       counted: true,
@@ -38,17 +39,68 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
   })
   const today = sessions.filter((s) => s.finishedAt && dayKey(s.finishedAt, user.timezone) === day)
   const finished = today.filter((s) => s.state === 'finished')
-  const tasksById = new Map<string, { title: string; duration: number; completed: boolean }>()
+  const durationByTask = new Map<string, number>()
+  const sessionIds = today.map((session) => session.id)
+  const timelineEvents = sessionIds.length === 0
+    ? []
+    : await db.event.findMany({
+        where: {
+          subjectId: user.subjectId,
+          sessionId: { in: sessionIds },
+          type: { in: ['session_started', 'intent_parsed', 'task_selected', 'task_switched', 'session_paused', 'session_resumed'] },
+        },
+        select: { id: true, sessionId: true, type: true, payload: true, createdAt: true },
+        orderBy: { id: 'asc' },
+      })
+  const eventsBySession = new Map<string, typeof timelineEvents>()
+  for (const event of timelineEvents) {
+    if (!event.sessionId) continue
+    const events = eventsBySession.get(event.sessionId) ?? []
+    events.push(event)
+    eventsBySession.set(event.sessionId, events)
+  }
+  const payloadId = (payload: Prisma.JsonValue | null, key: string): string | null => {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
+    const value = (payload as Record<string, unknown>)[key]
+    return typeof value === 'string' ? value : null
+  }
+  const addDuration = (taskId: string, duration: number) => {
+    if (duration <= 0) return
+    durationByTask.set(taskId, (durationByTask.get(taskId) ?? 0) + duration)
+  }
   for (const session of today) {
-    if (!session.startedAt || !session.finishedAt || !session.task) continue
-    const activeMs = Math.max(0, session.finishedAt.getTime() - session.startedAt.getTime() - session.pausedSeconds * 1000)
-    if (activeMs <= 0) continue
-    const tracked = tasksById.get(session.task.id)
-    tasksById.set(session.task.id, {
-      title: session.task.title,
-      duration: (tracked?.duration ?? 0) + activeMs,
-      completed: tracked?.completed ?? false,
-    })
+    if (!session.startedAt || !session.finishedAt) continue
+    const events = eventsBySession.get(session.id) ?? []
+    let cursor = session.startedAt
+    let taskId: string | null = null
+    let paused = false
+    let hasTaskTimeline = false
+    for (const event of events) {
+      const at = new Date(Math.min(session.finishedAt.getTime(), Math.max(cursor.getTime(), event.createdAt.getTime())))
+      if (!paused && taskId) addDuration(taskId, at.getTime() - cursor.getTime())
+      if (event.type === 'session_started' || event.type === 'intent_parsed' || event.type === 'task_selected') {
+        taskId = payloadId(event.payload, 'task_id')
+        if (taskId) hasTaskTimeline = true
+      } else if (event.type === 'task_switched') {
+        taskId = payloadId(event.payload, 'to_task_id')
+        if (taskId) hasTaskTimeline = true
+      } else if (event.type === 'session_paused') {
+        paused = true
+      } else if (event.type === 'session_resumed') {
+        paused = false
+      }
+      cursor = at
+      if (event.createdAt >= session.finishedAt) break
+    }
+    if (hasTaskTimeline) {
+      if (!paused && taskId) addDuration(taskId, session.finishedAt.getTime() - cursor.getTime())
+    } else if (session.task) {
+      // Совместимость со старыми сессиями без событий маршрутизации задач.
+      addDuration(
+        session.task.id,
+        Math.max(0, session.finishedAt.getTime() - session.startedAt.getTime() - session.pausedSeconds * 1000),
+      )
+    }
   }
   const completionEvents = await db.event.findMany({
     where: { subjectId: user.subjectId, dayKey: day, type: 'task_completed' },
@@ -60,18 +112,17 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
     const taskId = (payload as Record<string, unknown>).task_id
     return typeof taskId === 'string' ? [taskId] : []
   }))]
-  if (completedIds.length > 0) {
-    const completedTasks = await db.task.findMany({
-      where: { userId: user.id, id: { in: completedIds } },
-      select: { id: true, title: true },
-    })
-    for (const task of completedTasks) {
-      const tracked = tasksById.get(task.id)
-      tasksById.set(task.id, { title: task.title, duration: tracked?.duration ?? 0, completed: true })
-    }
-  }
-  const taskTimes = [...tasksById.values()]
-    .map(({ title, duration, completed }) => ({ title, minutes: Math.floor(duration / MIN), completed }))
+  const taskIds = [...new Set([...durationByTask.keys(), ...completedIds])]
+  const summaryTasks = taskIds.length === 0
+    ? []
+    : await db.task.findMany({ where: { userId: user.id, id: { in: taskIds } }, select: { id: true, title: true } })
+  const completed = new Set(completedIds)
+  const taskTimes = summaryTasks
+    .map((task) => ({
+      title: task.title,
+      minutes: Math.floor((durationByTask.get(task.id) ?? 0) / MIN),
+      completed: completed.has(task.id),
+    }))
     .sort((left, right) => right.minutes - left.minutes || left.title.localeCompare(right.title, 'ru'))
   const goal = await db.dailyGoal.findUnique({ where: { userId_dayKey: { userId: user.id, dayKey: day } } })
   const streak = await db.streak.findUnique({ where: { userId: user.id } })
@@ -231,7 +282,10 @@ export async function closeDay(
         where: {
           userId: user.id,
           status: { in: ['pending', 'paused'] },
-          OR: [{ idempotencyKey: { startsWith: `ping:${active.id}` } }, { idempotencyKey: `session_end:${active.id}` }],
+          OR: [
+            { idempotencyKey: { startsWith: `ping:${active.id}` } },
+            { idempotencyKey: { startsWith: `session_end:${active.id}` } },
+          ],
         },
         data: { status: 'canceled' },
       })

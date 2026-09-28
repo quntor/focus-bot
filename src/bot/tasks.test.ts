@@ -262,7 +262,7 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     expect(bot.lastText(C)).toContain('до 5 голосовых')
   })
 
-  it('явно завершает текущую задачу и сразу запускает следующую', async () => {
+  it('явно завершает текущую задачу и меняет её без перезапуска рабочего периода', async () => {
     const switchLlm = conversational(
       () => '{"kind":"complete_and_start","new_tasks":[],"start_title":"Позвонить Ивану"}',
       (_intent, active) => JSON.stringify({ task: active.find((task) => task.title === 'Позвонить Ивану')?.label ?? null, title: 'Позвонить Ивану', scope: 'step' }),
@@ -274,14 +274,17 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     const second = await prisma.task.create({ data: { userId: user.id, title: 'Позвонить Ивану' } })
 
     await bot.press(A, `task:${first.id}:start`)
+    const started = await prisma.focusSession.findFirstOrThrow({ where: { taskId: first.id, state: 'running' } })
     bot.advance(10)
     await bot.text(A, 'Эту сделал и приступаю к звонку Ивану')
 
     expect(await prisma.task.findUniqueOrThrow({ where: { id: first.id } })).toMatchObject({ status: 'done' })
-    const finished = await prisma.focusSession.findFirstOrThrow({ where: { taskId: first.id } })
-    expect(finished).toMatchObject({ state: 'finished', outcome: 'done', progress: 'moved', restChoice: 'continue' })
-    const running = await prisma.focusSession.findFirstOrThrow({ where: { taskId: second.id, state: 'running' } })
-    expect(running.intentText).toBe('Позвонить Ивану')
+    const running = await prisma.focusSession.findUniqueOrThrow({ where: { id: started.id } })
+    expect(running).toMatchObject({ state: 'running', taskId: second.id, intentText: 'Позвонить Ивану' })
+    expect(running.startedAt).toEqual(started.startedAt)
+    expect(running.plannedEndAt).toEqual(started.plannedEndAt)
+    expect(await prisma.focusSession.count({ where: { userId: user.id } })).toBe(1)
+    expect(bot.lastText(A)).toContain('Таймер продолжает идти')
   })
 
   it('по voice отмечает названную задачу готовой, не закрывая день', async () => {

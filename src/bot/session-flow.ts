@@ -82,6 +82,15 @@ function activeElapsedMs(session: FocusSession, now: Date): number {
   return Math.max(0, now.getTime() - session.startedAt.getTime() - session.pausedSeconds * 1000 - currentPause)
 }
 
+function periodPingAt(user: User, session: FocusSession, now: Date): Date | null {
+  if (!user.pingsEnabled) return null
+  const minutes = session.plannedMinutes
+  if (minutes === null) return new Date(now.getTime() + 30 * MIN)
+  const technique: Technique = isTechnique(session.technique ?? '') ? (session.technique as Technique) : 'auto'
+  if (technique === 'pomodoro' || minutes < 20) return null
+  return new Date(now.getTime() + (minutes / 2) * MIN)
+}
+
 export function activeElapsedMinutes(session: FocusSession, now: Date): number {
   return Math.floor(activeElapsedMs(session, now) / MIN)
 }
@@ -600,7 +609,13 @@ export async function onRunningDurationText(ctx: Ctx, user: User, sessionId: str
     return reply(ctx, user, T.stale)
   }
 
-  const elapsedMs = activeElapsedMs(session, now)
+  const lastResume = await ctx.db.event.findFirst({
+    where: { subjectId: user.subjectId, sessionId, type: 'session_resumed', createdAt: { lte: now } },
+    orderBy: { id: 'desc' },
+    select: { createdAt: true },
+  })
+  const periodStartedAt = lastResume?.createdAt ?? session.startedAt
+  const elapsedMs = Math.max(0, now.getTime() - periodStartedAt.getTime())
   const remainingMs = minutes * MIN - elapsedMs
   if (remainingMs <= 0) return reply(ctx, user, T.runningDurationTooShort(Math.max(1, Math.ceil(elapsedMs / MIN))))
   const plannedEndAt = new Date(now.getTime() + remainingMs)
@@ -608,36 +623,65 @@ export async function onRunningDurationText(ctx: Ctx, user: User, sessionId: str
   const technique: Technique = isTechnique(session.technique ?? '') ? (session.technique as Technique) : 'auto'
   let pingAt: Date | null = null
   if (user.pingsEnabled && session.pingAnsweredAt === null && technique !== 'pomodoro' && minutes >= 20) {
-    const candidate = new Date(session.startedAt.getTime() + session.pausedSeconds * 1000 + (minutes / 2) * MIN)
+    const candidate = new Date(periodStartedAt.getTime() + (minutes / 2) * MIN)
     if (candidate > now) pingAt = candidate
   }
 
   try {
     await ctx.db.$transaction(async (tx) => {
-      const endKey = `session_end:${session.id}`
-      const endMessage = await tx.outboxMessage.findUnique({ where: { idempotencyKey: endKey } })
+      const endPrefix = `session_end:${session.id}`
+      const endMessage = await tx.outboxMessage.findFirst({
+        where: {
+          userId: user.id,
+          kind: 'session_end',
+          idempotencyKey: { startsWith: endPrefix },
+          status: { in: ['pending', 'paused', 'canceled'] },
+        },
+        orderBy: { createdAt: 'desc' },
+      })
+      await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: endPrefix } })
       if (endMessage) {
         const updated = await tx.outboxMessage.updateMany({
-          where: { id: endMessage.id, userId: user.id, status: { in: ['pending', 'paused', 'canceled'] } },
+          where: { id: endMessage.id, userId: user.id, status: { in: ['paused', 'canceled'] } },
           data: { status: 'pending', sendAfter: plannedEndAt, lockedUntil: null },
         })
         if (updated.count !== 1) throw new StaleTransition()
       } else {
-        await enqueue(tx, { userId: user.id, kind: 'session_end', key: endKey, sendAfter: plannedEndAt, payload: { sessionId: session.id } })
+        await enqueue(tx, {
+          userId: user.id,
+          kind: 'session_end',
+          key: `${endPrefix}:${now.getTime()}:edit`,
+          sendAfter: plannedEndAt,
+          payload: { sessionId: session.id },
+        })
       }
 
-      const pingKey = `ping:${session.id}:1`
-      const pingMessage = await tx.outboxMessage.findUnique({ where: { idempotencyKey: pingKey } })
+      const pingPrefix = `ping:${session.id}`
+      const pingMessage = await tx.outboxMessage.findFirst({
+        where: {
+          userId: user.id,
+          kind: 'ping',
+          idempotencyKey: { startsWith: pingPrefix },
+          status: { in: ['pending', 'paused', 'canceled'] },
+        },
+        orderBy: { createdAt: 'desc' },
+      })
+      await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: pingPrefix } })
       if (pingAt && pingMessage) {
         const updated = await tx.outboxMessage.updateMany({
-          where: { id: pingMessage.id, userId: user.id, status: { in: ['pending', 'paused', 'canceled'] } },
+          where: { id: pingMessage.id, userId: user.id, status: { in: ['paused', 'canceled'] } },
           data: { status: 'pending', sendAfter: pingAt, lockedUntil: null },
         })
         if (updated.count !== 1) pingAt = null
       } else if (pingAt) {
-        await enqueue(tx, { userId: user.id, kind: 'ping', key: pingKey, sendAfter: pingAt, payload: { sessionId: session.id, n: 1 } })
-      } else {
-        await cancelPending(tx, { userId: user.id, idempotencyKey: pingKey })
+        const series = `edit:${now.getTime()}`
+        await enqueue(tx, {
+          userId: user.id,
+          kind: 'ping',
+          key: `${pingPrefix}:${series}:1`,
+          sendAfter: pingAt,
+          payload: { sessionId: session.id, n: 1, series },
+        })
       }
 
       const changed = await tx.focusSession.updateMany({
@@ -736,7 +780,7 @@ export async function onOutcome(ctx: Ctx, user: User, sessionId: string, outcome
     await ctx.db.$transaction(async (tx) => {
       await transition(tx, { sessionId, userId: user.id }, 'running', 'finished', { outcome, finishedAt: now, counted })
       await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `ping:${sessionId}` } })
-      await cancelPending(tx, { userId: user.id, idempotencyKey: `session_end:${sessionId}` })
+      await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `session_end:${sessionId}` } })
       await logEvent(tx, user.id, 'session_completed', { session_id: sessionId, outcome, elapsed_minutes: elapsed, early, counted }, { at: now, sessionId })
       if (counted) credit = await creditCountedSession(tx, { userId: user.id, sessionId, dayKey: day, at: now })
       await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'report_text' } })
@@ -946,35 +990,26 @@ export async function onRest(
   return next.dayEnd()
 }
 
-// «Перерыв» не требует заранее решать судьбу текущей сессии. Таймер и сообщения
-// замораживаются; выбор продолжить или начать заново появляется уже на перерыве.
+// «Перерыв» завершает текущий рабочий период, но не логическую сессию. При
+// возврате начинается новый полный период той же настроенной длительности.
 export async function onBreak(ctx: Ctx, user: User): Promise<void> {
   const now = ctx.now()
   const session = await activeSession(ctx, user.id)
   if (!session || session.state === 'collecting_intent') return reply(ctx, user, T.nothingToPause)
   if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
-  if (session.plannedEndAt && session.plannedEndAt <= now) {
-    await ctx.db.outboxMessage.updateMany({
-      where: {
-        userId: user.id,
-        status: { in: ['pending', 'paused'] },
-        OR: [{ idempotencyKey: { startsWith: `ping:${session.id}` } }, { idempotencyKey: `session_end:${session.id}` }],
-      },
-      data: { status: 'canceled' },
-    })
-    return reply(ctx, user, T.sessionEnd, outcomeKeyboard(session.id))
-  }
-
   try {
     await ctx.db.$transaction(async (tx) => {
       await transition(tx, { sessionId: session.id, userId: user.id }, 'running', 'paused', { pausedAt: now })
       await tx.outboxMessage.updateMany({
         where: {
           userId: user.id,
-          status: 'pending',
-          OR: [{ idempotencyKey: { startsWith: `ping:${session.id}` } }, { idempotencyKey: `session_end:${session.id}` }],
+          status: { in: ['pending', 'paused'] },
+          OR: [
+            { idempotencyKey: { startsWith: `ping:${session.id}` } },
+            { idempotencyKey: { startsWith: `session_end:${session.id}` } },
+          ],
         },
-        data: { status: 'paused' },
+        data: { status: 'canceled' },
       })
       await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
       await logEvent(tx, user.id, 'session_paused', { session_id: session.id, elapsed_minutes: Math.floor(activeElapsedMs(session, now) / MIN) }, { at: now, sessionId: session.id })
@@ -992,33 +1027,9 @@ export async function onResume(ctx: Ctx, user: User): Promise<void> {
   if (!session || session.state !== 'paused' || !session.pausedAt) return reply(ctx, user, T.nothingPaused)
 
   const pauseMs = Math.max(0, now.getTime() - session.pausedAt.getTime())
-  const expiredBeforePause = session.plannedEndAt !== null && session.plannedEndAt <= session.pausedAt
-  if (expiredBeforePause) {
-    try {
-      await ctx.db.$transaction(async (tx) => {
-        await transition(tx, { sessionId: session.id, userId: user.id }, 'paused', 'running', {
-          pausedAt: null,
-          pausedSeconds: { increment: Math.floor(pauseMs / 1000) },
-          pingAt: null,
-        })
-        await tx.outboxMessage.updateMany({
-          where: {
-            userId: user.id,
-            status: { in: ['pending', 'paused'] },
-            OR: [{ idempotencyKey: { startsWith: `ping:${session.id}` } }, { idempotencyKey: `session_end:${session.id}` }],
-          },
-          data: { status: 'canceled' },
-        })
-        await logEvent(tx, user.id, 'session_resumed', { session_id: session.id, paused_minutes: Math.floor(pauseMs / MIN) }, { at: now, sessionId: session.id })
-      })
-    } catch (error) {
-      if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
-      throw error
-    }
-    return reply(ctx, user, T.sessionEnd, outcomeKeyboard(session.id))
-  }
-  const plannedEndAt = session.plannedEndAt ? new Date(session.plannedEndAt.getTime() + pauseMs) : null
-  const pingAt = session.pingAt && session.pingAt > session.pausedAt ? new Date(session.pingAt.getTime() + pauseMs) : session.pingAt
+  const plannedEndAt = session.plannedMinutes === null ? null : new Date(now.getTime() + session.plannedMinutes * MIN)
+  const pingAt = periodPingAt(user, session, now)
+  const period = now.getTime()
 
   try {
     await ctx.db.$transaction(async (tx) => {
@@ -1027,19 +1038,36 @@ export async function onResume(ctx: Ctx, user: User): Promise<void> {
         pausedSeconds: { increment: Math.floor(pauseMs / 1000) },
         plannedEndAt,
         pingAt,
+        pingAnsweredAt: null,
+        pingsMissed: 0,
       })
-      const held = await tx.outboxMessage.findMany({
+      await tx.outboxMessage.updateMany({
         where: {
           userId: user.id,
-          status: 'paused',
-          OR: [{ idempotencyKey: { startsWith: `ping:${session.id}` } }, { idempotencyKey: `session_end:${session.id}` }],
+          status: { in: ['pending', 'paused'] },
+          OR: [
+            { idempotencyKey: { startsWith: `ping:${session.id}` } },
+            { idempotencyKey: { startsWith: `session_end:${session.id}` } },
+          ],
         },
-        select: { id: true, sendAfter: true },
+        data: { status: 'canceled' },
       })
-      for (const message of held) {
-        await tx.outboxMessage.update({
-          where: { id: message.id },
-          data: { status: 'pending', sendAfter: new Date(message.sendAfter.getTime() + pauseMs) },
+      if (pingAt) {
+        await enqueue(tx, {
+          userId: user.id,
+          kind: 'ping',
+          key: `ping:${session.id}:period:${period}:1`,
+          sendAfter: pingAt,
+          payload: { sessionId: session.id, n: 1, series: `period:${period}` },
+        })
+      }
+      if (plannedEndAt) {
+        await enqueue(tx, {
+          userId: user.id,
+          kind: 'session_end',
+          key: `session_end:${session.id}:${period}`,
+          sendAfter: plannedEndAt,
+          payload: { sessionId: session.id },
         })
       }
       await logEvent(tx, user.id, 'session_resumed', { session_id: session.id, paused_minutes: Math.floor(pauseMs / MIN) }, { at: now, sessionId: session.id })
@@ -1048,7 +1076,7 @@ export async function onResume(ctx: Ctx, user: User): Promise<void> {
     if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
     throw error
   }
-  await reply(ctx, user, T.breakResumed(plannedEndAt ? hhmm(plannedEndAt, user.timezone) : null))
+  await reply(ctx, user, T.breakResumed(session.plannedMinutes, plannedEndAt ? hhmm(plannedEndAt, user.timezone) : null))
 }
 
 export async function onNewAfterBreak(ctx: Ctx, user: User, afterClose?: () => Promise<void>): Promise<void> {
@@ -1070,7 +1098,10 @@ export async function onNewAfterBreak(ctx: Ctx, user: User, afterClose?: () => P
         where: {
           userId: user.id,
           status: { in: ['pending', 'paused'] },
-          OR: [{ idempotencyKey: { startsWith: `ping:${session.id}` } }, { idempotencyKey: `session_end:${session.id}` }],
+          OR: [
+            { idempotencyKey: { startsWith: `ping:${session.id}` } },
+            { idempotencyKey: { startsWith: `session_end:${session.id}` } },
+          ],
         },
         data: { status: 'canceled' },
       })
@@ -1106,12 +1137,15 @@ export async function onStop(ctx: Ctx, user: User): Promise<void> {
         await logEvent(tx, user.id, 'session_cancelled', {}, { at: now, sessionId: session.id })
       }
       await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `ping:${session.id}` } })
-      await cancelPending(tx, { userId: user.id, idempotencyKey: `session_end:${session.id}` })
+      await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `session_end:${session.id}` } })
       await tx.outboxMessage.updateMany({
         where: {
           userId: user.id,
           status: 'paused',
-          OR: [{ idempotencyKey: { startsWith: `ping:${session.id}` } }, { idempotencyKey: `session_end:${session.id}` }],
+          OR: [
+            { idempotencyKey: { startsWith: `ping:${session.id}` } },
+            { idempotencyKey: { startsWith: `session_end:${session.id}` } },
+          ],
         },
         data: { status: 'canceled' },
       })

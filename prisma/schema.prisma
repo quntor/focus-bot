@@ -159,8 +159,9 @@ model FocusSession {
   createdAt      DateTime  @default(now()) @map("created_at")
   startedAt      DateTime? @map("started_at")
   plannedEndAt   DateTime? @map("planned_end_at")
-  // Перерыв замораживает таймер. pausedSeconds нужен, чтобы время отдыха не давало
-  // незаслуженный зачёт сессии; pausedAt переживает перезапуск процесса.
+  // Перерыв завершает текущий рабочий период. pausedSeconds нужен, чтобы отдых
+  // не давал незаслуженный зачёт сессии; pausedAt переживает перезапуск процесса.
+  // Возврат запускает новый полный период внутри той же логической сессии.
   pausedAt      DateTime? @map("paused_at")
   pausedSeconds Int       @default(0) @map("paused_seconds")
   // Время пинга считается при старте и кладётся в outbox. В сессии храним

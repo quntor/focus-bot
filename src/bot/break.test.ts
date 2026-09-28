@@ -97,13 +97,11 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
     expect(bot.lastText(A)).toContain('50 минут')
   })
 
-  it('замораживает таймер и возвращает в ту же сессию с оставшимся временем', async () => {
+  it('после отдыха запускает в той же сессии новый полный период работы', async () => {
     const bot = makeBot()
     await bot.onboard(A)
     await bot.text(A, 'допишу раздел за 40 минут')
     const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
-    const originalEnd = running.plannedEndAt!
-
     bot.advance(10)
     await bot.text(A, 'Перерыв')
 
@@ -114,9 +112,7 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
       ['Вернуться к работе', 'Начать новую сессию'],
       ['Мои задачи'],
     ])
-    expect(await prisma.outboxMessage.findFirstOrThrow({ where: { idempotencyKey: `session_end:${running.id}` } })).toMatchObject({
-      status: 'paused',
-    })
+    expect(await prisma.outboxMessage.findFirstOrThrow({ where: { idempotencyKey: `session_end:${running.id}` } })).toMatchObject({ status: 'canceled' })
 
     bot.advance(35)
     await runOutboxOnce(bot.ctx)
@@ -125,24 +121,30 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
     await bot.text(A, 'Вернуться к работе')
     const resumed = await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })
     expect(resumed.state).toBe('running')
-    expect(resumed.plannedEndAt).toEqual(new Date(originalEnd.getTime() + 35 * MIN))
+    expect(resumed.plannedEndAt).toEqual(new Date(bot.now().getTime() + 40 * MIN))
     expect((resumed as { pausedAt?: Date | null }).pausedAt).toBeNull()
     expect((resumed as { pausedSeconds?: number }).pausedSeconds).toBe((35 * MIN) / 1000)
-    expect(await prisma.outboxMessage.findFirstOrThrow({ where: { idempotencyKey: `session_end:${running.id}` } })).toMatchObject({
+    expect(await prisma.outboxMessage.findFirstOrThrow({
+      where: { idempotencyKey: { startsWith: `session_end:${running.id}:` }, status: 'pending' },
+    })).toMatchObject({
       status: 'pending',
       sendAfter: resumed.plannedEndAt,
     })
+    expect(bot.lastText(A)).toContain('Новый период работы — 40 минут')
     expect((bot.tg.sent.at(-1) as { replyKeyboard?: string[][] } | undefined)?.replyKeyboard).toEqual([
       ['Начать сессию', 'Перерыв'],
       ['Мои задачи'],
     ])
 
-    bot.advance(30)
+    bot.advance(39)
+    await runOutboxOnce(bot.ctx)
+    expect(bot.lastText(A)).not.toBe('Время! Как прошло?')
+    bot.advance(1)
     await runOutboxOnce(bot.ctx)
     expect(bot.textsTo(A)).toContain('Время! Как прошло?')
   })
 
-  it('не ставит на паузу сессию, время которой уже вышло', async () => {
+  it('после завершившегося периода принимает перерыв и запускает новый полный период', async () => {
     const bot = makeBot()
     await bot.onboard(A)
     await bot.text(A, 'допишу раздел за 30 минут')
@@ -155,21 +157,26 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
     await bot.text(A, 'Перерыв')
 
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })).toMatchObject({
-      state: 'running',
-      pausedAt: null,
+      state: 'paused',
       pausedSeconds: 0,
     })
-    expect(bot.lastText(A)).toBe('Время! Как прошло?')
-    expect(bot.lastButton(A, 'out:', ':done')).toBe(`out:${running.id}:done`)
+    expect(bot.lastText(A)).toContain('Ты на перерыве')
+
+    bot.advance(7)
+    await bot.text(A, 'Вернуться к работе')
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })).toMatchObject({
+      state: 'running',
+      plannedEndAt: new Date(bot.now().getTime() + 30 * MIN),
+      pausedSeconds: (7 * MIN) / 1000,
+    })
+    expect(bot.lastText(A)).toContain('Новый период работы — 30 минут')
   })
 
-  it('возврат из старой просроченной паузы открывает исход без времени в прошлом', async () => {
+  it('возврат из старой просроченной паузы тоже запускает полный новый период', async () => {
     const bot = makeBot()
     await bot.onboard(A)
     await bot.text(A, 'допишу раздел за 30 минут')
     const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
-    const originalEnd = running.plannedEndAt!
-
     bot.advance(36)
     await prisma.focusSession.update({
       where: { id: running.id },
@@ -189,7 +196,7 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
 
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })).toMatchObject({
       state: 'running',
-      plannedEndAt: originalEnd,
+      plannedEndAt: new Date(bot.now().getTime() + 30 * MIN),
       pausedAt: null,
       pausedSeconds: (17 * MIN) / 1000,
     })
@@ -197,13 +204,36 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
       await prisma.outboxMessage.count({
         where: {
           userId: running.userId,
-          status: { in: ['pending', 'paused'] },
-          OR: [{ idempotencyKey: { startsWith: `ping:${running.id}` } }, { idempotencyKey: `session_end:${running.id}` }],
+          status: 'pending',
+          idempotencyKey: { startsWith: `session_end:${running.id}:` },
         },
       }),
-    ).toBe(0)
-    expect(bot.lastText(A)).toBe('Время! Как прошло?')
-    expect(bot.lastButton(A, 'out:', ':done')).toBe(`out:${running.id}:done`)
+    ).toBe(1)
+    expect(bot.lastText(A)).toContain('Новый период работы — 30 минут')
+  })
+
+  it('после возврата меняет длительность только текущего нового периода', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    await bot.text(A, 'допишу раздел за 40 минут')
+    const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+
+    bot.advance(10)
+    await bot.text(A, 'Перерыв')
+    bot.advance(5)
+    await bot.text(A, 'Вернуться к работе')
+    await bot.press(A, `run:${running.id}:duration`)
+    await bot.text(A, '50 минут')
+
+    const resized = await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })
+    expect(resized).toMatchObject({ state: 'running', plannedMinutes: 50 })
+    expect(resized.plannedEndAt).toEqual(new Date(bot.now().getTime() + 50 * MIN))
+    expect(await prisma.outboxMessage.count({
+      where: { userId: running.userId, kind: 'session_end', status: 'pending' },
+    })).toBe(1)
+    expect(await prisma.outboxMessage.findFirstOrThrow({
+      where: { userId: running.userId, kind: 'session_end', status: 'pending' },
+    })).toMatchObject({ sendAfter: resized.plannedEndAt })
   })
 
   it('на перерыве закрывает прежнюю сессию и только затем начинает новую', async () => {

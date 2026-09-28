@@ -137,7 +137,14 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
         await tx.focusSession.updateMany({ where: { id: sessionId, userId: user.id }, data: { pingAt: now, pingAnsweredAt: null } })
         await logEvent(tx, user.id, 'ping_sent', { session_id: sessionId }, { at: now, sessionId })
         if (free) {
-          await enqueue(tx, { userId: user.id, kind: 'ping', key: `ping:${sessionId}:${n + 1}`, sendAfter: new Date(now.getTime() + 30 * MIN), payload: { sessionId, n: n + 1 } })
+          const series = typeof p.series === 'string' ? p.series : null
+          await enqueue(tx, {
+            userId: user.id,
+            kind: 'ping',
+            key: series ? `ping:${sessionId}:${series}:${n + 1}` : `ping:${sessionId}:${n + 1}`,
+            sendAfter: new Date(now.getTime() + 30 * MIN),
+            payload: { sessionId, n: n + 1, ...(series ? { series } : {}) },
+          })
         }
       },
     }
