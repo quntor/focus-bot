@@ -953,6 +953,17 @@ export async function onBreak(ctx: Ctx, user: User): Promise<void> {
   const session = await activeSession(ctx, user.id)
   if (!session || session.state === 'collecting_intent') return reply(ctx, user, T.nothingToPause)
   if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
+  if (session.plannedEndAt && session.plannedEndAt <= now) {
+    await ctx.db.outboxMessage.updateMany({
+      where: {
+        userId: user.id,
+        status: { in: ['pending', 'paused'] },
+        OR: [{ idempotencyKey: { startsWith: `ping:${session.id}` } }, { idempotencyKey: `session_end:${session.id}` }],
+      },
+      data: { status: 'canceled' },
+    })
+    return reply(ctx, user, T.sessionEnd, outcomeKeyboard(session.id))
+  }
 
   try {
     await ctx.db.$transaction(async (tx) => {
@@ -981,6 +992,31 @@ export async function onResume(ctx: Ctx, user: User): Promise<void> {
   if (!session || session.state !== 'paused' || !session.pausedAt) return reply(ctx, user, T.nothingPaused)
 
   const pauseMs = Math.max(0, now.getTime() - session.pausedAt.getTime())
+  const expiredBeforePause = session.plannedEndAt !== null && session.plannedEndAt <= session.pausedAt
+  if (expiredBeforePause) {
+    try {
+      await ctx.db.$transaction(async (tx) => {
+        await transition(tx, { sessionId: session.id, userId: user.id }, 'paused', 'running', {
+          pausedAt: null,
+          pausedSeconds: { increment: Math.floor(pauseMs / 1000) },
+          pingAt: null,
+        })
+        await tx.outboxMessage.updateMany({
+          where: {
+            userId: user.id,
+            status: { in: ['pending', 'paused'] },
+            OR: [{ idempotencyKey: { startsWith: `ping:${session.id}` } }, { idempotencyKey: `session_end:${session.id}` }],
+          },
+          data: { status: 'canceled' },
+        })
+        await logEvent(tx, user.id, 'session_resumed', { session_id: session.id, paused_minutes: Math.floor(pauseMs / MIN) }, { at: now, sessionId: session.id })
+      })
+    } catch (error) {
+      if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
+      throw error
+    }
+    return reply(ctx, user, T.sessionEnd, outcomeKeyboard(session.id))
+  }
   const plannedEndAt = session.plannedEndAt ? new Date(session.plannedEndAt.getTime() + pauseMs) : null
   const pingAt = session.pingAt && session.pingAt > session.pausedAt ? new Date(session.pingAt.getTime() + pauseMs) : session.pingAt
 

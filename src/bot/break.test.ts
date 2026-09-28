@@ -142,6 +142,70 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
     expect(bot.textsTo(A)).toContain('Время! Как прошло?')
   })
 
+  it('не ставит на паузу сессию, время которой уже вышло', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    await bot.text(A, 'допишу раздел за 30 минут')
+    const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+
+    bot.advance(30)
+    await runOutboxOnce(bot.ctx)
+    expect(bot.lastText(A)).toBe('Время! Как прошло?')
+
+    await bot.text(A, 'Перерыв')
+
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })).toMatchObject({
+      state: 'running',
+      pausedAt: null,
+      pausedSeconds: 0,
+    })
+    expect(bot.lastText(A)).toBe('Время! Как прошло?')
+    expect(bot.lastButton(A, 'out:', ':done')).toBe(`out:${running.id}:done`)
+  })
+
+  it('возврат из старой просроченной паузы открывает исход без времени в прошлом', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    await bot.text(A, 'допишу раздел за 30 минут')
+    const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+    const originalEnd = running.plannedEndAt!
+
+    bot.advance(36)
+    await prisma.focusSession.update({
+      where: { id: running.id },
+      data: { state: 'paused', pausedAt: bot.now() },
+    })
+    await prisma.outboxMessage.updateMany({
+      where: {
+        userId: running.userId,
+        status: 'pending',
+        OR: [{ idempotencyKey: { startsWith: `ping:${running.id}` } }, { idempotencyKey: `session_end:${running.id}` }],
+      },
+      data: { status: 'paused' },
+    })
+    bot.advance(17)
+
+    await bot.text(A, 'Вернуться к работе')
+
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })).toMatchObject({
+      state: 'running',
+      plannedEndAt: originalEnd,
+      pausedAt: null,
+      pausedSeconds: (17 * MIN) / 1000,
+    })
+    expect(
+      await prisma.outboxMessage.count({
+        where: {
+          userId: running.userId,
+          status: { in: ['pending', 'paused'] },
+          OR: [{ idempotencyKey: { startsWith: `ping:${running.id}` } }, { idempotencyKey: `session_end:${running.id}` }],
+        },
+      }),
+    ).toBe(0)
+    expect(bot.lastText(A)).toBe('Время! Как прошло?')
+    expect(bot.lastButton(A, 'out:', ':done')).toBe(`out:${running.id}:done`)
+  })
+
   it('на перерыве закрывает прежнюю сессию и только затем начинает новую', async () => {
     const bot = makeBot()
     await bot.onboard(A)
