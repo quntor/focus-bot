@@ -268,6 +268,10 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
       case 'goal':
         if (arg) return await day.onGoal(ctx, user, arg)
         break
+      case 'quick':
+        if (arg === 'start') return await session.startUnassigned(ctx, user)
+        if (arg === 'goal') return await reply(ctx, user, T.askGoal, day.goalKeyboard())
+        break
       case 'sum':
         if (arg) return await day.onSummaryConfirm(ctx, user, arg)
         break

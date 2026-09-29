@@ -51,34 +51,35 @@ model User {
 
   // Личный промт: профиль на естественном языке, растущий из возражений
   // пользователя. Человек видит его целиком и может поправить руками.
-  profileText String? @map("profile_text")
+  profileText          String?   @map("profile_text")
   // Ритуал старта: два-три действия, проговорённые один раз.
-  ritualText  String? @map("ritual_text")
+  ritualText           String?   @map("ritual_text")
   // auto | pomodoro | medium | long | free — см. src/session/technique.ts.
-  technique   String  @default("auto")
+  technique            String    @default("auto")
   // Когда бот предложил технику по рисунку сессий. Предлагает один раз: дальше
   // выбор — в настройках, без напоминаний.
   techniqueSuggestedAt DateTime? @map("technique_suggested_at")
-  pingsEnabled Boolean @default(true) @map("pings_enabled")
+  pingsEnabled         Boolean   @default(true) @map("pings_enabled")
   // Бот пишет первым, пока человек явно не отключил это в настройках.
-  proactive   Boolean @default(true)
+  proactive            Boolean   @default(true)
   // Время первого сообщения дня, HH:MM в поясе пользователя.
-  morningTime String  @default("10:00") @map("morning_time")
-  eveningTime String  @default("21:00") @map("evening_time")
+  morningTime          String    @default("10:00") @map("morning_time")
+  eveningTime          String    @default("21:00") @map("evening_time")
   // Отказы подряд: «ещё отдохну», молчание на напоминание. Третий — повод
   // спросить вслух, а не молча долбить дальше.
-  declinesInRow Int   @default(0) @map("declines_in_row")
+  declinesInRow        Int       @default(0) @map("declines_in_row")
 
-  tasks       Task[]
-  sessions    FocusSession[]
-  outbox      OutboxMessage[]
-  goals       DailyGoal[]
-  points      PointsEntry[]
-  streak      Streak?
-  watchedBy   Relationship[] @relation("owner")
-  watching    Relationship[] @relation("viewer")
-  invites     InviteToken[]
-  daysOff     DayOff[]
+  tasks               Task[]
+  sessions            FocusSession[]
+  outbox              OutboxMessage[]
+  goals               DailyGoal[]
+  points              PointsEntry[]
+  streak              Streak?
+  watchedBy           Relationship[]       @relation("owner")
+  watching            Relationship[]       @relation("viewer")
+  invites             InviteToken[]
+  daysOff             DayOff[]
+  taskTimeAllocations TaskTimeAllocation[]
 
   @@index([role, lastUserActionAt])
   @@map("users")
@@ -89,25 +90,26 @@ model Task {
   userId String @map("user_id")
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  title String
+  title  String
   // Задача «та же самая или новая» решается моделью на старте сессии. Решение
   // храним как ссылку на задачу, а не как переписку: на 1000 DAU сырой лог
   // пришлось бы каждый раз отдавать модели целиком.
   status String @default("active") // active | done | dropped
 
-  sessionsCount  Int       @default(0) @map("sessions_count")
+  sessionsCount         Int       @default(0) @map("sessions_count")
   // Последняя сессия, после которой задача реально сдвинулась.
-  lastProgressAt DateTime? @map("last_progress_at")
+  lastProgressAt        DateTime? @map("last_progress_at")
   // Сессий подряд без сдвига. Три — застревание: бот говорит об этом вслух.
   // Счётчик, а не вычисление по датам: так правило воспроизводимо построчно.
-  sessionsSinceProgress Int @default(0) @map("sessions_since_progress")
+  sessionsSinceProgress Int       @default(0) @map("sessions_since_progress")
   // Следующий шаг, выделенный из отчёта. Из «вышло другое» растёт половина
   // памяти продукта — сюда она и ложится.
-  nextStep       String?   @map("next_step")
-  lastSessionAt  DateTime? @map("last_session_at")
-  createdAt      DateTime  @default(now()) @map("created_at")
+  nextStep              String?   @map("next_step")
+  lastSessionAt         DateTime? @map("last_session_at")
+  createdAt             DateTime  @default(now()) @map("created_at")
 
-  sessions FocusSession[]
+  sessions        FocusSession[]
+  timeAllocations TaskTimeAllocation[]
 
   @@index([userId, status])
   @@map("tasks")
@@ -162,8 +164,8 @@ model FocusSession {
   // Перерыв завершает текущий рабочий период. pausedSeconds нужен, чтобы отдых
   // не давал незаслуженный зачёт сессии; pausedAt переживает перезапуск процесса.
   // Возврат запускает новый полный период внутри той же логической сессии.
-  pausedAt      DateTime? @map("paused_at")
-  pausedSeconds Int       @default(0) @map("paused_seconds")
+  pausedAt       DateTime? @map("paused_at")
+  pausedSeconds  Int       @default(0) @map("paused_seconds")
   // Время пинга считается при старте и кладётся в outbox. В сессии храним
   // копию, чтобы не ходить в outbox ради ответа на вопрос «когда проверимся».
   pingAt         DateTime? @map("ping_at")
@@ -185,9 +187,33 @@ model FocusSession {
   restChoice  String?   @map("rest_choice")
   restEndedAt DateTime? @map("rest_ended_at")
 
+  timeAllocations TaskTimeAllocation[]
+
   @@index([userId, createdAt])
   @@index([state, plannedEndAt])
   @@map("focus_sessions")
+}
+
+// Явная постфактум-разметка фактически отработанного времени. Когда человек
+// уточняет отчёт («15 минут на эту, остальное на другую»), эти строки становятся
+// источником истины для разбивки по задачам, но не меняют длительность, зачёт,
+// очки или серию самой сессии.
+model TaskTimeAllocation {
+  id        String       @id @default(uuid())
+  userId    String       @map("user_id")
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessionId String       @map("session_id")
+  session   FocusSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  taskId    String       @map("task_id")
+  task      Task         @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  seconds   Int
+  source    String       @default("report")
+  createdAt DateTime     @default(now()) @map("created_at")
+  updatedAt DateTime     @updatedAt @map("updated_at")
+
+  @@unique([sessionId, taskId])
+  @@index([userId, createdAt])
+  @@map("task_time_allocations")
 }
 
 // Событийный журнал. Пишется с первого дня: по нему считаются DAU и обращения
@@ -318,18 +344,18 @@ model DailyGoal {
   userId String @map("user_id")
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  dayKey           String @map("day_key")
+  dayKey            String    @map("day_key")
   // null — цель не ставилась: засчитанные сессии копятся, но очков за цель нет.
-  targetSessions   Int?   @map("target_sessions")
-  completedSessions Int   @default(0) @map("completed_sessions")
-  goalReachedAt    DateTime? @map("goal_reached_at")
+  targetSessions    Int?      @map("target_sessions")
+  completedSessions Int       @default(0) @map("completed_sessions")
+  goalReachedAt     DateTime? @map("goal_reached_at")
 
   summarySentAt DateTime? @map("summary_sent_at")
   // Подтверждение вечерней сводки: пользователь сам закрывает день. Это и
   // ритуал закрытия, и честный сигнал вместо догадок по логам. Очков не даёт:
   // иначе очки зависели бы от касания, а не от работы.
-  confirmedAt DateTime? @map("confirmed_at")
-  createdAt   DateTime  @default(now()) @map("created_at")
+  confirmedAt   DateTime? @map("confirmed_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
 
   @@unique([userId, dayKey])
   @@map("daily_goals")
@@ -339,8 +365,8 @@ model Streak {
   userId String @id @map("user_id")
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  current      Int     @default(0)
-  best         Int     @default(0)
+  current       Int     @default(0)
+  best          Int     @default(0)
   lastActiveDay String? @map("last_active_day")
 
   // Заморозка пропущенного дня. Самая недооценённая механика Duolingo: один
@@ -423,7 +449,7 @@ model Relationship {
   viewer   User   @relation("viewer", fields: [viewerId], references: [id], onDelete: Cascade)
 
   // Дефолт — смотритель. partner действует, только когда стоят оба подтверждения.
-  level                     String    @default("watcher")
+  level                      String    @default("watcher")
   partnerConfirmedByOwnerAt  DateTime? @map("partner_confirmed_by_owner_at")
   partnerConfirmedByViewerAt DateTime? @map("partner_confirmed_by_viewer_at")
 

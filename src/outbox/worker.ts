@@ -1,10 +1,9 @@
 import type { OutboxMessage, Prisma, User } from '@prisma/client'
 import { logEvent } from '../analytics/log.js'
-import { dayKey } from '../lib/day.js'
 import { log } from '../lib/log.js'
 import { cb } from '../bot/callbacks.js'
 import { markBlocked, type Ctx } from '../bot/context.js'
-import { buildSummary, declineKeyboard, DECLINES_BEFORE_ASK, goalKeyboard, putDefaultMeeting, reminderKeyboard } from '../bot/day-flow.js'
+import { buildSummary, declineKeyboard, DECLINES_BEFORE_ASK, putDefaultMeeting, reminderKeyboard } from '../bot/day-flow.js'
 import { openCollecting, outcomeKeyboard } from '../bot/session-flow.js'
 import { buildTaskStartPrompt } from '../bot/tasks.js'
 import { T } from '../bot/texts.js'
@@ -164,17 +163,17 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
     if (p.defaulted === true && !user.proactive) return { skip: true }
     const active = await ctx.db.focusSession.count({ where: { userId: user.id, state: { in: ['running', 'paused'] } } })
     if (active > 0) return { skip: true }
-    const today = dayKey(now, user.timezone)
-    const goal = await ctx.db.dailyGoal.findUnique({ where: { userId_dayKey: { userId: user.id, dayKey: today } } })
-    const askGoal = p.morning === true && (goal?.targetSessions ?? null) === null
-    // Понедельник — новый старт недели, и это стоит сказать.
-    const monday = new Date(`${today}T00:00:00Z`).getUTCDay() === 1
-    const taskPrompt = p.morning === true && !askGoal
-      ? await buildTaskStartPrompt(ctx, user, T.meetingPlain)
+    const taskPrompt = p.morning === true
+      ? await buildTaskStartPrompt(ctx, user, T.meetingMorning)
       : null
-    const r = askGoal
-      ? await renderReminder(ctx, user, monday ? T.meetingMonday : T.meetingMorning, goalKeyboard(), false)
-      : await renderReminder(ctx, user, taskPrompt?.text ?? T.meetingPlain, taskPrompt?.keyboard ?? reminderKeyboard(), true)
+    const quickKeyboard: Keyboard = [
+      [{ text: T.quickStart, data: cb('quick', null, 'start') }],
+      [{ text: T.planDay, data: cb('quick', null, 'goal') }],
+    ]
+    const morningKeyboard = taskPrompt ? [...taskPrompt.keyboard, ...quickKeyboard] : quickKeyboard
+    const r = p.morning === true
+      ? await renderReminder(ctx, user, taskPrompt?.text ?? T.morningNoTasks, morningKeyboard, true)
+      : await renderReminder(ctx, user, T.meetingPlain, reminderKeyboard(), true)
     return withEvent(r, async (tx) => {
       await tx.user.updateMany({
         where: { id: user.id, pendingInput: 'meeting_time' },

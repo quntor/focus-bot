@@ -36,7 +36,7 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })).toMatchObject({ state: 'paused' })
   })
 
-  it('быстрый старт наследует работу из последней сессии, но не требует ответа', async () => {
+  it('быстрый старт не наследует прошлую работу и не требует ответа', async () => {
     const bot = makeBot()
     await bot.onboard(A)
     await bot.text(A, 'набросать план главы, 25 минут')
@@ -48,12 +48,11 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
     const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
     expect(running.id).not.toBe(previous.id)
     expect(running).toMatchObject({
-      intentText: 'набросать план главы, 25 минут',
-      taskId: previous.taskId,
+      intentText: null,
+      taskId: null,
       plannedMinutes: 40,
       minutesSource: 'bot',
     })
-    expect(bot.textsTo(A).some((text) => text.includes('«набросать план главы, 25 минут»'))).toBe(true)
     expect(bot.textsTo(A).some((text) => text.includes('40 минут'))).toBe(true)
   })
 
@@ -72,8 +71,10 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
     expect(renamed.startedAt).toEqual(started.startedAt)
     expect(renamed.plannedEndAt).toEqual(started.plannedEndAt)
     expect(renamed.taskId).not.toBe(started.taskId)
-    expect(await prisma.task.findUniqueOrThrow({ where: { id: started.taskId! } })).toMatchObject({ sessionsCount: 1 })
     expect(await prisma.task.findUniqueOrThrow({ where: { id: renamed.taskId! } })).toMatchObject({ sessionsCount: 1 })
+    expect(await prisma.event.findFirstOrThrow({ where: { sessionId: started.id, type: 'intent_parsed' }, orderBy: { id: 'desc' } })).toMatchObject({
+      payload: expect.objectContaining({ from_period_start: true }),
+    })
 
     bot.advance(10)
     await bot.press(A, bot.lastButton(A, 'run:', ':duration'))
@@ -260,7 +261,7 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
       }),
     ).toEqual([])
     const next = await prisma.focusSession.findFirstOrThrow({ where: { userId: old.userId, state: 'running' } })
-    expect(next).toMatchObject({ intentText: old.intentText, taskId: old.taskId, plannedMinutes: 40 })
+    expect(next).toMatchObject({ intentText: null, taskId: null, plannedMinutes: 40 })
     expect(bot.lastText(A)).toContain('Таймер уже идёт')
 
     const stopped = await prisma.event.findFirstOrThrow({ where: { sessionId: old.id, type: 'session_stopped' } })

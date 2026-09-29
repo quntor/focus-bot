@@ -174,47 +174,38 @@ export async function askIntent(ctx: Ctx, user: User, opts: { continue?: boolean
   await reply(ctx, user, opts.prefix ? `${opts.prefix}\n${text}` : text)
 }
 
-// Постоянная кнопка — это действие, а не вход в анкету. Сессия стартует сразу:
-// работа наследуется из последней реальной сессии, длительность берётся тем же
-// детерминированным правилом, что и обычное предложение. Всё можно изменить уже
-// после старта, но отсутствие ответа не мешает работать и ставить паузу.
+// Постоянная кнопка запускает обычный помидор без обязательной задачи. Работу
+// можно выбрать или назвать уже после старта; первая задача получит время от
+// начала текущего рабочего периода.
 export async function onStartButton(ctx: Ctx, user: User): Promise<void> {
+  await startUnassigned(ctx, user)
+}
+
+// Явный быстрый старт не наследует прошлую задачу: человек может сначала
+// включить обычный помидор, а назвать работу позже или распределить время в
+// отчёте. Общий таймер при этом запускается по обычным настройкам.
+export async function startUnassigned(ctx: Ctx, user: User): Promise<void> {
   const session = await openCollecting(ctx, user.id)
   if (session.state === 'running') return reply(ctx, user, T.alreadyRunning(endText(ctx, user, session)))
   if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
-  if (session.intentText !== null) return startRunning(ctx, user, session.id)
 
-  const previous = await ctx.db.focusSession.findFirst({
-    where: { userId: user.id, id: { not: session.id }, state: { in: ['finished', 'abandoned'] }, intentText: { not: null } },
-    orderBy: { createdAt: 'desc' },
-    select: { intentText: true, taskId: true, scope: true },
-  })
-  const previousTask = previous?.taskId
-    ? await ctx.db.task.findFirst({ where: { id: previous.taskId, userId: user.id, status: 'active' }, select: { id: true } })
-    : null
   const technique: Technique = isTechnique(user.technique) ? user.technique : 'auto'
   const minutes =
     session.plannedMinutes ?? (technique === 'auto' ? proposeMinutes(await sessionHistory(ctx, user.id)) : PRESETS[technique].minutes)
   const rest = technique === 'auto' ? restFor(minutes) : PRESETS[technique].rest
   const updated = await ctx.db.focusSession.updateMany({
-    where: { id: session.id, userId: user.id, state: 'collecting_intent', intentText: null },
+    where: { id: session.id, userId: user.id, state: 'collecting_intent' },
     data: {
-      intentText: previous?.intentText ?? null,
-      taskId: previousTask?.id ?? null,
-      scope: previous?.scope === 'multi_session' ? 'multi_session' : 'step',
+      intentText: null,
+      taskId: null,
+      scope: 'step',
       plannedMinutes: minutes,
       minutesSource: 'bot',
       plannedRestMinutes: rest,
       technique,
     },
   })
-  if (updated.count !== 1) {
-    const active = await activeSession(ctx, user.id)
-    if (active?.state === 'collecting_intent' && active.intentText !== null) return startRunning(ctx, user, active.id)
-    if (active?.state === 'running') return reply(ctx, user, T.alreadyRunning(endText(ctx, user, active)))
-    if (active?.state === 'paused') return reply(ctx, user, T.breakChoice)
-    return reply(ctx, user, T.stale)
-  }
+  if (updated.count !== 1) return reply(ctx, user, T.stale)
   await startRunning(ctx, user, session.id)
 }
 
@@ -250,7 +241,13 @@ export async function startTaskSession(ctx: Ctx, user: User, taskId: string): Pr
             data: { sessionsCount: { increment: 1 }, lastSessionAt: ctx.now() },
           })
         }
-        await logEvent(tx, user.id, 'task_selected', { task_id: task.id }, { at: ctx.now(), sessionId: active.id })
+        await logEvent(
+          tx,
+          user.id,
+          'task_selected',
+          { task_id: task.id, from_period_start: active.taskId === null },
+          { at: ctx.now(), sessionId: active.id },
+        )
       })
     } catch (error) {
       if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
@@ -584,7 +581,13 @@ export async function onRunningWorkText(ctx: Ctx, user: User, sessionId: string,
         tx,
         user.id,
         'intent_parsed',
-        { llm_used: parsed.result.llmUsed, task_id: taskId, is_new_task: isNewTask, scope: parsed.result.scope },
+        {
+          llm_used: parsed.result.llmUsed,
+          task_id: taskId,
+          is_new_task: isNewTask,
+          scope: parsed.result.scope,
+          from_period_start: session.taskId === null,
+        },
         { at: ctx.now(), sessionId },
       )
       if (failure) await logEvent(tx, user.id, 'llm_fallback', { stage: 'intent', reason: failure }, { at: ctx.now() })
@@ -837,6 +840,13 @@ export async function onSkipReport(ctx: Ctx, user: User, sessionId: string): Pro
 
 const STUCK_AFTER = 3
 
+const normalizeTaskTitle = (value: string) =>
+  value
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+
 async function finalizeReport(
   ctx: Ctx,
   user: User,
@@ -861,9 +871,42 @@ async function finalizeReport(
   }
 
   // Модель зовётся вне транзакции: медленный ответ не должен держать блокировки.
-  const parsed = await parseReport(ctx.llm, { intent: session.intentText, outcome, report: text }, llmMeter(ctx, user.id, 'report', session.id))
+  const reportTasks = text === null
+    ? []
+    : await ctx.db.task.findMany({
+        where: { userId: user.id, status: { in: ['active', 'done'] } },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        take: 20,
+        select: { id: true, title: true },
+      })
+  const labelledTasks = reportTasks.map((task, index) => ({ ...task, label: `t${index + 1}` }))
+  const parsed = await parseReport(
+    ctx.llm,
+    {
+      intent: session.intentText,
+      outcome,
+      report: text,
+      tasks: labelledTasks.map(({ label, title }) => ({ label, title })),
+    },
+    llmMeter(ctx, user.id, 'report', session.id),
+  )
   const failure = parsed.failure && !parsed.failure.ok ? parsed.failure.reason : null
   let stuckTask: string | null = null
+  let allocatedMinutes: number | null = null
+  let allocationInvalid = false
+
+  const finishedAt = session.finishedAt ?? now
+  const actualSeconds = Math.floor(activeElapsedMs(session, finishedAt) / 1000)
+  const requestedSeconds = parsed.result.allocations
+    .filter((allocation) => !allocation.remainder)
+    .reduce((sum, allocation) => sum + (allocation.minutes ?? 0) * 60, 0)
+  const remainderCount = parsed.result.allocations.filter((allocation) => allocation.remainder).length
+  const hasUnknownLabel = parsed.result.allocations.some(
+    (allocation) => allocation.taskLabel !== null && !labelledTasks.some((task) => task.label === allocation.taskLabel),
+  )
+  if (parsed.result.allocations.length > 0 && (requestedSeconds > actualSeconds || remainderCount > 1 || hasUnknownLabel)) {
+    allocationInvalid = true
+  }
 
   await ctx.db.$transaction(async (tx) => {
     const res = await tx.focusSession.updateMany({
@@ -877,6 +920,57 @@ async function finalizeReport(
       await logEvent(tx, user.id, 'rest_chosen', { session_id: session.id, choice: 'day_end', rest_minutes: 0 }, { at: now, sessionId: session.id })
     }
     if (failure) await logEvent(tx, user.id, 'llm_fallback', { stage: 'report', reason: failure }, { at: now })
+
+    if (!allocationInvalid && parsed.result.allocations.length > 0) {
+      const byTask = new Map<string, number>()
+      let unresolved = false
+      for (const allocation of parsed.result.allocations) {
+        let task = allocation.taskLabel
+          ? labelledTasks.find((candidate) => candidate.label === allocation.taskLabel) ?? null
+          : labelledTasks.find((candidate) => normalizeTaskTitle(candidate.title) === normalizeTaskTitle(allocation.title)) ?? null
+        if (!task && allocation.taskLabel === null) {
+          const created = await tx.task.create({ data: { userId: user.id, title: allocation.title, createdAt: now } })
+          task = { id: created.id, title: created.title, label: '' }
+        }
+        if (!task) {
+          unresolved = true
+          break
+        }
+        const seconds = allocation.remainder ? actualSeconds - requestedSeconds : (allocation.minutes ?? 0) * 60
+        byTask.set(task.id, (byTask.get(task.id) ?? 0) + seconds)
+      }
+      if (unresolved || byTask.size === 0) {
+        allocationInvalid = true
+      } else {
+        await tx.taskTimeAllocation.deleteMany({ where: { userId: user.id, sessionId: session.id } })
+        await tx.taskTimeAllocation.createMany({
+          data: [...byTask.entries()].map(([taskId, seconds]) => ({
+            userId: user.id,
+            sessionId: session.id,
+            taskId,
+            seconds,
+            source: 'report',
+            createdAt: now,
+            updatedAt: now,
+          })),
+        })
+        const allocatedSeconds = [...byTask.values()].reduce((sum, seconds) => sum + seconds, 0)
+        allocatedMinutes = Math.floor(allocatedSeconds / 60)
+        await logEvent(
+          tx,
+          user.id,
+          'task_time_allocated',
+          {
+            session_id: session.id,
+            task_count: byTask.size,
+            allocated_seconds: allocatedSeconds,
+            unassigned_seconds: Math.max(0, actualSeconds - allocatedSeconds),
+            source: 'report',
+          },
+          { at: now, sessionId: session.id },
+        )
+      }
+    }
 
     if (session.taskId && parsed.result.progress) {
       const task = await tx.task.findFirst({ where: { id: session.taskId, userId: user.id } })
@@ -899,6 +993,8 @@ async function finalizeReport(
   })
 
   if (stuckTask) await reply(ctx, user, T.stuck(stuckTask))
+  if (allocationInvalid) await reply(ctx, user, T.timeAllocationInvalid)
+  else if (allocatedMinutes !== null) await reply(ctx, user, T.timeAllocated(allocatedMinutes))
   if (!options.endDay) await askRest(ctx, user, session)
 }
 

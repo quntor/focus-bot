@@ -41,6 +41,18 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
   const finished = today.filter((s) => s.state === 'finished')
   const durationByTask = new Map<string, number>()
   const sessionIds = today.map((session) => session.id)
+  const manualAllocations = sessionIds.length === 0
+    ? []
+    : await db.taskTimeAllocation.findMany({
+        where: { userId: user.id, sessionId: { in: sessionIds } },
+        select: { sessionId: true, taskId: true, seconds: true },
+      })
+  const allocationsBySession = new Map<string, typeof manualAllocations>()
+  for (const allocation of manualAllocations) {
+    const allocations = allocationsBySession.get(allocation.sessionId) ?? []
+    allocations.push(allocation)
+    allocationsBySession.set(allocation.sessionId, allocations)
+  }
   const timelineEvents = sessionIds.length === 0
     ? []
     : await db.event.findMany({
@@ -64,14 +76,24 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
     const value = (payload as Record<string, unknown>)[key]
     return typeof value === 'string' ? value : null
   }
+  const payloadBoolean = (payload: Prisma.JsonValue | null, key: string): boolean => {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
+    return (payload as Record<string, unknown>)[key] === true
+  }
   const addDuration = (taskId: string, duration: number) => {
     if (duration <= 0) return
     durationByTask.set(taskId, (durationByTask.get(taskId) ?? 0) + duration)
   }
   for (const session of today) {
     if (!session.startedAt || !session.finishedAt) continue
+    const allocations = allocationsBySession.get(session.id) ?? []
+    if (allocations.length > 0) {
+      for (const allocation of allocations) addDuration(allocation.taskId, allocation.seconds * 1000)
+      continue
+    }
     const events = eventsBySession.get(session.id) ?? []
     let cursor = session.startedAt
+    let periodStart = session.startedAt
     let taskId: string | null = null
     let paused = false
     let hasTaskTimeline = false
@@ -79,7 +101,11 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
       const at = new Date(Math.min(session.finishedAt.getTime(), Math.max(cursor.getTime(), event.createdAt.getTime())))
       if (!paused && taskId) addDuration(taskId, at.getTime() - cursor.getTime())
       if (event.type === 'session_started' || event.type === 'intent_parsed' || event.type === 'task_selected') {
-        taskId = payloadId(event.payload, 'task_id')
+        const selectedTaskId = payloadId(event.payload, 'task_id')
+        if (taskId === null && selectedTaskId && payloadBoolean(event.payload, 'from_period_start')) {
+          addDuration(selectedTaskId, at.getTime() - periodStart.getTime())
+        }
+        taskId = selectedTaskId
         if (taskId) hasTaskTimeline = true
       } else if (event.type === 'task_switched') {
         taskId = payloadId(event.payload, 'to_task_id')
@@ -88,6 +114,7 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
         paused = true
       } else if (event.type === 'session_resumed') {
         paused = false
+        periodStart = at
       }
       cursor = at
       if (event.createdAt >= session.finishedAt) break

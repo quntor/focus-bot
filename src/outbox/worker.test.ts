@@ -20,7 +20,6 @@ describe.skipIf(!hasDb)('outbox', () => {
     const bot = makeBot()
     await bot.onboard(A)
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
-    await prisma.dailyGoal.create({ data: { userId: user.id, dayKey: '2026-09-22', targetSessions: 3 } })
     await prisma.user.update({ where: { id: user.id }, data: { pendingInput: 'meeting_time' } })
     const first = await prisma.task.create({ data: { userId: user.id, title: 'Подготовить отчёт' } })
     const second = await prisma.task.create({ data: { userId: user.id, title: 'Позвонить Ивану' } })
@@ -36,11 +35,15 @@ describe.skipIf(!hasDb)('outbox', () => {
 
     const prompt = bot.tg.sent.filter((message) => message.chatId === BigInt(A)).at(-1)
     expect(prompt?.text).toBe(
-      ['Привет! У тебя такие дела:', `1. ${first.title}`, `2. ${second.title}`, '', 'С чего начнёшь?'].join('\n'),
+      ['Доброе утро! Пора работать.', '', 'У тебя такие дела:', `1. ${first.title}`, `2. ${second.title}`, '', 'С чего начнёшь?'].join('\n'),
     )
     expect(prompt?.keyboard?.slice(0, 2)).toEqual([
       [{ text: first.title, data: `task:${first.id}:start` }],
       [{ text: second.title, data: `task:${second.id}:start` }],
+    ])
+    expect(prompt?.keyboard?.slice(-2)).toEqual([
+      [{ text: '▶️ Просто начать', data: 'quick::start' }],
+      [{ text: 'План на день', data: 'quick::goal' }],
     ])
     expect(bot.buttons(A).filter((button) => button.data.includes(':view'))).toHaveLength(0)
     expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ pendingInput: 'none' })
@@ -54,7 +57,7 @@ describe.skipIf(!hasDb)('outbox', () => {
     expect(await prisma.outboxMessage.count({ where: { userId: user.id, kind: 'session_end', status: 'pending' } })).toBe(1)
   })
 
-  it('после выбора утренней цели показывает задачи с прямым запуском', async () => {
+  it('утренняя цель остаётся необязательным действием после списка задач', async () => {
     const bot = makeBot()
     await bot.onboard(A)
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
@@ -68,21 +71,22 @@ describe.skipIf(!hasDb)('outbox', () => {
     })
 
     await runOutboxOnce(bot.ctx)
-    expect(bot.lastText(A)).toBe('Доброе утро. Сколько заходов сегодня?')
+    expect(bot.lastText(A)).toContain('Сделать план дня')
+    await bot.press(A, 'quick::goal')
+    expect(bot.lastText(A)).toBe('Сколько заходов сегодня?')
     await bot.press(A, 'goal::3')
 
     const prompt = bot.tg.sent.filter((message) => message.chatId === BigInt(A)).at(-1)
     expect(prompt?.text).toBe(
       ['Цель на сегодня — 3 захода.', '', 'У тебя такие дела:', `1. ${task.title}`, '', 'С чего начнёшь?'].join('\n'),
     )
-    expect(prompt?.keyboard).toEqual([[{ text: task.title, data: `task:${task.id}:start` }]])
+    expect(prompt?.keyboard?.[0]).toEqual([{ text: task.title, data: `task:${task.id}:start` }])
   })
 
-  it('утром без задач сохраняет обычный вопрос и кнопки напоминания', async () => {
+  it('утром без задач позволяет одним нажатием начать период без задачи', async () => {
     const bot = makeBot()
     await bot.onboard(A)
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
-    await prisma.dailyGoal.create({ data: { userId: user.id, dayKey: '2026-09-22', targetSessions: 1 } })
     await enqueue(prisma, {
       userId: user.id,
       kind: 'meeting',
@@ -93,8 +97,14 @@ describe.skipIf(!hasDb)('outbox', () => {
 
     await runOutboxOnce(bot.ctx)
 
-    expect(bot.lastText(A)).toBe('Привет! С чего начнёшь?')
-    expect(bot.lastButton(A, 'mtg:', ':postpone')).toBe('mtg::postpone')
+    expect(bot.lastText(A)).toBe('Доброе утро! Пора работать. Можно начать без задачи или написать, что будешь делать.')
+    expect(bot.lastButton(A, 'quick:', ':start')).toBe('quick::start')
+    await bot.press(A, 'quick::start')
+    expect(await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })).toMatchObject({
+      taskId: null,
+      intentText: null,
+      plannedMinutes: 40,
+    })
   })
 
   it('два воркера одновременно не отправляют одно сообщение дважды', async () => {

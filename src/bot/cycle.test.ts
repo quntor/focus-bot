@@ -283,6 +283,128 @@ describe.skipIf(!hasDb)('полный цикл сессии', () => {
     expect(summary).toContain('• Исправить макет — 8 минут')
   })
 
+  it('первую задачу позднего старта считает с начала текущего рабочего периода', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    const task = await prisma.task.create({ data: { userId: user.id, title: 'Подготовить презентацию' } })
+
+    await bot.text(A, 'Начать сессию')
+    const session = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })
+    expect(session.taskId).toBeNull()
+    bot.advance(12)
+    await bot.press(A, `task:${task.id}:start`)
+    bot.advance(8)
+    await bot.text(A, '/today')
+
+    const summary = bot.textsTo(A).find((text) => text.includes('По задачам:'))
+    expect(summary).toContain('• Подготовить презентацию — 20 минут')
+  })
+
+  it('позднее назначение после отдыха не захватывает предыдущий рабочий период', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    const task = await prisma.task.create({ data: { userId: user.id, title: 'Разобрать документы' } })
+
+    await bot.text(A, 'Начать сессию')
+    bot.advance(10)
+    await bot.text(A, 'Перерыв')
+    bot.advance(15)
+    await bot.text(A, 'Вернуться к работе')
+    bot.advance(12)
+    await bot.press(A, `task:${task.id}:start`)
+    bot.advance(8)
+    await bot.text(A, '/today')
+
+    const summary = bot.textsTo(A).find((text) => text.includes('По задачам:'))
+    expect(summary).toContain('• Разобрать документы — 20 минут')
+    expect(summary).not.toContain('30 минут')
+  })
+
+  it('принимает постфактум распределение времени между задачами с остатком', async () => {
+    const allocationLlm: LlmProvider = {
+      enabled: true,
+      model: 'test-model',
+      async complete(req) {
+        if (!req.system.includes('короткий отчёт пользователя')) throw new Error('unexpected LLM call')
+        return {
+          text: JSON.stringify({
+            progress: 'moved',
+            next_step: null,
+            allocations: [
+              { task: 't1', title: 'Подготовить презентацию', minutes: 15, remainder: false },
+              { task: 't2', title: 'Ответить на письма', minutes: 5, remainder: false },
+              { task: 't3', title: 'Собрать отчёт', minutes: null, remainder: true },
+            ],
+          }),
+          usage: null,
+        }
+      },
+    }
+    const bot = makeBot({ llm: allocationLlm })
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    await prisma.task.create({ data: { userId: user.id, title: 'Подготовить презентацию' } })
+    await prisma.task.create({ data: { userId: user.id, title: 'Ответить на письма' } })
+    await prisma.task.create({ data: { userId: user.id, title: 'Собрать отчёт' } })
+
+    await bot.text(A, 'Начать сессию')
+    const session = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })
+    bot.advance(40)
+    await runOutboxOnce(bot.ctx)
+    await bot.press(A, `out:${session.id}:done`)
+    await bot.text(A, 'Закончил. 15 минут на презентацию, 5 минут на письма, остальное на отчёт')
+    expect(bot.textsTo(A).some((text) => text.includes('Распределил 40 минут'))).toBe(true)
+    expect(await prisma.taskTimeAllocation.findMany({
+      where: { sessionId: session.id },
+      orderBy: { seconds: 'asc' },
+      select: { seconds: true },
+    })).toEqual([{ seconds: 300 }, { seconds: 900 }, { seconds: 1200 }])
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).toMatchObject({ counted: true })
+    expect(await prisma.pointsEntry.aggregate({ where: { refKey: `session:${session.id}` }, _sum: { amount: true } })).toMatchObject({
+      _sum: { amount: 10 },
+    })
+
+    await bot.text(A, '/today')
+    const summary = bot.textsTo(A).find((text) => text.includes('По задачам:'))
+    expect(summary).toContain('• Подготовить презентацию — 15 минут')
+    expect(summary).toContain('• Ответить на письма — 5 минут')
+    expect(summary).toContain('• Собрать отчёт — 20 минут')
+  })
+
+  it('не применяет постфактум-разметку больше фактического времени', async () => {
+    const allocationLlm: LlmProvider = {
+      enabled: true,
+      model: 'test-model',
+      async complete() {
+        return {
+          text: JSON.stringify({
+            progress: 'moved',
+            next_step: null,
+            allocations: [{ task: 't1', title: 'Подготовить презентацию', minutes: 50, remainder: false }],
+          }),
+          usage: null,
+        }
+      },
+    }
+    const bot = makeBot({ llm: allocationLlm })
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    await prisma.task.create({ data: { userId: user.id, title: 'Подготовить презентацию' } })
+
+    await bot.text(A, 'Начать сессию')
+    const session = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })
+    bot.advance(40)
+    await runOutboxOnce(bot.ctx)
+    await bot.press(A, `out:${session.id}:done`)
+    await bot.text(A, '50 минут на презентацию')
+
+    expect(bot.textsTo(A)).toContain('Не смог надёжно распределить время: указанные минуты превышают фактическую работу. Сам отчёт сохранил без изменений.')
+    expect(await prisma.taskTimeAllocation.count({ where: { sessionId: session.id } })).toBe(0)
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).toMatchObject({ counted: true })
+  })
+
   it('суммирует рабочие периоды одной сессии и не относит отдых ко времени задачи', async () => {
     const bot = makeBot()
     await bot.onboard(A)

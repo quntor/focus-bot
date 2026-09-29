@@ -28,6 +28,7 @@ export const ACTIONS = [
   'off', // объявить выходной: tomorrow
   'task', // открыть/начать/изменить/завершить/удалить/вернуть: viewN | start | edit | done | drop | restore
   'tasks', // страница списка: p0, p1, ...
+  'quick', // утренний быстрый выбор: start | goal
 ] as const
 export type Action = (typeof ACTIONS)[number]
 
