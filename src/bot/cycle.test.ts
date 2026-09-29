@@ -328,14 +328,20 @@ describe.skipIf(!hasDb)('полный цикл сессии', () => {
       model: 'test-model',
       async complete(req) {
         if (!req.system.includes('короткий отчёт пользователя')) throw new Error('unexpected LLM call')
+        const input = JSON.parse(req.input) as { tasks: { label: string; title: string }[] }
+        const labelFor = (title: string) => {
+          const task = input.tasks.find((candidate) => candidate.title === title)
+          if (!task) throw new Error(`task not present in report prompt: ${title}`)
+          return task.label
+        }
         return {
           text: JSON.stringify({
             progress: 'moved',
             next_step: null,
             allocations: [
-              { task: 't1', title: 'Подготовить презентацию', minutes: 15, remainder: false },
-              { task: 't2', title: 'Ответить на письма', minutes: 5, remainder: false },
-              { task: 't3', title: 'Собрать отчёт', minutes: null, remainder: true },
+              { task: labelFor('Подготовить презентацию'), title: 'Подготовить презентацию', minutes: 15, remainder: false },
+              { task: labelFor('Ответить на письма'), title: 'Ответить на письма', minutes: 5, remainder: false },
+              { task: labelFor('Собрать отчёт'), title: 'Собрать отчёт', minutes: null, remainder: true },
             ],
           }),
           usage: null,
