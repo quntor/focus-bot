@@ -35,7 +35,7 @@ describe.skipIf(!hasDb)('полный цикл сессии', () => {
 
     bot.advance(20)
     await runOutboxOnce(bot.ctx)
-    expect(bot.lastText(A)).toBe('Время! Как прошло?')
+    expect(bot.lastText(A)).toBe('Время вышло: поработай ещё или пора отдыхать?')
     await bot.press(A, `out:${session.id}:done`)
     expect(bot.lastText(A)).toContain('Пара слов')
 

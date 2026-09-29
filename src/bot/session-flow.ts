@@ -119,15 +119,55 @@ function sessionHelpKeyboard(sessionId: string, action: SessionHelpAction): Keyb
 export async function onRunningFreeText(ctx: Ctx, user: User, text: string): Promise<boolean> {
   const session = await activeSession(ctx, user.id)
   if (!session || session.state !== 'running') return false
-  const minutesLeft = session.plannedEndAt
-    ? Math.max(0, Math.ceil((session.plannedEndAt.getTime() - ctx.now().getTime()) / MIN))
-    : null
+  const now = ctx.now()
+  const phase = session.plannedEndAt && now >= session.plannedEndAt ? 'deadline_passed' : 'working'
+  const activeTasks = await ctx.db.task.findMany({
+    where: { userId: user.id, status: 'active' },
+    orderBy: [{ lastSessionAt: 'desc' }, { createdAt: 'asc' }],
+    take: 20,
+    select: { title: true },
+  })
   const parsed = await parseSessionHelp(
     ctx.llm,
-    { text, currentWork: session.intentText, minutesLeft },
+    {
+      text,
+      currentWork: session.intentText,
+      activeTasks: activeTasks.map((task) => task.title),
+      elapsedMinutes: activeElapsedMinutes(session, now),
+      plannedMinutes: session.plannedMinutes,
+      phase,
+      awaitingDeadlineChoice: user.pendingInput === `session_end:${session.id}`,
+    },
     llmMeter(ctx, user.id, 'session_help', session.id),
   )
   if (parsed.result.kind === 'other') return false
+
+  const [current, freshUser] = await Promise.all([
+    activeSession(ctx, user.id),
+    ctx.db.user.findUnique({ where: { id: user.id }, select: { pendingInput: true } }),
+  ])
+  if (
+    !current ||
+    current.id !== session.id ||
+    current.state !== 'running' ||
+    current.taskId !== session.taskId ||
+    current.intentText !== session.intentText ||
+    current.plannedEndAt?.getTime() !== session.plannedEndAt?.getTime() ||
+    freshUser?.pendingInput !== user.pendingInput
+  ) {
+    await logEvent(ctx.db, user.id, 'route_stale', { stage: 'tasks' }, { at: ctx.now(), sessionId: session.id })
+    await reply(ctx, user, T.stale)
+    return true
+  }
+
+  if (parsed.result.kind === 'pause') {
+    await onBreak(ctx, user)
+    return true
+  }
+  if (parsed.result.kind === 'complete_and_rest') {
+    await completeTaskAndRest(ctx, user, current, parsed.result.taskTitle)
+    return true
+  }
 
   await logEvent(
     ctx.db,
@@ -141,6 +181,113 @@ export async function onRunningFreeText(ctx: Ctx, user: User, text: string): Pro
   }
   await reply(ctx, user, parsed.result.reply, sessionHelpKeyboard(session.id, parsed.result.action))
   return true
+}
+
+async function completeTaskAndRest(
+  ctx: Ctx,
+  user: User,
+  session: FocusSession,
+  extractedTitle: string | null,
+): Promise<void> {
+  const now = ctx.now()
+  const cleanTitle = extractedTitle?.replace(/\s+/g, ' ').trim().slice(0, 80) || null
+  const rest = session.plannedRestMinutes ?? restFor(session.plannedMinutes)
+  const elapsedSeconds = Math.floor(activeElapsedMs(session, now) / 1000)
+  const elapsedMinutes = Math.floor(elapsedSeconds / 60)
+  const counted = isCounted('finished', elapsedMinutes)
+  let taskTitle = cleanTitle
+
+  try {
+    await ctx.db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
+      const current = await tx.focusSession.findFirst({ where: { id: session.id, userId: user.id, state: 'running' } })
+      if (!current || !current.startedAt) throw new StaleTransition()
+
+      const activeTasks = await tx.task.findMany({ where: { userId: user.id, status: 'active' } })
+      const normalize = (value: string) => value.toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+      let task = cleanTitle
+        ? activeTasks.find((candidate) => normalize(candidate.title) === normalize(cleanTitle)) ?? null
+        : current.taskId
+          ? activeTasks.find((candidate) => candidate.id === current.taskId) ?? null
+          : null
+      if (!task && cleanTitle) task = await tx.task.create({ data: { userId: user.id, title: cleanTitle, createdAt: now } })
+      if (!task) throw new StaleTransition()
+      taskTitle = task.title
+
+      const associated = await tx.focusSession.updateMany({
+        where: { id: current.id, userId: user.id, state: 'running', taskId: current.taskId },
+        data: { taskId: task.id, intentText: task.title },
+      })
+      if (associated.count !== 1) throw new StaleTransition()
+      await transition(tx, { sessionId: current.id, userId: user.id }, 'running', 'finished', {
+        outcome: 'done',
+        finishedAt: now,
+        counted,
+        progress: null,
+        restChoice: 'rest',
+      })
+      await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `ping:${current.id}` } })
+      await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `session_end:${current.id}` } })
+
+      if (current.taskId && current.taskId !== task.id) {
+        await tx.task.updateMany({
+          where: { id: current.taskId, userId: user.id, sessionsCount: { gt: 0 } },
+          data: { sessionsCount: { decrement: 1 } },
+        })
+      }
+      const marked = await tx.task.updateMany({
+        where: { id: task.id, userId: user.id, status: 'active' },
+        data: {
+          status: 'done',
+          lastProgressAt: now,
+          lastSessionAt: now,
+          sessionsSinceProgress: 0,
+          ...(current.taskId === task.id ? {} : { sessionsCount: { increment: 1 } }),
+        },
+      })
+      if (marked.count !== 1) throw new StaleTransition()
+
+      await tx.taskTimeAllocation.deleteMany({ where: { userId: user.id, sessionId: current.id } })
+      await tx.taskTimeAllocation.create({
+        data: { userId: user.id, sessionId: current.id, taskId: task.id, seconds: elapsedSeconds, source: 'report', createdAt: now, updatedAt: now },
+      })
+      await enqueue(tx, {
+        userId: user.id,
+        kind: 'rest_over',
+        key: `rest_over:${current.id}`,
+        sendAfter: new Date(now.getTime() + rest * MIN),
+        payload: { sessionId: current.id },
+      })
+      await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'report_text' } })
+      await logEvent(tx, user.id, 'session_completed', {
+        session_id: current.id,
+        outcome: 'done',
+        elapsed_minutes: elapsedMinutes,
+        early: current.plannedEndAt !== null && now < current.plannedEndAt,
+        counted,
+      }, { at: now, sessionId: current.id })
+      await logEvent(tx, user.id, 'task_completed', { task_id: task.id, source: 'text' }, { at: now, sessionId: current.id })
+      await logEvent(tx, user.id, 'task_time_allocated', {
+        session_id: current.id,
+        task_count: 1,
+        allocated_seconds: elapsedSeconds,
+        unassigned_seconds: 0,
+        source: 'report',
+      }, { at: now, sessionId: current.id })
+      await logEvent(tx, user.id, 'rest_chosen', { session_id: current.id, choice: 'rest', rest_minutes: rest }, { at: now, sessionId: current.id })
+      if (counted) await creditCountedSession(tx, { userId: user.id, sessionId: current.id, dayKey: dayKey(now, user.timezone), at: now })
+    })
+  } catch (error) {
+    if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
+    throw error
+  }
+
+  await reply(
+    ctx,
+    user,
+    `${T.taskCompleted(taskTitle!)}\n${T.restStarted(hhmm(new Date(now.getTime() + rest * MIN), user.timezone))}\nКак прошло? ${T.askReport}`,
+    [[{ text: T.skip, data: cb('skiprep', session.id) }]],
+  )
 }
 
 export async function onSessionHelpAction(
@@ -256,7 +403,9 @@ export async function startTaskSession(ctx: Ctx, user: User, taskId: string): Pr
     await reply(ctx, user, T.taskSelectedRunning(task.title, endText(ctx, user, active)), runningEditKeyboard(active.id))
     return
   }
-  if (active?.state === 'paused') return reply(ctx, user, T.breakChoice)
+  if (active?.state === 'paused') {
+    return onNewAfterBreak(ctx, user, () => startTaskSession(ctx, user, taskId))
+  }
   const session = active ?? await openCollecting(ctx, user.id)
   if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
 
@@ -802,6 +951,30 @@ export function outcomeKeyboard(sessionId: string): Keyboard {
   ]
 }
 
+export function deadlineKeyboard(sessionId: string): Keyboard {
+  return [[
+    { text: T.deadlineContinueButton, data: cb('end', sessionId, 'continue') },
+    { text: T.deadlineBreakButton, data: cb('end', sessionId, 'break') },
+  ]]
+}
+
+export async function onDeadlineChoice(
+  ctx: Ctx,
+  user: User,
+  sessionId: string,
+  choice: 'continue' | 'break',
+): Promise<void> {
+  const session = await ownedSession(ctx, user.id, sessionId)
+  if (!session || session.state !== 'running') return reply(ctx, user, T.stale)
+  const cleared = await ctx.db.user.updateMany({
+    where: { id: user.id, pendingInput: `session_end:${sessionId}` },
+    data: { pendingInput: 'none' },
+  })
+  if (cleared.count !== 1) return reply(ctx, user, T.stale)
+  if (choice === 'break') return onBreak(ctx, { ...user, pendingInput: 'none' })
+  await reply(ctx, user, T.deadlineContinue)
+}
+
 export async function onDone(ctx: Ctx, user: User): Promise<void> {
   const session = await activeSession(ctx, user.id)
   if (session?.state === 'paused') return reply(ctx, user, T.breakChoice)
@@ -860,7 +1033,13 @@ export async function onReportText(
 ): Promise<boolean> {
   const since = new Date(ctx.now().getTime() - REPORT_WINDOW_MS)
   const session = await ctx.db.focusSession.findFirst({
-    where: { userId: user.id, state: 'finished', reportText: null, restChoice: null, finishedAt: { gte: since } },
+    where: {
+      userId: user.id,
+      state: 'finished',
+      reportText: null,
+      OR: [{ restChoice: null }, { restChoice: 'rest' }],
+      finishedAt: { gte: since },
+    },
     orderBy: { finishedAt: 'desc' },
   })
   if (!session) {
@@ -873,7 +1052,7 @@ export async function onReportText(
 
 export async function onSkipReport(ctx: Ctx, user: User, sessionId: string): Promise<void> {
   const session = await ownedSession(ctx, user.id, sessionId)
-  if (!session || session.state !== 'finished' || session.restChoice !== null || session.progress !== null) {
+  if (!session || session.state !== 'finished' || (session.restChoice !== null && session.restChoice !== 'rest') || session.progress !== null) {
     return reply(ctx, user, T.stale)
   }
   await finalizeReport(ctx, user, session, null)
@@ -932,7 +1111,7 @@ async function finalizeReport(
     llmMeter(ctx, user.id, 'report', session.id),
   )
   const failure = parsed.failure && !parsed.failure.ok ? parsed.failure.reason : null
-  const continuationRelevant = !options.endDay && parsed.result.continueNow && (await activeSession(ctx, user.id)) === null
+  const continuationRelevant = session.restChoice === null && !options.endDay && parsed.result.continueNow && (await activeSession(ctx, user.id)) === null
   let stuckTask: string | null = null
   let allocatedMinutes: number | null = null
   let allocationInvalid = false
@@ -1063,7 +1242,7 @@ async function finalizeReport(
   if (stuckTask) await reply(ctx, user, T.stuck(stuckTask))
   if (allocationInvalid) await reply(ctx, user, T.timeAllocationInvalid)
   else if (allocatedMinutes !== null) await reply(ctx, user, T.timeAllocated(allocatedMinutes))
-  if (!options.endDay) await askRest(ctx, user, session, { continueSuggested: continuationRelevant })
+  if (!options.endDay && session.restChoice === null) await askRest(ctx, user, session, { continueSuggested: continuationRelevant })
 }
 
 // После нескольких сессий бот сам замечает рисунок и предлагает технику одной
@@ -1257,7 +1436,15 @@ export async function onRest(
 export async function onBreak(ctx: Ctx, user: User): Promise<void> {
   const now = ctx.now()
   const session = await activeSession(ctx, user.id)
-  if (!session || session.state === 'collecting_intent') return reply(ctx, user, T.nothingToPause)
+  if (!session) return reply(ctx, user, T.restingIdle)
+  if (session.state === 'collecting_intent') {
+    await ctx.db.$transaction(async (tx) => {
+      await transition(tx, { sessionId: session.id, userId: user.id }, 'collecting_intent', 'cancelled', { finishedAt: now })
+      await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
+      await logEvent(tx, user.id, 'session_cancelled', {}, { at: now, sessionId: session.id })
+    })
+    return reply(ctx, user, T.restingIdle)
+  }
   if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
   try {
     await ctx.db.$transaction(async (tx) => {
@@ -1344,18 +1531,28 @@ export async function onResume(ctx: Ctx, user: User): Promise<void> {
 export async function onNewAfterBreak(ctx: Ctx, user: User, afterClose?: () => Promise<void>): Promise<void> {
   const now = ctx.now()
   const session = await activeSession(ctx, user.id)
-  if (!session || session.state !== 'paused' || !session.pausedAt) return reply(ctx, user, T.nothingPaused)
-  const pauseMs = Math.max(0, now.getTime() - session.pausedAt.getTime())
+  if (!session) {
+    if (afterClose) await afterClose()
+    else await onStartButton(ctx, user)
+    return
+  }
+  const pauseMs = session.state === 'paused' && session.pausedAt ? Math.max(0, now.getTime() - session.pausedAt.getTime()) : 0
   const elapsed = Math.floor(activeElapsedMs(session, now) / MIN)
 
   try {
     await ctx.db.$transaction(async (tx) => {
-      await transition(tx, { sessionId: session.id, userId: user.id }, 'paused', 'abandoned', {
-        pausedAt: null,
-        pausedSeconds: { increment: Math.floor(pauseMs / 1000) },
-        finishedAt: now,
-        abandonReason: 'new_session',
-      })
+      if (session.state === 'collecting_intent') {
+        await transition(tx, { sessionId: session.id, userId: user.id }, 'collecting_intent', 'cancelled', { finishedAt: now })
+        await logEvent(tx, user.id, 'session_cancelled', {}, { at: now, sessionId: session.id })
+      } else {
+        const from = session.state === 'paused' ? 'paused' : 'running'
+        await transition(tx, { sessionId: session.id, userId: user.id }, from, 'abandoned', {
+          pausedAt: null,
+          pausedSeconds: { increment: Math.floor(pauseMs / 1000) },
+          finishedAt: now,
+          abandonReason: 'new_session',
+        })
+      }
       await tx.outboxMessage.updateMany({
         where: {
           userId: user.id,
@@ -1368,7 +1565,9 @@ export async function onNewAfterBreak(ctx: Ctx, user: User, afterClose?: () => P
         data: { status: 'canceled' },
       })
       await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
-      await logEvent(tx, user.id, 'session_stopped', { session_id: session.id, elapsed_minutes: elapsed }, { at: now, sessionId: session.id })
+      if (session.state !== 'collecting_intent') {
+        await logEvent(tx, user.id, 'session_stopped', { session_id: session.id, elapsed_minutes: elapsed }, { at: now, sessionId: session.id })
+      }
     })
   } catch (error) {
     if (error instanceof StaleTransition) return reply(ctx, user, T.stale)

@@ -244,6 +244,9 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
       case 'out':
         if (id && arg && (OUTCOMES as readonly string[]).includes(arg)) return await session.onOutcome(ctx, user, id, arg as Outcome)
         break
+      case 'end':
+        if (id && (arg === 'continue' || arg === 'break')) return await session.onDeadlineChoice(ctx, user, id, arg)
+        break
       case 'skiprep':
         if (id) return await session.onSkipReport(ctx, user, id)
         break

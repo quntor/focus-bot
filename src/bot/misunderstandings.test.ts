@@ -10,6 +10,7 @@ function provider(responses: {
   tasks?: string
   intent?: string
   report?: string
+  sessionHelp?: string
 }): LlmProvider {
   return {
     enabled: true,
@@ -30,6 +31,12 @@ function provider(responses: {
       if (req.system.includes('короткий отчёт пользователя')) {
         return {
           text: responses.report ?? '{"progress":"stuck","next_step":null,"allocations":[],"continue_now":false}',
+          usage: null,
+        }
+      }
+      if (req.system.includes('активной фокус-сессии')) {
+        return {
+          text: responses.sessionHelp ?? '{"kind":"other","reply":null,"action":null,"task_title":null}',
           usage: null,
         }
       }
@@ -126,6 +133,57 @@ describe.skipIf(!hasDb)('границы недопониманий', () => {
     expect(session.intentText).toBeNull()
     expect(await prisma.task.count()).toBe(0)
     expect(bot.lastText(A)).toContain('Таймер ещё не запущен')
+  })
+
+  it('завершает названную задачу и сессию в момент явного ухода на отдых', async () => {
+    const bot = makeBot({
+      llm: provider({
+        sessionHelp: '{"kind":"complete_and_rest","reply":null,"action":null,"task_title":"починить пилот в миловице в меге"}',
+      }),
+    })
+    await bot.onboard(A)
+    await bot.text(A, 'Начать сессию')
+    const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+    bot.advance(25)
+
+    await bot.text(A, 'Я сделал задачу починить пилот в миловице в меге теперь отдыхаю')
+
+    const finished = await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })
+    expect(finished).toMatchObject({ state: 'finished', outcome: 'done', restChoice: 'rest', finishedAt: bot.now() })
+    const task = await prisma.task.findFirstOrThrow({ where: { userId: running.userId } })
+    expect(task).toMatchObject({ title: 'починить пилот в миловице в меге', status: 'done' })
+    expect(await prisma.taskTimeAllocation.findUniqueOrThrow({ where: { sessionId_taskId: { sessionId: running.id, taskId: task.id } } })).toMatchObject({
+      seconds: 25 * 60,
+      source: 'report',
+    })
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: running.userId } })).toMatchObject({ pendingInput: 'report_text' })
+    expect(bot.lastText(A)).toContain('Как прошло?')
+
+    await bot.text(A, 'Устранил ошибку и проверил на стенде')
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })).toMatchObject({
+      reportText: 'Устранил ошибку и проверил на стенде',
+      restChoice: 'rest',
+    })
+    expect(bot.textsTo(A).filter((message) => message.startsWith('Записал. Отдохнёшь'))).toHaveLength(0)
+  })
+
+  it('явное «приступаю» запускает новый таймер даже из перерыва', async () => {
+    const bot = makeBot({
+      llm: provider({ tasks: '{"kind":"start_task","new_tasks":[],"start_title":"Интервью","complete_title":null}' }),
+    })
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    const task = await prisma.task.create({ data: { userId: user.id, title: 'Интервью', createdAt: bot.now() } })
+    await bot.text(A, 'Начать сессию')
+    const previous = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+    bot.advance(5)
+    await bot.text(A, 'Перерыв')
+
+    await bot.text(A, 'Приступаю к интервью')
+
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: previous.id } })).toMatchObject({ state: 'abandoned' })
+    const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+    expect(running).toMatchObject({ taskId: task.id, intentText: 'Интервью', startedAt: bot.now() })
   })
 
   it('отбрасывает решение LLM, если состояние изменилось за время запроса', async () => {

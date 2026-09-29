@@ -13,6 +13,7 @@ export const ACTIONS = [
   'help', // безопасное действие помощника: continue | step | finish
   'ping', // here | back
   'out', // исход: done | not_done | other
+  'end', // мягкий дедлайн: continue | break
   'skiprep', // пропустить отчёт
   'rest', // rest | continue | later | day_end
   'again', // подтверждённое продолжение после отчёта: same | step | change

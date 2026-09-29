@@ -150,7 +150,30 @@ describe.skipIf(!hasDb)('outbox', () => {
     bot.advance(40)
     await runOutboxOnce(bot.ctx)
 
-    expect(await prisma.user.findUniqueOrThrow({ where: { id: session.userId } })).toMatchObject({ pendingInput: 'none' })
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: session.userId } })).toMatchObject({ pendingInput: `session_end:${session.id}` })
+    expect(bot.lastText(A)).toBe('Время вышло: поработай ещё или пора отдыхать?')
+    expect(bot.lastButton(A, 'end:', ':continue')).toBe(`end:${session.id}:continue`)
+    expect(bot.lastButton(A, 'end:', ':break')).toBe(`end:${session.id}:break`)
+  })
+
+  it('после дедлайна без ответа продолжает сессию, а кнопки меняют состояние', async () => {
+    const continuingBot = makeBot()
+    const continuing = await runningSession(continuingBot)
+    continuingBot.advance(40)
+    await runOutboxOnce(continuingBot.ctx)
+
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: continuing.id } })).toMatchObject({ state: 'running' })
+    await continuingBot.press(A, `end:${continuing.id}:continue`)
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: continuing.id } })).toMatchObject({ state: 'running' })
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: continuing.userId } })).toMatchObject({ pendingInput: 'none' })
+
+    await resetDb()
+    const breakBot = makeBot()
+    const pausing = await runningSession(breakBot)
+    breakBot.advance(40)
+    await runOutboxOnce(breakBot.ctx)
+    await breakBot.press(A, `end:${pausing.id}:break`)
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: pausing.id } })).toMatchObject({ state: 'paused' })
   })
 
   it('упавший посреди отправки процесс: сообщение не переотправляется, а помечается uncertain', async () => {
@@ -186,7 +209,7 @@ describe.skipIf(!hasDb)('outbox', () => {
     bot.advance(1)
     await runOutboxOnce(bot.ctx)
     expect((await prisma.outboxMessage.findFirstOrThrow({ where: { kind: 'session_end' } })).status).toBe('sent')
-    expect(bot.tg.sent.filter((s) => s.text === 'Время! Как прошло?')).toHaveLength(1)
+    expect(bot.tg.sent.filter((s) => s.text === 'Время вышло: поработай ещё или пора отдыхать?')).toHaveLength(1)
   })
 
   it('403 — пользователь помечен blockedAt, очередь гасится, ретраев нет', async () => {

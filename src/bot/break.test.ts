@@ -36,6 +36,27 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })).toMatchObject({ state: 'paused' })
   })
 
+  it('постоянные кнопки безопасно работаю из любого состояния', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+
+    await bot.text(A, 'Перерыв')
+    expect(bot.lastText(A)).toContain('Отдыхай')
+
+    await bot.text(A, 'Начать новую сессию')
+    const first = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+
+    bot.advance(5)
+    await bot.text(A, 'Начать новую сессию')
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: first.id } })).toMatchObject({
+      state: 'abandoned',
+      abandonReason: 'new_session',
+    })
+    const second = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+    expect(second.id).not.toBe(first.id)
+    expect(second.startedAt).toEqual(bot.now())
+  })
+
   it('быстрый старт не наследует прошлую работу и не требует ответа', async () => {
     const bot = makeBot()
     await bot.onboard(A)
@@ -117,7 +138,7 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
 
     bot.advance(35)
     await runOutboxOnce(bot.ctx)
-    expect(bot.textsTo(A)).not.toContain('Время! Как прошло?')
+    expect(bot.textsTo(A)).not.toContain('Время вышло: поработай ещё или пора отдыхать?')
 
     await bot.text(A, 'Вернуться к работе')
     const resumed = await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })
@@ -139,10 +160,10 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
 
     bot.advance(39)
     await runOutboxOnce(bot.ctx)
-    expect(bot.lastText(A)).not.toBe('Время! Как прошло?')
+    expect(bot.lastText(A)).not.toBe('Время вышло: поработай ещё или пора отдыхать?')
     bot.advance(1)
     await runOutboxOnce(bot.ctx)
-    expect(bot.textsTo(A)).toContain('Время! Как прошло?')
+    expect(bot.textsTo(A)).toContain('Время вышло: поработай ещё или пора отдыхать?')
   })
 
   it('после завершившегося периода принимает перерыв и запускает новый полный период', async () => {
@@ -153,7 +174,7 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
 
     bot.advance(30)
     await runOutboxOnce(bot.ctx)
-    expect(bot.lastText(A)).toBe('Время! Как прошло?')
+    expect(bot.lastText(A)).toBe('Время вышло: поработай ещё или пора отдыхать?')
 
     await bot.text(A, 'Перерыв')
 

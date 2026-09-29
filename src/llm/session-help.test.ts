@@ -3,7 +3,15 @@ import { disabledProvider, type LlmProvider } from './provider.js'
 import type { CallMeta } from './run.js'
 import { parseSessionHelp, templateSessionHelp } from './session-help.js'
 
-const input = (text: string) => ({ text, currentWork: 'Подготовить черновик', minutesLeft: 15 })
+const input = (text: string) => ({
+  text,
+  currentWork: 'Подготовить черновик',
+  activeTasks: ['Подготовить черновик'],
+  elapsedMinutes: 10,
+  plannedMinutes: 25,
+  phase: 'working' as const,
+  awaitingDeadlineChoice: false,
+})
 
 const provider = (answers: string[]): LlmProvider => ({
   enabled: true,
@@ -20,6 +28,7 @@ describe('помощь во время активной сессии', () => {
     ['Готово, закончил раньше', 'finished_early', 'finish'],
     ['Как лучше начать этот абзац?', 'question', 'continue'],
     ['Добавь задачу купить бумагу', 'other', null],
+    ['Не ухожу отдыхать, продолжаю', 'other', null],
   ])('даёт детерминированный fallback: %s', (text, kind, action) => {
     expect(templateSessionHelp(text)).toMatchObject({ kind, action, llmUsed: false })
   })
@@ -35,6 +44,7 @@ describe('помощь во время активной сессии', () => {
       kind: 'stuck',
       reply: 'Сузь задачу до одного проверяемого шага.',
       action: 'change_step',
+      taskTitle: null,
       llmUsed: true,
     })
   })

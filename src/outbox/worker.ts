@@ -4,7 +4,7 @@ import { log } from '../lib/log.js'
 import { cb } from '../bot/callbacks.js'
 import { markBlocked, type Ctx } from '../bot/context.js'
 import { buildSummary, declineKeyboard, DECLINES_BEFORE_ASK, putDefaultMeeting, reminderKeyboard } from '../bot/day-flow.js'
-import { openCollecting, outcomeKeyboard } from '../bot/session-flow.js'
+import { deadlineKeyboard, openCollecting } from '../bot/session-flow.js'
 import { buildTaskStartPrompt } from '../bot/tasks.js'
 import { T } from '../bot/texts.js'
 import { DeliveryError, TelegramError, type Keyboard } from '../tg/client.js'
@@ -96,11 +96,11 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
     if (m.kind === 'session_end') {
       return {
         text: T.sessionEnd,
-        keyboard: outcomeKeyboard(sessionId),
+        keyboard: deadlineKeyboard(sessionId),
         after: async (tx) => {
           await tx.user.updateMany({
-            where: { id: user.id, pendingInput: { in: [`running_work:${sessionId}`, `running_duration:${sessionId}`] } },
-            data: { pendingInput: 'none' },
+            where: { id: user.id, pendingInput: { in: ['none', `running_work:${sessionId}`, `running_duration:${sessionId}`] } },
+            data: { pendingInput: `session_end:${sessionId}` },
           })
           await logEvent(tx, user.id, 'session_end_sent', { session_id: sessionId }, { at: now, sessionId })
         },
