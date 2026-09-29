@@ -54,7 +54,7 @@ export async function onRitualText(ctx: Ctx, user: User, text: string | null): P
     await logEvent(tx, user.id, 'ritual_set', { action: ritual ? 'set' : 'skip' }, { at: now })
   })
   const updated = { ...user, ritualText: ritual ?? user.ritualText, pendingInput: 'none' }
-  if (await isOnboarding(ctx, user.id)) return askIntent(ctx, updated)
+  if (await isOnboarding(ctx, user.id)) return askIntent(ctx, updated, { prefix: T.onboardingGuide })
   await reply(ctx, updated, T.ritualSaved)
 }
 
