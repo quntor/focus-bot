@@ -12,6 +12,7 @@ import { StaleTransition, transition } from '../session/fsm.js'
 import { TelegramError, type Keyboard } from '../tg/client.js'
 import { cb } from './callbacks.js'
 import { reply, type Ctx } from './context.js'
+import { recentConversationContext } from './conversation-context.js'
 import { activeElapsedMinutes, activeSession, onStartButton, startTaskSession } from './session-flow.js'
 import { T } from './texts.js'
 
@@ -525,7 +526,13 @@ async function completeAndStart(
 
 // Модель только классифицирует свободную речь. Вызывающий выполняет
 // обычное намерение или закрытие дня; операции с задачами делаются здесь.
-export async function onTaskMessage(ctx: Ctx, user: User, text: string, source: TaskInputSource): Promise<TaskMessageOutcome> {
+export async function onTaskMessage(
+  ctx: Ctx,
+  user: User,
+  text: string,
+  source: TaskInputSource,
+  contextEventId: number | null = null,
+): Promise<TaskMessageOutcome> {
   const current = await activeSession(ctx, user.id)
   const storedTasks = await ctx.db.task.findMany({
     where: { userId: user.id, status: 'active' },
@@ -538,9 +545,18 @@ export async function onTaskMessage(ctx: Ctx, user: User, text: string, source: 
   const activeTasks = current?.taskId
     ? [...storedTasks.filter((task) => task.id === current.taskId), ...storedTasks.filter((task) => task.id !== current.taskId)]
     : storedTasks
+  const sessionState = current?.state === 'collecting_intent' || current?.state === 'running' || current?.state === 'paused'
+    ? current.state
+    : 'idle'
   const parsed = await parseTaskMessage(
     ctx.llm,
-    { text, tasks: activeTasks, currentTaskId: current?.taskId ?? null },
+    {
+      text,
+      tasks: activeTasks,
+      currentTaskId: current?.taskId ?? null,
+      sessionState,
+      recentContext: recentConversationContext(user.id, ctx.now(), { beforeEventId: contextEventId }),
+    },
     llmMeter(ctx, user.id, 'tasks', current?.id ?? null),
   )
   const fresh = await activeSession(ctx, user.id)

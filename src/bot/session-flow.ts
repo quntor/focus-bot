@@ -14,6 +14,7 @@ import { ACTIVE_STATES, StaleTransition, transition, type Outcome } from '../ses
 import { PRESETS, isTechnique, type Technique } from '../session/technique.js'
 import { cb } from './callbacks.js'
 import { reply, type Ctx } from './context.js'
+import { recentConversationContext, resetConversationContext } from './conversation-context.js'
 import { T, hhmm } from './texts.js'
 import type { Keyboard } from '../tg/client.js'
 
@@ -116,7 +117,12 @@ function sessionHelpKeyboard(sessionId: string, action: SessionHelpAction): Keyb
   return [[{ text: T.sessionHelpAction[action], data: cb('help', sessionId, arg) }]]
 }
 
-export async function onRunningFreeText(ctx: Ctx, user: User, text: string): Promise<boolean> {
+export async function onRunningFreeText(
+  ctx: Ctx,
+  user: User,
+  text: string,
+  contextEventId: number | null = null,
+): Promise<boolean> {
   const session = await activeSession(ctx, user.id)
   if (!session || session.state !== 'running') return false
   const now = ctx.now()
@@ -137,6 +143,7 @@ export async function onRunningFreeText(ctx: Ctx, user: User, text: string): Pro
       plannedMinutes: session.plannedMinutes,
       phase,
       awaitingDeadlineChoice: user.pendingInput === `session_end:${session.id}`,
+      recentContext: recentConversationContext(user.id, now, { beforeEventId: contextEventId }),
     },
     llmMeter(ctx, user.id, 'session_help', session.id),
   )
@@ -688,6 +695,7 @@ export async function startRunning(ctx: Ctx, user: User, sessionId: string): Pro
     if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
     throw error
   }
+  resetConversationContext(user.id)
   await reply(
     ctx,
     user,

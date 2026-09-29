@@ -4,6 +4,7 @@ import { logEvent } from '../analytics/log.js'
 import { log } from '../lib/log.js'
 import { parseCallback } from '../bot/callbacks.js'
 import { reply, type Ctx } from '../bot/context.js'
+import { rememberConversationContext } from '../bot/conversation-context.js'
 import { T } from '../bot/texts.js'
 import * as account from '../bot/account.js'
 import * as day from '../bot/day-flow.js'
@@ -105,6 +106,12 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
 
   const command = parseCommand(msg?.text)
   const { user, created } = await loadUser(ctx, tgId, command?.command === 'start' ? command.args : null)
+  const callback = cq ? parseCallback(cq.data) : null
+  const contextEventId = msg?.text
+    ? rememberConversationContext(user.id, 'user', msg.text, ctx.now())
+    : callback
+      ? rememberConversationContext(user.id, 'button', `${callback.action}${callback.arg ? `:${callback.arg}` : ''}`, ctx.now())
+      : null
 
   try {
     if (cq) await onCallback(ctx, user, cq.id, cq.data, cq.message?.message_id)
@@ -114,6 +121,7 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
       else {
         const text = await tasks.transcribeVoice(ctx, user, msg.voice)
         if (!text) return
+        const voiceContextEventId = rememberConversationContext(user.id, 'user', text, ctx.now())
         if (user.pendingInput === 'meeting_time') return day.onMeetingTimeText(ctx, user, text)
         if (user.pendingInput === 'report_text' && await onPendingReport(ctx, user, text, 'voice')) return
         const runningEdit = /^running_(work|duration):([0-9a-f-]{36})$/.exec(user.pendingInput)
@@ -121,13 +129,13 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
         if (runningEdit?.[1] === 'duration' && runningEdit[2]) return session.onRunningDurationText(ctx, user, runningEdit[2], text)
         const taskEdit = /^task_edit:([0-9a-f-]{36})$/.exec(user.pendingInput)
         if (taskEdit?.[1]) return tasks.onTaskEditText(ctx, user, taskEdit[1], text)
-        if (await session.onRunningFreeText(ctx, user, text)) return
-        const outcome = await tasks.onTaskMessage(ctx, user, text, 'voice')
+        if (await session.onRunningFreeText(ctx, user, text, voiceContextEventId)) return
+        const outcome = await tasks.onTaskMessage(ctx, user, text, 'voice', voiceContextEventId)
         if (outcome === 'session_intent') await session.onIntentText(ctx, user, text)
         else if (outcome === 'close_day') await day.closeDay(ctx, user, 'voice')
       }
     }
-    else if (msg?.text) await onText(ctx, user, msg.text, created)
+    else if (msg?.text) await onText(ctx, user, msg.text, created, contextEventId)
   } catch (error) {
     // Наружу — общая фраза, подробности — во внутренний лог без текста.
     log.error('handle_failed', error)
@@ -173,7 +181,7 @@ async function onCommand(ctx: Ctx, user: User, command: string, args: string, cr
   }
 }
 
-async function onText(ctx: Ctx, user: User, text: string, created: boolean): Promise<void> {
+async function onText(ctx: Ctx, user: User, text: string, created: boolean, contextEventId: number | null): Promise<void> {
   if (created) return account.beginOnboarding(ctx, user)
   if (text === T.sessionStartButton) return tasks.onSessionStart(ctx, user)
   if (text === T.tasksButton) return tasks.showTasks(ctx, user)
@@ -200,8 +208,8 @@ async function onText(ctx: Ctx, user: User, text: string, created: boolean): Pro
       if (await onPendingReport(ctx, user, text, 'text')) return
       break
   }
-  if (await session.onRunningFreeText(ctx, user, text)) return
-  const outcome = await tasks.onTaskMessage(ctx, user, text, 'text')
+  if (await session.onRunningFreeText(ctx, user, text, contextEventId)) return
+  const outcome = await tasks.onTaskMessage(ctx, user, text, 'text', contextEventId)
   if (outcome === 'session_intent') return session.onIntentText(ctx, user, text)
   if (outcome === 'close_day') return day.closeDay(ctx, user, 'text')
 }

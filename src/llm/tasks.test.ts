@@ -70,7 +70,12 @@ describe('разбор сообщения со списком задач', () =>
       enabled: true,
       model: 'test-model',
       async complete(req) {
-        expect(JSON.parse(req.input)).toEqual({ text: 'Нужно доделать выкат и поправить ошибки', has_current_task: false })
+        expect(JSON.parse(req.input)).toEqual({
+          text: 'Нужно доделать выкат и поправить ошибки',
+          has_current_task: false,
+          session_state: 'idle',
+          recent_context: [],
+        })
         expect(req.system).toContain('полного упорядоченного списка')
         return reply('{"kind":"capture","new_tasks":["Доделать выкат","Поправить ошибки"]}')
       },
@@ -83,6 +88,39 @@ describe('разбор сообщения со списком задач', () =>
 
     expect(parsed.failure).toBeNull()
     expect(parsed.result).toEqual({ kind: 'capture', titles: ['Доделать выкат', 'Поправить ошибки'], llmUsed: true })
+  })
+
+  it('передаёт модели последние сообщения текущей сессии без списка задач', async () => {
+    const observed: LlmProvider = {
+      enabled: true,
+      model: 'test-model',
+      async complete(req) {
+        expect(JSON.parse(req.input)).toEqual({
+          text: 'Да, эту',
+          has_current_task: true,
+          session_state: 'running',
+          recent_context: [
+            { role: 'assistant', text: 'Эту задачу завершить?' },
+            { role: 'button', text: 'task:view' },
+          ],
+        })
+        expect(req.system).toContain('recent_context')
+        return reply('{"kind":"complete_task","new_tasks":[],"start_title":null,"complete_title":null}')
+      },
+    }
+
+    const parsed = await parseTaskMessage(observed, {
+      text: 'Да, эту',
+      tasks,
+      currentTaskId: 'own-a',
+      sessionState: 'running',
+      recentContext: [
+        { role: 'assistant', text: 'Эту задачу завершить?' },
+        { role: 'button', text: 'task:view' },
+      ],
+    })
+
+    expect(parsed.result).toEqual({ kind: 'complete_task', title: null, llmUsed: true })
   })
 
   it('сохраняет самостоятельные действия и объединяет близкие переформулировки', async () => {
@@ -262,6 +300,8 @@ describe('разбор сообщения со списком задач', () =>
         expect(JSON.parse(req.input)).toEqual({
           text: 'Первую сделал, перехожу ко второй',
           has_current_task: true,
+          session_state: 'idle',
+          recent_context: [],
         })
         return reply('{"kind":"complete_and_start","new_tasks":[],"start_title":"Позвонить Ивану"}')
       },
@@ -283,6 +323,8 @@ describe('разбор сообщения со списком задач', () =>
         expect(JSON.parse(req.input)).toEqual({
           text: 'Всё, налетаю на презентацию',
           has_current_task: false,
+          session_state: 'idle',
+          recent_context: [],
         })
         return reply('{"kind":"start_task","new_tasks":[],"start_title":"Подготовить презентацию"}')
       },

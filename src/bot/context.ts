@@ -7,6 +7,7 @@ import { log } from '../lib/log.js'
 import { logEvent } from '../analytics/log.js'
 import { cancelPending } from '../outbox/queue.js'
 import { T } from './texts.js'
+import { rememberConversationContext } from './conversation-context.js'
 
 // Всё, от чего зависит обработка: база, Telegram, модель и часы. Часы — тоже
 // зависимость: источник истины по времени — сервер, а тесты двигают время сами.
@@ -35,6 +36,7 @@ export async function reply(ctx: Ctx, user: Pick<User, 'id' | 'tgId'>, text: str
   try {
     const replyKeyboard = keyboard ? undefined : await sessionKeyboard(ctx, user.id)
     await ctx.tg.send(user.tgId, text, keyboard, replyKeyboard)
+    rememberConversationContext(user.id, 'assistant', text, ctx.now())
   } catch (error) {
     if (error instanceof TelegramError && error.code === 403) {
       await markBlocked(ctx, user.id)

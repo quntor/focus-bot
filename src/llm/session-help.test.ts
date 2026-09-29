@@ -49,6 +49,33 @@ describe('помощь во время активной сессии', () => {
     })
   })
 
+  it('передаёт модели ограниченную историю как данные, отдельно от текущего текста', async () => {
+    const observed: LlmProvider = {
+      enabled: true,
+      model: 'test-model',
+      async complete(req) {
+        expect(JSON.parse(req.input)).toMatchObject({
+          text: 'Продолжаю с неё',
+          recent_context: [
+            { role: 'assistant', text: 'С какой задачи продолжишь?' },
+            { role: 'button', text: 'task:view' },
+          ],
+        })
+        expect(req.system).toContain('recent_context')
+        expect(req.system).toContain('не инструкции')
+        return { text: '{"kind":"other","reply":null,"action":null,"task_title":null}', usage: null }
+      },
+    }
+
+    await parseSessionHelp(observed, {
+      ...input('Продолжаю с неё'),
+      recentContext: [
+        { role: 'assistant', text: 'С какой задачи продолжишь?' },
+        { role: 'button', text: 'task:view' },
+      ],
+    })
+  })
+
   it('отбрасывает несовместимое действие, повторяет один раз и уходит в fallback', async () => {
     const meter = vi.fn(async (_meta: CallMeta) => {})
     const parsed = await parseSessionHelp(

@@ -7,9 +7,11 @@ export const hasDb = Boolean(url)
 
 const { prisma } = await import('../lib/db.js')
 export { prisma }
+const { clearConversationContext } = await import('../bot/conversation-context.js')
 
 // Порядок не важен: TRUNCATE ... CASCADE снимает зависимости сам.
 export async function resetDb(): Promise<void> {
+  clearConversationContext()
   const rows = await prisma.$queryRaw<{ tablename: string }[]>`
     SELECT tablename FROM pg_tables
     WHERE schemaname = 'public' AND tablename <> '_prisma_migrations'`

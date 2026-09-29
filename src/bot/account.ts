@@ -5,6 +5,7 @@ import { cancelPending } from '../outbox/queue.js'
 import { isTechnique } from '../session/technique.js'
 import { cb } from './callbacks.js'
 import { reply, type Ctx } from './context.js'
+import { resetConversationContext } from './conversation-context.js'
 import { askIntent } from './session-flow.js'
 import { T, hhmm } from './texts.js'
 
@@ -195,6 +196,7 @@ export async function onDeleteConfirm(ctx: Ctx, user: User): Promise<void> {
     await logEvent(tx, user.id, 'user_deleted', {}, { at: now })
     await tx.user.delete({ where: { id: user.id } })
   })
+  resetConversationContext(user.id)
   try {
     await ctx.tg.send(tgId, T.deleted)
   } catch {

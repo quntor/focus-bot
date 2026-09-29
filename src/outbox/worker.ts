@@ -3,6 +3,7 @@ import { logEvent } from '../analytics/log.js'
 import { log } from '../lib/log.js'
 import { cb } from '../bot/callbacks.js'
 import { markBlocked, type Ctx } from '../bot/context.js'
+import { rememberConversationContext } from '../bot/conversation-context.js'
 import { buildSummary, declineKeyboard, DECLINES_BEFORE_ASK, putDefaultMeeting, reminderKeyboard } from '../bot/day-flow.js'
 import { deadlineKeyboard, openCollecting } from '../bot/session-flow.js'
 import { buildTaskStartPrompt } from '../bot/tasks.js'
@@ -250,6 +251,7 @@ async function deliver(ctx: Ctx, m: OutboxMessage): Promise<void> {
     await tx.outboxMessage.update({ where: { id: m.id }, data: { status: 'sent', sentAt: ctx.now(), lockedUntil: null } })
     await msg.after?.(tx)
   })
+  rememberConversationContext(user.id, 'assistant', msg.text, ctx.now())
 }
 
 // Классификация ошибок. Повторяем только то, что точно не ушло в Telegram:

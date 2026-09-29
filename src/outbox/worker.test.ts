@@ -3,6 +3,7 @@ import { hasDb, prisma, resetDb } from '../test/db.js'
 import { makeBot } from '../test/bot.js'
 import { enqueue } from './queue.js'
 import { recoverStuck, runOutboxOnce } from './worker.js'
+import { recentConversationContext } from '../bot/conversation-context.js'
 import { DeliveryError, TelegramError } from '../tg/client.js'
 
 const A = 4001
@@ -154,6 +155,10 @@ describe.skipIf(!hasDb)('outbox', () => {
     expect(bot.lastText(A)).toBe('Время вышло: поработай ещё или пора отдыхать?')
     expect(bot.lastButton(A, 'end:', ':continue')).toBe(`end:${session.id}:continue`)
     expect(bot.lastButton(A, 'end:', ':break')).toBe(`end:${session.id}:break`)
+    expect(recentConversationContext(session.userId, bot.now()).at(-1)).toEqual({
+      role: 'assistant',
+      text: 'Время вышло: поработай ещё или пора отдыхать?',
+    })
   })
 
   it('после дедлайна без ответа продолжает сессию, а кнопки меняют состояние', async () => {

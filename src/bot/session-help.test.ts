@@ -83,6 +83,41 @@ describe.skipIf(!hasDb)('свободный текст во время акти�
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })).toMatchObject({ state: 'running' })
   })
 
+  it('даёт модели только недавний контекст текущей сессии и сбрасывает прошлую', async () => {
+    const seen: Array<Record<string, unknown>> = []
+    const bot = makeBot({
+      llm: {
+        enabled: true,
+        model: 'test-model',
+        async complete(req) {
+          if (req.system.includes('активной фокус-сессии')) {
+            seen.push(JSON.parse(req.input) as Record<string, unknown>)
+            return { text: '{"kind":"question","reply":"Начни с одного предложения.","action":"continue"}', usage: null }
+          }
+          if (req.system.includes('сообщение пользователя фокус-боту')) {
+            return { text: '{"kind":"session_intent","new_tasks":[],"start_title":null,"complete_title":null}', usage: null }
+          }
+          return { text: '{"task":null,"title":"Подготовить черновик","scope":"step"}', usage: null }
+        },
+      },
+    })
+    await bot.onboard(A)
+    await bot.text(A, 'первая задача, 25 минут')
+    await bot.text(A, 'Как начать первую?')
+    await bot.text(A, '/stop')
+    await bot.text(A, 'вторая задача, 25 минут')
+    await bot.text(A, 'Как начать вторую?')
+
+    expect(seen).toHaveLength(2)
+    expect(seen[0]?.recent_context).toEqual([
+      expect.objectContaining({ role: 'assistant', text: expect.stringContaining('началась') }),
+    ])
+    expect(seen[1]?.recent_context).toEqual([
+      expect.objectContaining({ role: 'assistant', text: expect.stringContaining('началась') }),
+    ])
+    expect(JSON.stringify(seen[1]?.recent_context)).not.toContain('первую')
+  })
+
   it('на досрочное завершение только открывает штатный выбор исхода', async () => {
     const bot = makeBot({
       llm: helperProvider('{"kind":"finished_early","reply":"Готово раньше — зафиксируй результат.","action":"finish"}'),
