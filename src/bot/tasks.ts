@@ -23,6 +23,21 @@ export const MAX_VOICE_SECONDS = 180
 export const MAX_VOICE_BYTES = 5 * 1024 * 1024
 export const MAX_VOICE_PER_HOUR = 5
 
+function sameActiveSession(
+  before: Awaited<ReturnType<typeof activeSession>>,
+  after: Awaited<ReturnType<typeof activeSession>>,
+): boolean {
+  if (!before || !after) return before === after
+  return before.id === after.id && before.state === after.state && before.taskId === after.taskId && before.intentText === after.intentText
+}
+
+async function replyToFeedback(ctx: Ctx, user: User, current: Awaited<ReturnType<typeof activeSession>>): Promise<void> {
+  if (current?.state === 'collecting_intent') return reply(ctx, user, T.collectingFeedback(current.intentText !== null))
+  if (current?.state === 'running') return reply(ctx, user, T.runningFeedback)
+  if (current?.state === 'paused') return reply(ctx, user, T.pausedFeedback)
+  await reply(ctx, user, T.idleFeedback)
+}
+
 // Один production-процесс: локальный cost guard не хранит tg_id на диске и
 // режет дешёвую атаку повторными длинными voice раньше Telegram download/STT.
 const voiceUsage = new Map<bigint, number[]>()
@@ -528,6 +543,12 @@ export async function onTaskMessage(ctx: Ctx, user: User, text: string, source: 
     { text, tasks: activeTasks, currentTaskId: current?.taskId ?? null },
     llmMeter(ctx, user.id, 'tasks', current?.id ?? null),
   )
+  const fresh = await activeSession(ctx, user.id)
+  if (parsed.result && !sameActiveSession(current, fresh)) {
+    await logEvent(ctx.db, user.id, 'route_stale', { stage: 'tasks' }, { at: ctx.now(), sessionId: current?.id })
+    await reply(ctx, user, T.stale)
+    return 'handled'
+  }
   if (!parsed.result) {
     const reason = parsed.failure && !parsed.failure.ok ? parsed.failure.reason : 'invalid'
     await logEvent(ctx.db, user.id, 'llm_fallback', { stage: 'tasks', reason }, { at: ctx.now(), sessionId: current?.id })
@@ -545,6 +566,10 @@ export async function onTaskMessage(ctx: Ctx, user: User, text: string, source: 
       : 0
   await logEvent(ctx.db, user.id, 'tasks_parsed', { kind: parsed.result.kind, count }, { at: ctx.now(), sessionId: current?.id })
   if (parsed.result.kind === 'session_intent') return 'session_intent'
+  if (parsed.result.kind === 'feedback') {
+    await replyToFeedback(ctx, user, current)
+    return 'handled'
+  }
   if (parsed.result.kind === 'close_day') return 'close_day'
   if (parsed.result.kind === 'capture') {
     const tasks = await captureTasks(ctx, user, parsed.result.titles, source)

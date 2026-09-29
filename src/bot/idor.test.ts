@@ -48,7 +48,7 @@ describe.skipIf(!hasDb)('IDOR: чужие идентификаторы во вс
       tick()
       await bot.text(A, t)
     }
-    const args = ['ok', 'up', 'down', 'cancel', 'work', 'duration', 'here', 'back', 'done', 'not_done', 'other', 'rest', 'continue', 'later', 'day_end', 'confirm']
+    const args = ['ok', 'up', 'down', 'cancel', 'work', 'duration', 'here', 'back', 'done', 'not_done', 'other', 'rest', 'continue', 'same', 'step', 'change', 'later', 'day_end', 'confirm']
     // del проверяется отдельно: он удаляет самого нажавшего, и дальше проверки
     // выполнялись бы уже от имени заново созданного пользователя.
     for (const action of ACTIONS.filter((a) => a !== 'del')) {

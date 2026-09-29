@@ -177,6 +177,9 @@ model FocusSession {
   abandonReason  String?   @map("abandon_reason")
 
   reportText String? @map("report_text")
+  // Модель увидела явное «продолжаю сейчас», но таймер запускает только кнопка.
+  // Флаг нужен для проверки callback и обезличенной confirm/reject аналитики.
+  continueSuggested Boolean @default(false) @map("continue_suggested")
   // moved | stuck — разбор отчёта. Влияет на lastProgressAt задачи.
   progress   String? @map("progress")
   // Засчитана ли сессия: finished и не короче порога, см. src/retention/rules.ts.

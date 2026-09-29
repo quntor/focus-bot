@@ -108,8 +108,12 @@ UPDATE и DELETE запрещены триггером.
 | `intent_submitted` | ответ на «с чего начнёшь» | да | `length_chars`, `named_minutes` |
 | `intent_parsed` | намерение разобрано | нет | `llm_used`, `task_id`, `is_new_task`, `scope` |
 | `voice_transcribed` | голосовое распознано | да | `duration_seconds`, `length_chars` |
-| `tasks_parsed` | модель классифицировала свободную речь | нет | `kind`, `count` (`session_intent`, `capture`, `start_task`, `complete_task`, `complete_and_start`, `complete_and_close_day`, `close_day`) |
+| `tasks_parsed` | модель классифицировала свободную речь | нет | `kind`, `count` (`session_intent`, `feedback`, `capture`, `start_task`, `complete_task`, `complete_and_start`, `complete_and_close_day`, `close_day`) |
 | `tasks_captured` | человек добавил список задач | да | `count`, `source` |
+| `route_suggested` | бот предложил подтвердить неоднозначное действие | нет | `kind` (`continue`) |
+| `route_confirmed` | человек подтвердил предложенное действие | да | `kind`, `choice` |
+| `route_rejected` | человек выбрал безопасную альтернативу предложению | да | `kind`, `choice` |
+| `route_stale` | результат LLM или старая кнопка устарели относительно состояния | нет | `stage` (`tasks`, `intent`, `report`) |
 | `task_selected` | выбрал задачу для сессии | да | `task_id` |
 | `task_completed` | отметил существующую задачу готовой | да | `task_id`, `source` (`text`, `voice`, `button`) |
 | `task_switched` | завершил одну задачу и начал другую | да | `from_task_id`, `to_task_id`, `source` |

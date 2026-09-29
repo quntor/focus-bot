@@ -311,6 +311,27 @@ function lengthKeyboard(sessionId: string): Keyboard {
   ]
 }
 
+const normalizeWorkTitle = (value: string) =>
+  value
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+
+function explicitlyReferencesTask(text: string, title: string): boolean {
+  const haystack = normalizeWorkTitle(text)
+  const needle = normalizeWorkTitle(title)
+  if (!needle) return false
+  return haystack === needle || ` ${haystack} `.includes(` ${needle} `)
+}
+
+function intentDisplayTitle(text: string, parsedTitle: string, task: { title: string } | null): string {
+  if (task && (normalizeWorkTitle(text) === normalizeWorkTitle(task.title) || /(?:имел[аи]? в виду|то есть|не та работа|не это)/iu.test(text))) {
+    return task.title
+  }
+  return parsedTitle.replace(/\s+/g, ' ').trim().slice(0, 80)
+}
+
 async function handleIntent(ctx: Ctx, user: User, session: FocusSession, text: string): Promise<void> {
   const now = ctx.now()
   const technique: Technique = isTechnique(user.technique) ? user.technique : 'auto'
@@ -334,8 +355,12 @@ async function handleIntent(ctx: Ctx, user: User, session: FocusSession, text: s
       select: { id: true, title: true },
     })
     const parsed = await parseIntent(ctx.llm, { text, tasks, profile: user.profileText }, llmMeter(ctx, user.id, 'intent', session.id))
-    taskId = parsed.result.taskId
-    title = parsed.result.title
+    const pinned = session.taskId ? tasks.find((task) => task.id === session.taskId) ?? null : null
+    const exact = tasks.find((task) => normalizeWorkTitle(task.title) === normalizeWorkTitle(text)) ?? null
+    const proposed = parsed.result.taskId ? tasks.find((task) => task.id === parsed.result.taskId) ?? null : null
+    const matched = pinned ?? exact ?? (proposed && explicitlyReferencesTask(text, proposed.title) ? proposed : null)
+    taskId = matched?.id ?? null
+    title = intentDisplayTitle(text, parsed.result.title, matched)
     scope = parsed.result.scope
     llmUsed = parsed.result.llmUsed
     failure = parsed.failure && !parsed.failure.ok ? parsed.failure.reason : null
@@ -362,16 +387,16 @@ async function handleIntent(ctx: Ctx, user: User, session: FocusSession, text: s
 
   try {
     await ctx.db.$transaction(async (tx) => {
-      let isNewTask = false
-      if (!refining && taskId === null) {
-        const task = await tx.task.create({ data: { userId: user.id, title, createdAt: now } })
-        taskId = task.id
-        isNewTask = true
-      }
       const res = await tx.focusSession.updateMany({
-        where: { id: session.id, userId: user.id, state: 'collecting_intent' },
+        where: {
+          id: session.id,
+          userId: user.id,
+          state: 'collecting_intent',
+          intentText: session.intentText,
+          taskId: session.taskId,
+        },
         data: {
-          intentText: text,
+          intentText: title,
           taskId,
           scope,
           plannedMinutes: minutes,
@@ -383,12 +408,15 @@ async function handleIntent(ctx: Ctx, user: User, session: FocusSession, text: s
       if (res.count !== 1) throw new StaleTransition()
       await logEvent(tx, user.id, 'intent_submitted', { length_chars: text.length, named_minutes: named !== null }, { at: now, sessionId: session.id })
       if (!refining) {
-        await logEvent(tx, user.id, 'intent_parsed', { llm_used: llmUsed, task_id: taskId, is_new_task: isNewTask, scope }, { at: now, sessionId: session.id })
+        await logEvent(tx, user.id, 'intent_parsed', { llm_used: llmUsed, task_id: taskId, is_new_task: taskId === null, scope }, { at: now, sessionId: session.id })
         if (failure) await logEvent(tx, user.id, 'llm_fallback', { stage: 'intent', reason: failure }, { at: now })
       }
     })
   } catch (error) {
-    if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
+    if (error instanceof StaleTransition) {
+      await logEvent(ctx.db, user.id, 'route_stale', { stage: 'intent' }, { at: ctx.now(), sessionId: session.id })
+      return reply(ctx, user, T.stale)
+    }
     throw error
   }
 
@@ -467,12 +495,22 @@ export async function startRunning(ctx: Ctx, user: User, sessionId: string): Pro
 
   try {
     await ctx.db.$transaction(async (tx) => {
+      let taskId = session.taskId
+      let isNewTask = false
+      if (taskId === null && session.intentText) {
+        const task = await tx.task.create({ data: { userId: user.id, title: session.intentText, createdAt: now } })
+        taskId = task.id
+        isNewTask = true
+      }
       await transition(tx, { sessionId, userId: user.id }, 'collecting_intent', 'running', { startedAt: now, plannedEndAt, pingAt })
+      if (isNewTask && taskId) {
+        await tx.focusSession.update({ where: { id: sessionId }, data: { task: { connect: { id: taskId } } } })
+      }
       if (pingAt) await enqueue(tx, { userId: user.id, kind: 'ping', key: `ping:${sessionId}:1`, sendAfter: pingAt, payload: { sessionId, n: 1 } })
       if (plannedEndAt) await enqueue(tx, { userId: user.id, kind: 'session_end', key: `session_end:${sessionId}`, sendAfter: plannedEndAt, payload: { sessionId } })
-      if (session.taskId) {
+      if (taskId) {
         await tx.task.updateMany({
-          where: { id: session.taskId, userId: user.id },
+          where: { id: taskId, userId: user.id },
           data: { sessionsCount: { increment: 1 }, lastSessionAt: now },
         })
       }
@@ -481,13 +519,12 @@ export async function startRunning(ctx: Ctx, user: User, sessionId: string): Pro
       await cancelPending(tx, { userId: user.id, kind: 'meeting', sendAfter: { lte: new Date(now.getTime() + 3 * 60 * MIN) } })
       await tx.user.update({ where: { id: user.id }, data: { declinesInRow: 0 } })
       await scheduleSummary(tx, user, now)
-      const isNewTask = session.taskId !== null && (await tx.task.count({ where: { id: session.taskId, sessionsCount: 1 } })) === 1
       await logEvent(
         tx,
         user.id,
         'session_started',
         {
-          task_id: session.taskId,
+          task_id: taskId,
           is_new_task: isNewTask,
           planned_minutes: minutes,
           planned_rest_minutes: rest,
@@ -542,13 +579,17 @@ export async function onRunningWorkText(ctx: Ctx, user: User, sessionId: string,
   })
   const parsed = await parseIntent(ctx.llm, { text, tasks, profile: user.profileText }, llmMeter(ctx, user.id, 'intent', session.id))
   const failure = parsed.failure && !parsed.failure.ok ? parsed.failure.reason : null
+  const exact = tasks.find((task) => normalizeWorkTitle(task.title) === normalizeWorkTitle(text)) ?? null
+  const proposed = parsed.result.taskId ? tasks.find((task) => task.id === parsed.result.taskId) ?? null : null
+  const matched = exact ?? (proposed && explicitlyReferencesTask(text, proposed.title) ? proposed : null)
+  const workTitle = intentDisplayTitle(text, parsed.result.title, matched)
 
   try {
     await ctx.db.$transaction(async (tx) => {
-      let taskId = parsed.result.taskId
+      let taskId = matched?.id ?? null
       let isNewTask = false
       if (taskId === null) {
-        const task = await tx.task.create({ data: { userId: user.id, title: parsed.result.title, createdAt: ctx.now() } })
+        const task = await tx.task.create({ data: { userId: user.id, title: workTitle, createdAt: ctx.now() } })
         taskId = task.id
         isNewTask = true
       }
@@ -560,7 +601,7 @@ export async function onRunningWorkText(ctx: Ctx, user: User, sessionId: string,
           intentText: session.intentText,
           taskId: session.taskId,
         },
-        data: { intentText: text, taskId, scope: parsed.result.scope },
+        data: { intentText: workTitle, taskId, scope: parsed.result.scope },
       })
       if (changed.count !== 1) throw new StaleTransition()
       if (taskId !== session.taskId) {
@@ -599,7 +640,7 @@ export async function onRunningWorkText(ctx: Ctx, user: User, sessionId: string,
     }
     throw error
   }
-  await reply(ctx, user, T.runningWorkUpdated(text), runningEditKeyboard(session.id))
+  await reply(ctx, user, T.runningWorkUpdated(workTitle), runningEditKeyboard(session.id))
 }
 
 export async function onRunningDurationText(ctx: Ctx, user: User, sessionId: string, text: string): Promise<void> {
@@ -891,6 +932,7 @@ async function finalizeReport(
     llmMeter(ctx, user.id, 'report', session.id),
   )
   const failure = parsed.failure && !parsed.failure.ok ? parsed.failure.reason : null
+  const continuationRelevant = !options.endDay && parsed.result.continueNow && (await activeSession(ctx, user.id)) === null
   let stuckTask: string | null = null
   let allocatedMinutes: number | null = null
   let allocationInvalid = false
@@ -908,14 +950,21 @@ async function finalizeReport(
     allocationInvalid = true
   }
 
-  await ctx.db.$transaction(async (tx) => {
+  const reportApplied = await ctx.db.$transaction(async (tx) => {
     const res = await tx.focusSession.updateMany({
       where: { id: session.id, userId: user.id, progress: null, ...(options.endDay ? { restChoice: null } : {}) },
-      data: { progress: parsed.result.progress, ...(options.endDay ? { restChoice: 'day_end' } : {}) },
+      data: {
+        progress: parsed.result.progress,
+        continueSuggested: continuationRelevant,
+        ...(options.endDay ? { restChoice: 'day_end' } : {}),
+      },
     })
-    if (res.count !== 1) return
+    if (res.count !== 1) return false
     if (text === null) await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
     await logEvent(tx, user.id, 'report_parsed', { session_id: session.id, llm_used: parsed.result.llmUsed, progress: parsed.result.progress }, { at: now, sessionId: session.id })
+    if (continuationRelevant) {
+      await logEvent(tx, user.id, 'route_suggested', { kind: 'continue' }, { at: now, sessionId: session.id })
+    }
     if (options.endDay) {
       await logEvent(tx, user.id, 'rest_chosen', { session_id: session.id, choice: 'day_end', rest_minutes: 0 }, { at: now, sessionId: session.id })
     }
@@ -990,21 +1039,40 @@ async function finalizeReport(
         }
       }
     }
+    return true
   })
+
+  if (!reportApplied) {
+    await logEvent(ctx.db, user.id, 'route_stale', { stage: 'report' }, { at: ctx.now(), sessionId: session.id })
+    await reply(ctx, user, T.stale)
+    return
+  }
+
+  const activeAfterReport = await activeSession(ctx, user.id)
+  if (activeAfterReport) {
+    if (continuationRelevant) {
+      await ctx.db.focusSession.updateMany({
+        where: { id: session.id, userId: user.id, continueSuggested: true, restChoice: null },
+        data: { continueSuggested: false },
+      })
+    }
+    await logEvent(ctx.db, user.id, 'route_stale', { stage: 'report' }, { at: ctx.now(), sessionId: session.id })
+    return
+  }
 
   if (stuckTask) await reply(ctx, user, T.stuck(stuckTask))
   if (allocationInvalid) await reply(ctx, user, T.timeAllocationInvalid)
   else if (allocatedMinutes !== null) await reply(ctx, user, T.timeAllocated(allocatedMinutes))
-  if (!options.endDay) await askRest(ctx, user, session)
+  if (!options.endDay) await askRest(ctx, user, session, { continueSuggested: continuationRelevant })
 }
 
 // После нескольких сессий бот сам замечает рисунок и предлагает технику одной
 // репликой. Решает код по истории, а не модель; предлагает один раз.
 export const SUGGEST_AFTER_COUNTED = 3
 
-async function maybeSuggestTechnique(ctx: Ctx, user: User): Promise<void> {
+async function maybeSuggestTechnique(ctx: Ctx, user: User): Promise<string | null> {
   const fresh = await ctx.db.user.findUniqueOrThrow({ where: { id: user.id } })
-  if (fresh.technique !== 'auto' || fresh.techniqueSuggestedAt || fresh.countedSessions < SUGGEST_AFTER_COUNTED) return
+  if (fresh.technique !== 'auto' || fresh.techniqueSuggestedAt || fresh.countedSessions < SUGGEST_AFTER_COUNTED) return null
   const history = await ctx.db.focusSession.findMany({
     where: { userId: user.id, state: { in: ['finished', 'abandoned'] } },
     orderBy: { createdAt: 'desc' },
@@ -1014,18 +1082,20 @@ async function maybeSuggestTechnique(ctx: Ctx, user: User): Promise<void> {
   const extends3 = history.length === 3 && history.every((s) => s.counted && (s.minutesAdjusted === 'up' || s.restChoice === 'continue'))
   const drops = history.slice(0, 3).filter((s) => s.state === 'abandoned' || s.minutesAdjusted === 'down').length >= 2
   const pick = extends3 ? 'long' : drops ? 'pomodoro' : null
-  if (!pick) return
+  if (!pick) return null
   const marked = await ctx.db.user.updateMany({ where: { id: user.id, techniqueSuggestedAt: null }, data: { techniqueSuggestedAt: ctx.now() } })
-  if (marked.count !== 1) return
-  await reply(ctx, user, pick === 'long' ? T.suggestLong : T.suggestShort, [
-    [{ text: T.tryIt, data: cb('tech', null, pick) }],
-    [{ text: T.keepAsIs, data: cb('tech', null, 'auto') }],
-  ])
+  if (marked.count !== 1) return null
+  return pick === 'long' ? T.suggestLongInline : T.suggestShortInline
 }
 
 // После отчёта отдых предлагается, а не назначается. Если ответа нет, через
 // время отдыха всё равно придёт «отдохнул?» — бот не замолкает.
-async function askRest(ctx: Ctx, user: User, session: FocusSession): Promise<void> {
+async function askRest(
+  ctx: Ctx,
+  user: User,
+  session: FocusSession,
+  options: { continueSuggested?: boolean } = {},
+): Promise<void> {
   const now = ctx.now()
   const rest = session.plannedRestMinutes ?? restFor(session.plannedMinutes)
   await enqueue(ctx.db, {
@@ -1035,6 +1105,23 @@ async function askRest(ctx: Ctx, user: User, session: FocusSession): Promise<voi
     sendAfter: new Date(now.getTime() + rest * MIN),
     payload: { sessionId: session.id },
   })
+  if (options.continueSuggested && session.taskId) {
+    const task = await ctx.db.task.findFirst({ where: { id: session.taskId, userId: user.id, status: 'active' }, select: { title: true } })
+    if (task) {
+      const label = Array.from(task.title).length > 32 ? `${Array.from(task.title).slice(0, 31).join('')}…` : task.title
+      await reply(ctx, user, T.continuePrompt(task.title, session.plannedMinutes), [
+        [{ text: T.continueSame(label, session.plannedMinutes), data: cb('again', session.id, 'same') }],
+        [
+          { text: T.continueClarify, data: cb('again', session.id, 'step') },
+          { text: T.continueChange, data: cb('again', session.id, 'change') },
+        ],
+        [{ text: T.restOk(rest), data: cb('rest', session.id, 'rest') }],
+        [{ text: T.restLater, data: cb('rest', session.id, 'later') }],
+        [{ text: T.dayEnd, data: cb('rest', session.id, 'day_end') }],
+      ])
+      return
+    }
+  }
   await reply(ctx, user, T.askRest(rest), [
     [{ text: T.restOk(rest), data: cb('rest', session.id, 'rest') }],
     [{ text: T.restContinue, data: cb('rest', session.id, 'continue') }],
@@ -1044,6 +1131,74 @@ async function askRest(ctx: Ctx, user: User, session: FocusSession): Promise<voi
 }
 
 export type RestChoice = 'rest' | 'continue' | 'later' | 'day_end'
+
+export type ContinueChoice = 'same' | 'step' | 'change'
+
+export async function onContinueChoice(
+  ctx: Ctx,
+  user: User,
+  sessionId: string,
+  choice: ContinueChoice,
+  next: { change: () => Promise<void> },
+): Promise<void> {
+  const session = await ownedSession(ctx, user.id, sessionId)
+  if (!session || session.state !== 'finished' || session.restChoice !== null || !session.continueSuggested) {
+    return reply(ctx, user, T.stale)
+  }
+  const task = session.taskId
+    ? await ctx.db.task.findFirst({ where: { id: session.taskId, userId: user.id, status: 'active' }, select: { id: true, title: true } })
+    : null
+  if ((choice === 'same' || choice === 'step') && !task) return reply(ctx, user, T.stale)
+  if (await activeSession(ctx, user.id)) return reply(ctx, user, T.stale)
+
+  const now = ctx.now()
+  let collectingId: string | null = null
+  try {
+    const claimed = await ctx.db.$transaction(async (tx) => {
+      const res = await tx.focusSession.updateMany({
+        where: { id: sessionId, userId: user.id, state: 'finished', restChoice: null, continueSuggested: true },
+        data: { restChoice: 'continue' },
+      })
+      if (res.count !== 1) return false
+      if (choice === 'same' || choice === 'step') {
+        const created = await tx.focusSession.create({
+          data: {
+            userId: user.id,
+            state: 'collecting_intent',
+            taskId: task!.id,
+            intentText: choice === 'same' ? task!.title : null,
+            scope: 'step',
+            plannedMinutes: session.plannedMinutes,
+            minutesSource: session.minutesSource,
+            plannedRestMinutes: session.plannedRestMinutes,
+            technique: session.technique,
+            createdAt: now,
+          },
+        })
+        collectingId = created.id
+      }
+      await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
+      await cancelPending(tx, { userId: user.id, idempotencyKey: `rest_over:${sessionId}` })
+      await logEvent(tx, user.id, 'rest_chosen', { session_id: sessionId, choice: 'continue', rest_minutes: 0 }, { at: now, sessionId })
+      await logEvent(
+        tx,
+        user.id,
+        'route_confirmed',
+        { kind: 'continue', choice: choice === 'same' ? 'same_task' : choice === 'step' ? 'clarify_step' : 'change_task' },
+        { at: now, sessionId },
+      )
+      return true
+    })
+    if (!claimed) return reply(ctx, user, T.stale)
+  } catch (error) {
+    if (isUniqueViolation(error)) return reply(ctx, user, T.stale)
+    throw error
+  }
+
+  if (choice === 'same') return startRunning(ctx, user, collectingId!)
+  if (choice === 'change') return next.change()
+  await reply(ctx, user, T.askContinue)
+}
 
 export async function onRest(
   ctx: Ctx,
@@ -1055,6 +1210,7 @@ export async function onRest(
   const now = ctx.now()
   const session = await ownedSession(ctx, user.id, sessionId)
   if (!session || session.state !== 'finished' || session.restChoice !== null) return reply(ctx, user, T.stale)
+  if (await activeSession(ctx, user.id)) return reply(ctx, user, T.stale)
   const rest = session.plannedRestMinutes ?? restFor(session.plannedMinutes)
 
   const ok = await ctx.db.$transaction(async (tx) => {
@@ -1065,6 +1221,13 @@ export async function onRest(
     if (res.count !== 1) return false
     await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
     await logEvent(tx, user.id, 'rest_chosen', { session_id: sessionId, choice, rest_minutes: choice === 'rest' ? rest : 0 }, { at: now, sessionId })
+    if (session.continueSuggested) {
+      if (choice === 'continue') {
+        await logEvent(tx, user.id, 'route_confirmed', { kind: 'continue', choice: 'clarify_step' }, { at: now, sessionId })
+      } else {
+        await logEvent(tx, user.id, 'route_rejected', { kind: 'continue', choice }, { at: now, sessionId })
+      }
+    }
     if (choice === 'rest') {
       // Отдых отсчитывается от выбора, а не от вопроса.
       await tx.outboxMessage.updateMany({
@@ -1078,10 +1241,13 @@ export async function onRest(
   })
   if (!ok) return reply(ctx, user, T.stale)
   // Рисунок сессий виден только после выбора: «сразу дальше» — часть сигнала.
-  await maybeSuggestTechnique(ctx, user)
+  const techniqueHint = choice === 'continue' || choice === 'rest' ? await maybeSuggestTechnique(ctx, user) : null
 
-  if (choice === 'rest') return reply(ctx, user, T.restStarted(hhmm(new Date(now.getTime() + rest * MIN), user.timezone)))
-  if (choice === 'continue') return askIntent(ctx, user, { continue: true })
+  if (choice === 'rest') {
+    const message = T.restStarted(hhmm(new Date(now.getTime() + rest * MIN), user.timezone))
+    return reply(ctx, user, techniqueHint ? `${techniqueHint}\n${message}` : message)
+  }
+  if (choice === 'continue') return askIntent(ctx, user, { continue: true, ...(techniqueHint ? { prefix: techniqueHint } : {}) })
   if (choice === 'later') return next.later()
   return next.dayEnd()
 }

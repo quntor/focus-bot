@@ -255,6 +255,13 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
           })
         }
         break
+      case 'again':
+        if (id && (arg === 'same' || arg === 'step' || arg === 'change')) {
+          return await session.onContinueChoice(ctx, user, id, arg, {
+            change: () => tasks.showTasks(ctx, user, 0, T.tasksChoose),
+          })
+        }
+        break
       case 'meet':
         if (arg) return await day.onMeet(ctx, user, arg)
         break

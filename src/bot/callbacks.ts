@@ -15,6 +15,7 @@ export const ACTIONS = [
   'out', // исход: done | not_done | other
   'skiprep', // пропустить отчёт
   'rest', // rest | continue | later | day_end
+  'again', // подтверждённое продолжение после отчёта: same | step | change
   'meet', // h1 | h2 | evening | custom | morning
   'mtg', // ответ на напоминание: postpone | day_end
   'dec', // pause | stuck

@@ -143,7 +143,7 @@ export const T = {
   runningWorkUpdated: (intent: string) => `Работу изменил на «${intent.replace(/\s+/g, ' ').trim().slice(0, 80)}». Таймер продолжается.`,
   runningDurationUpdated: (minutes: number, end: string) =>
     `Длительность изменил: ${minutesText(minutes)}. Новое время окончания — ${end}.`,
-  cancelled: 'Отменил. Напиши, когда будет удобно.',
+  cancelled: 'Старт отменил. Новую задачу не сохранял.',
   alreadyRunning: (end: string | null) =>
     end ? `Сессия идёт до ${end}. Закончить раньше — /done, бросить — /stop.` : 'Сессия идёт. Закончить — /done, бросить — /stop.',
   sessionHelpContinue: 'Продолжаем. Вернись к текущему маленькому шагу.',
@@ -180,7 +180,20 @@ export const T = {
   // --- Отдых: спрашиваем, а не назначаем.
   askRest: (rest: number) => `Записал. Отдохнёшь ${rest} минут?`,
   restOk: (rest: number) => `Отдохну ${rest}`,
-  restContinue: 'Ещё поработаем',
+  restContinue: 'Уточнить следующий шаг',
+  continuePrompt: (task: string, minutes: number | null) =>
+    `Понял, хочешь продолжить «${task}» сейчас. Таймер ещё не запущен.${minutes === null ? '' : ` Можно сделать ещё ${minutes} минут.`}`,
+  continueSame: (task: string, minutes: number | null) =>
+    minutes === null ? `▶ Продолжить «${task}»` : `▶ Ещё ${minutes} мин — ${task}`,
+  continueClarify: 'Уточнить следующий шаг',
+  continueChange: 'Сменить задачу',
+  collectingFeedback: (hasIntent: boolean) =>
+    hasIntent
+      ? 'Таймер ещё не запущен: я жду подтверждения длительности. Нажми «Ок» или измени её.'
+      : 'Таймер ещё не запущен. Напиши, с чего начнёшь, или нажми «Начать сессию».',
+  runningFeedback: 'Сессия уже идёт. Чтобы изменить работу, нажми «Изменить работу»; закончить — /done.',
+  pausedFeedback: 'Сейчас перерыв. Выбери «Вернуться к работе» или «Начать новую сессию».',
+  idleFeedback: 'Сессия сейчас не идёт. Нажми «Начать сессию» или напиши, с чего начнёшь.',
   restLater: 'Вернусь позже',
   dayEnd: 'На сегодня всё',
   restStarted: (end: string) => `Отдыхай. Напишу в ${end}.`,
@@ -290,6 +303,8 @@ export const T = {
   saved: 'Сохранил.',
   suggestLong: 'Ты стабильно просишь продлить — похоже, тебе подходят длинные блоки: 90 минут работы и 20 отдыха. Попробуем так?',
   suggestShort: 'Давай короче: 25 минут работы и 5 отдыха — легче начать. Попробуем?',
+  suggestLongInline: 'Ты стабильно просишь продлить — похоже, тебе подходят длинные блоки. Учту это в следующем предложении.',
+  suggestShortInline: 'Последние заходы давались тяжело — учту это и предложу следующий блок короче.',
   tryIt: 'Попробуем',
   keepAsIs: 'Оставить как есть',
   askMorning: 'Во сколько писать утром? Например, 9:30.',
