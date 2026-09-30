@@ -31,7 +31,7 @@ const SYSTEM = [
   'complete_and_rest: человек одновременно сообщает, что задача готова, и уходит отдыхать. task_title — короткое название явно названной готовой задачи; если это active_tasks/current_work, верни её каноническое название; null только если она явно текущая.',
   'Если phase=deadline_passed, finished_early запрещён: срок уже прошёл.',
   'Для distracted выбери action continue или change_step; для stuck — change_step или continue; для finished_early — finish; для question — continue или change_step; для other — null.',
-  'reply: для первых четырёх 1–2 коротких предложения на русском, не больше 160 символов. Дай конкретный следующий ход по current_work, если это следует из входа.',
+  'reply: для первых четырёх 1–2 коротких предложения на русском, не больше 160 символов, на «ты» и без грамматического рода. Дай конкретный следующий ход по current_work, если это следует из входа.',
   'Не обещай изменение данных. Не утверждай, что действие уже выполнено. Не давай медицинских, юридических или опасных советов. Для other reply=null.',
   'Ответ — только JSON: {"kind":"distracted|stuck|finished_early|question|pause|complete_and_rest|other","reply":"строка или null","action":"continue|change_step|finish|null","task_title":"строка или null"}.',
 ].join('\n')

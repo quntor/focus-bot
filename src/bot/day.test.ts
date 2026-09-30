@@ -133,4 +133,17 @@ describe.skipIf(!hasDb)('/delete_me', () => {
     expect(explicitMeetingAt('начну завтра в семь вечера', moscow, now)?.toISOString()).toBe('2026-10-02T16:00:00.000Z')
     expect(explicitMeetingAt('завтра в 7 вечера', moscow, now)?.toISOString()).toBe('2026-10-02T16:00:00.000Z')
   })
+
+  it('«Позже» у вопроса о цели — не отказ и не напоминание через полчаса', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    const pendingBefore = await prisma.outboxMessage.findMany({ where: { kind: 'meeting', status: 'pending' }, select: { id: true } })
+
+    await bot.text(A, '/goal')
+    await bot.press(A, bot.lastButton(A, 'goal:', ':later'))
+
+    expect(bot.lastText(A)).toContain('/goal')
+    expect(await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })).toMatchObject({ declinesInRow: 0 })
+    expect(await prisma.outboxMessage.findMany({ where: { kind: 'meeting', status: 'pending' }, select: { id: true } })).toEqual(pendingBefore)
+  })
 })

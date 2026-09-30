@@ -52,7 +52,7 @@ export async function resumeOnboarding(ctx: Ctx, user: User): Promise<void> {
   await beginOnboarding(ctx, user)
 }
 
-async function isOnboarding(ctx: Ctx, userId: string): Promise<boolean> {
+export async function isOnboarding(ctx: Ctx, userId: string): Promise<boolean> {
   return (await ctx.db.focusSession.count({ where: { userId } })) === 0
 }
 

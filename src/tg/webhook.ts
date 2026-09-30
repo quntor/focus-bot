@@ -263,7 +263,13 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
   const { action, id, arg } = parsed
 
   if (action === 'del' && arg === 'confirm') return account.onDeleteConfirm(ctx, user)
-  if (action === 'consent') return account.beginOnboarding(ctx, user)
+  // Старая кнопка согласия продолжает только незаконченное знакомство: у
+  // прошедшего его она иначе начинала бы всё заново.
+  if (action === 'consent') {
+    if (ONBOARDING_INPUTS.includes(user.pendingInput)) return account.resumeOnboarding(ctx, user)
+    if (await account.isOnboarding(ctx, user.id)) return account.beginOnboarding(ctx, user)
+    return reply(ctx, user, T.stale)
+  }
 
   try {
     switch (action) {

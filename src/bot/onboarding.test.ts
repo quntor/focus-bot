@@ -121,4 +121,14 @@ describe.skipIf(!hasDb)('онбординг нового пользовател�
     expect(bot.lastText(A)).toContain('Как быстрее подстроить меня')
     expect(bot.lastText(A)).toContain('/delete_me')
   })
+
+  it('старая кнопка согласия не перезапускает пройденное знакомство', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+
+    await bot.press(A, 'consent::')
+
+    expect(bot.lastText(A)).toBe('Это уже неактуально.')
+    expect(await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })).toMatchObject({ pendingInput: 'none' })
+  })
 })

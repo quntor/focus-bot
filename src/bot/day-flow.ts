@@ -561,12 +561,15 @@ export async function onDecline(ctx: Ctx, user: User, arg: string): Promise<void
 export function goalKeyboard(): Keyboard {
   return [
     [1, 2, 3, 4, 5].map((n) => ({ text: String(n), data: cb('goal', null, String(n)) })),
-    [{ text: T.later, data: cb('mtg', null, 'postpone') }],
+    [{ text: T.later, data: cb('goal', null, 'later') }],
   ]
 }
 
 export async function onGoal(ctx: Ctx, user: User, arg: string): Promise<void> {
   const now = ctx.now()
+  // «Позже» у вопроса о цели — просто «не сейчас»: не отказ от работы и не
+  // повод напомнить через полчаса.
+  if (arg === 'later') return reply(ctx, user, T.goalLater)
   const target = Number(arg)
   if (!Number.isInteger(target) || target < 1 || target > 20) return reply(ctx, user, T.stale)
   const day = workDayKey(now, user.timezone)
