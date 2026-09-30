@@ -552,7 +552,7 @@ async function handleIntent(ctx: Ctx, user: User, session: FocusSession, text: s
   let title = text.slice(0, 80)
   let scope: 'step' | 'multi_session' = (session.scope as 'step' | 'multi_session' | null) ?? 'step'
   let llmUsed = false
-  let failure: 'disabled' | 'error' | 'timeout' | 'invalid' | null = null
+  let failure: 'disabled' | 'budget' | 'error' | 'timeout' | 'invalid' | null = null
 
   if (!refining) {
     // В промт уходят задачи только этого пользователя — выборка по userId.

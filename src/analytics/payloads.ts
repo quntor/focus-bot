@@ -21,7 +21,7 @@ export const REST_CHOICES = ['rest', 'continue', 'later', 'day_end'] as const
 export const SCOPES = ['step', 'multi_session'] as const
 export const POINT_REASONS = ['session_completed', 'daily_goal', 'comeback'] as const
 export const LLM_STAGES = ['intent', 'report', 'tasks', 'session_help', 'breakdown'] as const
-export const LLM_FALLBACK_REASONS = ['disabled', 'error', 'timeout', 'invalid'] as const
+export const LLM_FALLBACK_REASONS = ['disabled', 'budget', 'error', 'timeout', 'invalid'] as const
 export const OUTBOX_KINDS = ['ping', 'session_end', 'rest_over', 'break_over', 'meeting', 'summary'] as const
 export const SETTINGS_KEYS = [
   'technique',
@@ -120,6 +120,8 @@ export const PAYLOADS = {
   // и после ответа неясно, бот просит одно действие на 10 минут.
   task_breakdown_vague: z.strictObject({ task_id: id, round: z.union([z.literal(1), z.literal(2)]) }),
   llm_fallback: z.strictObject({ stage: z.enum(LLM_STAGES), reason: z.enum(LLM_FALLBACK_REASONS) }),
+  // Дневной лимит вызовов модели исчерпан; пишется раз в сутки на пользователя.
+  llm_budget_exceeded: z.strictObject({ limit: z.int().min(1) }),
   task_stuck_detected: z.strictObject({ task_id: id, sessions_without_progress: z.int().min(0) }),
   rest_chosen: z.strictObject({ session_id: id, choice: z.enum(REST_CHOICES), rest_minutes: minutes }),
   rest_over_sent: z.strictObject({ session_id: id }),

@@ -799,7 +799,7 @@ export async function onTaskMessage(
     await logEvent(ctx.db, user.id, 'llm_fallback', { stage: 'tasks', reason }, { at: ctx.now(), sessionId: current?.id })
     // В сборке без LLM сохраняем базовый текстовый старт сессии. Ошибка
     // включённой модели не даёт частичных операций: просим повторить.
-    if (reason === 'disabled') return 'session_intent'
+    if (reason === 'disabled' || reason === 'budget') return 'session_intent'
     await reply(ctx, user, T.tasksParseFailed)
     return 'handled'
   }
@@ -865,6 +865,9 @@ export async function transcribeVoice(
   if (voice.file_size !== undefined && voice.file_size > MAX_VOICE_BYTES) { await reply(ctx, user, T.voiceTooLarge); return null }
   if (!ctx.stt.enabled) { await reply(ctx, user, T.voiceDisabled); return null }
   if (!allowVoice(user.tgId, ctx.now())) { await reply(ctx, user, T.voiceRateLimited); return null }
+  const meter = llmMeter(ctx, user.id, 'voice_transcription', null)
+  // Голос без модели не разобрать: сверх дневного лимита — просим текст.
+  if (meter.allow && !(await meter.allow())) { await reply(ctx, user, T.voiceBudget); return null }
 
   let audio: Uint8Array
   try {
@@ -875,7 +878,6 @@ export async function transcribeVoice(
     return null
   }
 
-  const meter = llmMeter(ctx, user.id, 'voice_transcription', null)
   const startedAt = performance.now()
   let transcript: string
   try {

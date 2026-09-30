@@ -3,6 +3,7 @@ import { hasDb, prisma, resetDb } from '../test/db.js'
 import { makeBot } from '../test/bot.js'
 import { LlmCallError, type LlmProvider, type LlmReply, type LlmRequest } from '../llm/provider.js'
 import { logEvent } from './log.js'
+import { LLM_CALLS_PER_DAY } from './calls.js'
 
 const A = 7001
 
@@ -132,5 +133,40 @@ describe.skipIf(!hasDb)('зачётное представление', () => {
       // a и b; у a два успешных вызова модели и одна фоновая задача.
       ['2026-11-02', 2, 2, 2, 1, 4, 5],
     ])
+  })
+
+  it('сверх дневного лимита модель не зовётся: бот на шаблонах, событие — раз в сутки', async () => {
+    let calls = 0
+    const bot = makeBot({
+      llm: provider(async (req) => {
+        calls += 1
+        return happyReply(req)
+      }),
+      stt: { enabled: true, model: 'test-stt', async transcribe() { return 'план главы' } },
+    })
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    await prisma.componentCall.createMany({
+      data: Array.from({ length: LLM_CALLS_PER_DAY }, () => ({
+        subjectId: user.subjectId, component: 'llm', name: 'tasks', skill: 'tasks', model: 'test-model',
+        status: 'ok', latencyMs: 1, createdAt: new Date(bot.now().getTime() - 60 * 60_000),
+      })),
+    })
+
+    await bot.text(A, 'набросать план главы, 30 минут')
+    await bot.text(A, 'застрял')
+    bot.tg.downloads.set('v', new Uint8Array([1]))
+    await bot.voice(A, { fileId: 'v', duration: 3, mimeType: 'audio/ogg', fileSize: 1 })
+
+    expect(calls).toBe(0)
+    expect(await prisma.componentCall.count()).toBe(LLM_CALLS_PER_DAY)
+    expect(await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id } })).toMatchObject({ state: 'running' })
+    expect(await prisma.event.count({ where: { type: 'llm_budget_exceeded' } })).toBe(1)
+    expect(bot.lastText(A)).toContain('напиши текстом')
+
+    // Через сутки лимит снова свободен.
+    bot.advance(24 * 60)
+    await bot.text(A, 'застрял')
+    expect(calls).toBeGreaterThan(0)
   })
 })

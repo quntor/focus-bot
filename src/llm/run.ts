@@ -1,7 +1,9 @@
 import type { z } from 'zod'
 import { LlmCallError, type LlmProvider, type LlmReply, type LlmRequest } from './provider.js'
 
-export type LlmOutcome<T> = { ok: true; value: T } | { ok: false; reason: 'disabled' | 'error' | 'timeout' | 'invalid' }
+// budget — дневной лимит вызовов пользователя исчерпан: для вызывающего это то
+// же, что выключенная модель, — детерминированный путь.
+export type LlmOutcome<T> = { ok: true; value: T } | { ok: false; reason: 'disabled' | 'budget' | 'error' | 'timeout' | 'invalid' }
 
 // Замер одного реального вызова модели — для журнала вызовов компонентов
 // (Положение, Прил. 2, п. 2.2: зачётное «обращение» — вызов решением своих
@@ -16,7 +18,9 @@ export type CallMeta = {
 }
 
 // Куда отдать замер. Вызывающий знает пользователя и касание, run.ts — нет.
-export type CallMeter = (meta: CallMeta) => Promise<void>
+// allow — можно ли сделать вызов (дневной лимит пользователя); спрашивается до
+// вызова, и несделанный вызов в журнал не попадает.
+export type CallMeter = ((meta: CallMeta) => Promise<void>) & { allow?: () => Promise<boolean> }
 
 // Вызов модели со строгой проверкой ответа. Любое отклонение от схемы — отказ,
 // а не попытка «понять, что она имела в виду»: вызывающий уходит на
@@ -31,6 +35,7 @@ export async function runLlm<T>(
   meter?: CallMeter,
 ): Promise<LlmOutcome<T>> {
   if (!provider.enabled) return { ok: false, reason: 'disabled' }
+  if (meter?.allow && !(await meter.allow())) return { ok: false, reason: 'budget' }
   const t0 = performance.now()
   const measure = async (status: CallMeta['status'], errorCode: string | null, usage: LlmReply['usage']) => {
     if (!meter) return
