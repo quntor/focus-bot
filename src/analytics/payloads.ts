@@ -90,13 +90,13 @@ export const PAYLOADS = {
   session_stopped: z.strictObject({ session_id: id, elapsed_minutes: minutes }),
   session_abandoned: z.strictObject({ session_id: id, reason: z.enum(['timeout', 'no_ping']) }),
   // Сессия засчитана без исхода: нет ответа на «Время вышло», пропущены
-  // проверки, из перерыва начата новая или перерыв затянулся на часы. Бросает
-  // сессию только /stop.
+  // проверки, из перерыва начата новая, перерыв затянулся на часы или день
+  // закрыт посреди сессии. Бросает сессию только /stop.
   session_auto_finished: z.strictObject({
     session_id: id,
     elapsed_minutes: minutes,
     counted: z.boolean(),
-    reason: z.enum(['timeout', 'no_ping', 'new_session', 'break_timeout']),
+    reason: z.enum(['timeout', 'no_ping', 'new_session', 'break_timeout', 'day_end']),
   }),
   report_submitted: z.strictObject({ session_id: id, length_chars: z.int().min(0) }),
   report_parsed: z.strictObject({ session_id: id, llm_used: z.boolean(), progress: z.enum(['moved', 'stuck']).nullable() }),

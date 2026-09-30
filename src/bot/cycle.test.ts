@@ -226,7 +226,9 @@ describe.skipIf(!hasDb)('полный цикл сессии', () => {
 
     expect(await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id } })).toMatchObject({
       state: 'finished',
-      outcome: 'not_done',
+      // Исхода человек не называл — «пока не готово» не выдумываем.
+      outcome: null,
+      counted: true,
       restChoice: 'day_end',
       finishedAt: bot.now(),
     })

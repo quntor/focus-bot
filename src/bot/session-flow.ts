@@ -97,12 +97,14 @@ export function activeElapsedMinutes(session: FocusSession, now: Date): number {
   return Math.floor(activeElapsedMs(session, now) / MIN)
 }
 
-export type AutoFinishReason = 'timeout' | 'no_ping' | 'new_session' | 'break_timeout'
+export type AutoFinishReason = 'timeout' | 'no_ping' | 'new_session' | 'break_timeout' | 'day_end'
 
 // Засчитать сессию без исхода: человек не ответил на «Время вышло», пропустил
-// проверки в свободном режиме или из перерыва начал новую. Отработанное
-// время — до `until` (плановый конец, последняя проверка, начало перерыва),
-// но не дольше фактического. Бросает сессию только /stop.
+// проверки в свободном режиме, из перерыва начал новую, забыл перерыв или
+// закрыл день. Отработанное время — до `until` (плановый конец, последняя
+// проверка, начало перерыва), но не дольше фактического. Сессия и кончается в
+// этот момент: иначе итог дня показал бы по задаче больше, чем засчитано.
+// Бросает сессию только /stop.
 export async function autoFinish(
   tx: Prisma.TransactionClient,
   user: User,
@@ -115,10 +117,10 @@ export async function autoFinish(
   const end = until < now ? until : now
   const elapsed = Math.floor(activeElapsedMs(session, end) / MIN)
   const counted = isCounted('finished', elapsed)
-  const openPauseSeconds = session.state === 'paused' && session.pausedAt ? Math.floor(Math.max(0, now.getTime() - session.pausedAt.getTime()) / 1000) : 0
+  const openPauseSeconds = session.state === 'paused' && session.pausedAt ? Math.floor(Math.max(0, end.getTime() - session.pausedAt.getTime()) / 1000) : 0
   await transition(tx, { sessionId: session.id, userId: user.id }, session.state, 'finished', {
     outcome: null,
-    finishedAt: now,
+    finishedAt: end,
     counted,
     pausedAt: null,
     pausedSeconds: session.pausedSeconds + openPauseSeconds,

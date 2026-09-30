@@ -134,6 +134,21 @@ describe.skipIf(!hasDb)('конец сессии', () => {
     ])
   })
 
+  it('/today посреди сессии: без исхода, время — до планового конца, и в итоге столько же', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    await bot.text(A, 'глава, 25 минут')
+    const s = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+    bot.advance(50)
+
+    await bot.text(A, '/today')
+
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: s.id } })).toMatchObject({ state: 'finished', outcome: null, counted: true, restChoice: 'day_end' })
+    const summary = bot.textsTo(A).find((text) => text.includes('По задачам:'))
+    expect(summary).toContain('• глава, 25 минут — 25 минут')
+    expect(summary).not.toContain('пока не готово')
+  })
+
   it('«✅ Завершить» на перерыве закрывает задачу, но не сессию', async () => {
     const bot = makeBot()
     await bot.onboard(A)

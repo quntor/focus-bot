@@ -104,7 +104,7 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
     bot.advance(10)
     await bot.press(A, bot.lastButton(A, 'run:', ':duration'))
     await bot.text(A, '5 минут')
-    expect(bot.lastText(A)).toContain('Уже прошло 10 минут')
+    expect(bot.lastText(A)).toContain('уже прошло 10 минут')
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: started.id } })).toMatchObject({ plannedMinutes: 40 })
 
     await bot.text(A, '50 минут')

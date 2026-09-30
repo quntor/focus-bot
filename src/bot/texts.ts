@@ -188,10 +188,11 @@ export const T = {
   changeRunningWork: 'Изменить работу',
   changeRunningDuration: 'Изменить длительность',
   askRunningWork: 'Что меняем в текущей работе? Напиши новую формулировку.',
-  askRunningDuration: 'Сколько должна длиться вся сессия? Напиши, например: 25 минут.',
+  // Меняется текущий рабочий период: после перерыва начинается новый полный.
+  askRunningDuration: 'Сколько должен длиться текущий рабочий период? Напиши, например: 25 минут.',
   badRunningDuration: 'Не понял длительность. Напиши, например: 25 минут или 1 час.',
   runningDurationTooShort: (elapsed: number) =>
-    `Уже прошло ${elapsed} ${plural(elapsed, 'минута', 'минуты', 'минут')}. Укажи общую длительность больше.`,
+    `В этом периоде уже прошло ${elapsed} ${plural(elapsed, 'минута', 'минуты', 'минут')}. Укажи длительность больше.`,
   runningWorkUpdated: (intent: string) => `Работу изменил на «${intent.replace(/\s+/g, ' ').trim().slice(0, 80)}». Таймер продолжается.`,
   runningDurationUpdated: (minutes: number, end: string) =>
     `Длительность изменил: ${minutesText(minutes)}. Новое время окончания — ${end}.`,

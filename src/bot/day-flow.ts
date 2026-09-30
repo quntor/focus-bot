@@ -3,12 +3,11 @@ import { logEvent } from '../analytics/log.js'
 import { addDays, dayKey, daysBetween, weekStart, WORK_DAY_START_HOUR, workDayKey } from '../lib/day.js'
 import { localDateTime, nextLocalTime, parseClock } from '../lib/time.js'
 import { cancelPending, enqueue } from '../outbox/queue.js'
-import { creditCountedSession } from '../retention/credit.js'
-import { DAYS_OFF_PER_WEEK, isCounted } from '../retention/rules.js'
+import { DAYS_OFF_PER_WEEK } from '../retention/rules.js'
 import { transition } from '../session/fsm.js'
 import { cb } from './callbacks.js'
 import { reply, type Ctx } from './context.js'
-import { activeSession, askIntent, openCollecting } from './session-flow.js'
+import { activeSession, askIntent, autoFinish, openCollecting } from './session-flow.js'
 import { buildTaskStartPrompt } from './tasks.js'
 import { T, hhmm, type DaySummary } from './texts.js'
 import type { Keyboard } from '../tg/client.js'
@@ -340,42 +339,11 @@ export async function closeDay(
       await transition(tx, { sessionId: active.id, userId: user.id }, 'collecting_intent', 'cancelled', { finishedAt: now })
       await logEvent(tx, user.id, 'session_cancelled', {}, { at: now, sessionId: active.id })
     } else if (active?.state === 'running' || active?.state === 'paused') {
-      const openPauseSeconds =
-        active.state === 'paused' && active.pausedAt
-          ? Math.floor(Math.max(0, now.getTime() - active.pausedAt.getTime()) / 1000)
-          : 0
-      const elapsed = active.startedAt
-        ? Math.floor(Math.max(0, now.getTime() - active.startedAt.getTime() - (active.pausedSeconds + openPauseSeconds) * 1000) / MIN)
-        : 0
-      const counted = isCounted('finished', elapsed)
-      const early = active.plannedEndAt !== null && now < active.plannedEndAt
-      await transition(tx, { sessionId: active.id, userId: user.id }, active.state, 'finished', {
-        outcome: 'not_done',
-        pausedAt: null,
-        pausedSeconds: active.pausedSeconds + openPauseSeconds,
-        finishedAt: now,
-        counted,
-        restChoice: 'day_end',
-      })
-      await tx.outboxMessage.updateMany({
-        where: {
-          userId: user.id,
-          status: { in: ['pending', 'paused'] },
-          OR: [
-            { idempotencyKey: { startsWith: `ping:${active.id}` } },
-            { idempotencyKey: { startsWith: `session_end:${active.id}` } },
-          ],
-        },
-        data: { status: 'canceled' },
-      })
-      await logEvent(
-        tx,
-        user.id,
-        'session_completed',
-        { session_id: active.id, outcome: 'not_done', elapsed_minutes: elapsed, early, counted },
-        { at: now, sessionId: active.id },
-      )
-      if (counted) await creditCountedSession(tx, { userId: user.id, sessionId: active.id, dayKey: day, at: now })
+      // Идущая сессия закрывается без исхода: человек его не называл, а «пока
+      // не готово» портило бы сводку и память по задаче. Время — до планового
+      // конца, как у таймаута.
+      await autoFinish(tx, user, active, active.plannedEndAt ?? now, now, 'day_end')
+      await tx.focusSession.updateMany({ where: { id: active.id, userId: user.id }, data: { restChoice: 'day_end' } })
     }
     await tx.dailyGoal.upsert({
       where: { userId_dayKey: { userId: user.id, dayKey: day } },
