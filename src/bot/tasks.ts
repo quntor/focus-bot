@@ -1,7 +1,7 @@
 import type { User } from '@prisma/client'
 import { llmMeter } from '../analytics/calls.js'
 import { logEvent } from '../analytics/log.js'
-import { dayKey } from '../lib/day.js'
+import { workDayKey } from '../lib/day.js'
 import { breakDownTask, splitLines, splitManualSteps } from '../llm/breakdown.js'
 import { parseIntent } from '../llm/intent.js'
 import { parseTaskMessage } from '../llm/tasks.js'
@@ -592,7 +592,7 @@ async function completeTask(
           { at: now, sessionId: current.id },
         )
         if (counted) {
-          await creditCountedSession(tx, { userId: user.id, sessionId: current.id, dayKey: dayKey(now, user.timezone), at: now })
+          await creditCountedSession(tx, { userId: user.id, sessionId: current.id, dayKey: workDayKey(now, user.timezone), at: now })
         }
       }
 

@@ -12,6 +12,16 @@ export function dayKey(at: Date, timezone: string): string {
   return parts
 }
 
+// Рабочие сутки продукта кончаются в 4:00 по местному времени, а не в полночь:
+// сессия 23:30–00:15 и /today в 00:30 относятся ко вчерашнему дню, и серия
+// не теряет его. Для серии, цели, итога дня и выходных — только этот ключ.
+// Журнал событий и учёт конкурса (сутки по МСК) считают календарные сутки.
+export const WORK_DAY_START_HOUR = 4
+
+export function workDayKey(at: Date, timezone: string): string {
+  return dayKey(new Date(at.getTime() - WORK_DAY_START_HOUR * 60 * 60_000), timezone)
+}
+
 // Расстояние в днях между двумя ключами. Серия растёт при 1, держится при 0,
 // рвётся при большем — с поправкой на заморозку, которая живёт в src/retention.
 export function daysBetween(from: string, to: string): number {

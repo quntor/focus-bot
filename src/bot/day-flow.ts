@@ -1,6 +1,6 @@
 import type { Prisma, User } from '@prisma/client'
 import { logEvent } from '../analytics/log.js'
-import { addDays, dayKey, daysBetween, weekStart } from '../lib/day.js'
+import { addDays, dayKey, daysBetween, weekStart, workDayKey } from '../lib/day.js'
 import { nextLocalTime, parseClock } from '../lib/time.js'
 import { cancelPending, enqueue } from '../outbox/queue.js'
 import { creditCountedSession } from '../retention/credit.js'
@@ -37,7 +37,7 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
       task: { select: { id: true, title: true } },
     },
   })
-  const today = sessions.filter((s) => s.finishedAt && dayKey(s.finishedAt, user.timezone) === day)
+  const today = sessions.filter((s) => s.finishedAt && workDayKey(s.finishedAt, user.timezone) === day)
   const finished = today.filter((s) => s.state === 'finished')
   const durationByTask = new Map<string, number>()
   const sessionIds = today.map((session) => session.id)
@@ -208,7 +208,7 @@ function nextMeetingKeyboard(user: User): Keyboard {
 // одного в календарную неделю. Встреча переносится на послезавтра утром.
 export async function planDayOff(ctx: Ctx, user: User): Promise<void> {
   const now = ctx.now()
-  const tomorrow = addDays(dayKey(now, user.timezone), 1)
+  const tomorrow = addDays(workDayKey(now, user.timezone), 1)
   const week = weekStart(tomorrow)
   // Послезавтра утром: начало завтрашних суток, затем начало следующих.
   const startTomorrow = nextLocalTime(user.timezone, { h: 0, m: 0 }, now)
@@ -279,7 +279,7 @@ export async function putDefaultMeeting(tx: Prisma.TransactionClient, user: User
 export async function nextMorning(tx: Prisma.TransactionClient, user: User, after: Date): Promise<Date> {
   let at = nextLocalTime(user.timezone, morningClock(user), after)
   for (let i = 0; i < 7; i++) {
-    const off = await tx.dayOff.findFirst({ where: { userId: user.id, dayKey: dayKey(at, user.timezone) }, select: { id: true } })
+    const off = await tx.dayOff.findFirst({ where: { userId: user.id, dayKey: workDayKey(at, user.timezone) }, select: { id: true } })
     if (!off) return at
     at = nextLocalTime(user.timezone, morningClock(user), at)
   }
@@ -317,7 +317,7 @@ export async function closeDay(
   options: { meetingAt?: Date } = {},
 ): Promise<void> {
   const now = ctx.now()
-  const day = dayKey(now, user.timezone)
+  const day = workDayKey(now, user.timezone)
   const summary = await ctx.db.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'day:' + user.id}))`
     const active = await tx.focusSession.findFirst({
@@ -390,7 +390,7 @@ export async function closeDay(
     return buildSummary(tx, user, day)
   })
   if (options.meetingAt) {
-    const which = dayKey(options.meetingAt, user.timezone) === day ? 'today' : 'tomorrow'
+    const which = workDayKey(options.meetingAt, user.timezone) === day ? 'today' : 'tomorrow'
     await reply(ctx, user, `${T.summary(summary)}\n\n${T.meetingSet(hhmm(options.meetingAt, user.timezone), which)}`)
   } else {
     await reply(ctx, user, `${T.summary(summary)}\n\n${T.askNextMeeting}`, nextMeetingKeyboard(user))
@@ -442,7 +442,7 @@ export async function scheduleMeeting(ctx: Ctx, user: User, at: Date, kind: Meet
     await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
     await logEvent(tx, user.id, 'meeting_scheduled', { kind, minutes_ahead: Math.max(0, Math.round((at.getTime() - now.getTime()) / MIN)) }, { at: now })
   })
-  const which = dayKey(at, user.timezone) === dayKey(now, user.timezone) ? 'today' : 'tomorrow'
+  const which = workDayKey(at, user.timezone) === workDayKey(now, user.timezone) ? 'today' : 'tomorrow'
   await reply(ctx, user, T.meetingSet(hhmm(at, user.timezone), which))
 }
 
@@ -564,7 +564,8 @@ export async function onDecline(ctx: Ctx, user: User, arg: string): Promise<void
       await putMeeting(tx, user, at, { defaulted: false, morning: true })
       await logEvent(tx, user.id, 'meeting_scheduled', { kind: 'morning', minutes_ahead: Math.round((at.getTime() - now.getTime()) / MIN) }, { at: now })
     })
-    return reply(ctx, user, T.pauseSet(hhmm(at, user.timezone)))
+    const which = workDayKey(at, user.timezone) === workDayKey(now, user.timezone) ? 'today' : 'tomorrow'
+    return reply(ctx, user, T.pauseSet(hhmm(at, user.timezone), which))
   }
   if (arg === 'stuck') return askIntent(ctx, user, { preset: { minutes: 10 }, prefix: T.tinyStep.replace(/\s*С чего начнёшь\?$/, '') })
   return reply(ctx, user, T.stale)
@@ -581,7 +582,7 @@ export async function onGoal(ctx: Ctx, user: User, arg: string): Promise<void> {
   const now = ctx.now()
   const target = Number(arg)
   if (!Number.isInteger(target) || target < 1 || target > 20) return reply(ctx, user, T.stale)
-  const day = dayKey(now, user.timezone)
+  const day = workDayKey(now, user.timezone)
   // Очки за цель — только когда её выполнила засчитанная сессия
   // (src/retention/credit.ts). Цель, поставленная задним числом, когда сессий уже
   // хватает, — не цель, а подпись к сделанному: очков за неё нет.

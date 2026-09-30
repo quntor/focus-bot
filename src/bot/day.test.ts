@@ -7,10 +7,10 @@ const A = 6001
 describe.skipIf(!hasDb)('граница дня — по поясу пользователя', () => {
   beforeEach(resetDb)
 
-  it('сессия в 01:30 по Владивостоку засчитывается в его день, а не в день сервера', async () => {
-    // 15:00 UTC = 01:00 следующего дня во Владивостоке (UTC+10).
-    const bot = makeBot({ now: new Date('2026-09-22T15:00:00Z') })
-    await bot.onboard(A, '01:00')
+  it('сессия в 04:30 по Владивостоку засчитывается в его день, а не в день сервера', async () => {
+    // 18:00 UTC 22-го = 04:00 23-го во Владивостоке (UTC+10).
+    const bot = makeBot({ now: new Date('2026-09-22T18:00:00Z') })
+    await bot.onboard(A, '04:00')
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     expect(user.timezone).toBe('Asia/Vladivostok')
     await bot.text(A, 'глава, 30 минут')
@@ -21,8 +21,32 @@ describe.skipIf(!hasDb)('граница дня — по поясу пользо�
     expect(entry.dayKey).toBe('2026-09-23')
     const goal = await prisma.dailyGoal.findFirstOrThrow({ where: { userId: user.id } })
     expect(goal.dayKey).toBe('2026-09-23')
+  })
+
+  it('сессия в 01:30 относится ко вчерашнему рабочему дню (сутки до 4:00), журнал — к календарному', async () => {
+    // 15:00 UTC = 01:00 следующего дня во Владивостоке (UTC+10).
+    const bot = makeBot({ now: new Date('2026-09-22T15:00:00Z') })
+    await bot.onboard(A, '01:00')
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    await bot.text(A, 'глава, 30 минут')
+    const s = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id } })
+    bot.advance(30)
+    await bot.press(A, `out:${s.id}:done`)
+    expect((await prisma.pointsEntry.findFirstOrThrow({ where: { userId: user.id } })).dayKey).toBe('2026-09-22')
     const events = await prisma.event.findMany({ where: { type: 'session_completed' } })
     expect(events[0]?.dayKey).toBe('2026-09-23')
+  })
+
+  it('/today в 00:30 подводит итог вчерашнего рабочего дня', async () => {
+    const bot = makeBot({ now: new Date('2026-09-22T20:00:00Z') }) // 23:00 по Москве
+    await bot.onboard(A, '23:00')
+    await bot.text(A, 'глава, 40 минут')
+    const s = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+    bot.advance(40)
+    await bot.press(A, `out:${s.id}:done`)
+    bot.advance(50) // 00:30
+    await bot.text(A, '/today')
+    expect(bot.lastText(A)).toContain('За сегодня: 1 сессия')
   })
 
   it('цель дня: очки один раз, когда её выполнила сессия', async () => {

@@ -1,6 +1,6 @@
 import { Prisma, type FocusSession, type User } from '@prisma/client'
 import { logEvent } from '../analytics/log.js'
-import { dayKey } from '../lib/day.js'
+import { workDayKey } from '../lib/day.js'
 import { nextLocalTime, parseClock } from '../lib/time.js'
 import { parseIntent } from '../llm/intent.js'
 import { parseReport } from '../llm/report.js'
@@ -132,7 +132,7 @@ export async function autoFinish(
     data: { status: 'canceled' },
   })
   await logEvent(tx, user.id, 'session_auto_finished', { session_id: session.id, elapsed_minutes: elapsed, counted, reason }, { at: now, sessionId: session.id })
-  const credit = counted ? await creditCountedSession(tx, { userId: user.id, sessionId: session.id, dayKey: dayKey(end, user.timezone), at: now }) : null
+  const credit = counted ? await creditCountedSession(tx, { userId: user.id, sessionId: session.id, dayKey: workDayKey(end, user.timezone), at: now }) : null
   return { elapsed, counted, credit }
 }
 
@@ -329,7 +329,7 @@ async function completeTaskAndRest(
         }, { at: now, sessionId: current.id })
       }
       await logEvent(tx, user.id, 'rest_chosen', { session_id: current.id, choice: 'rest', rest_minutes: rest }, { at: now, sessionId: current.id })
-      if (counted) await creditCountedSession(tx, { userId: user.id, sessionId: current.id, dayKey: dayKey(now, user.timezone), at: now })
+      if (counted) await creditCountedSession(tx, { userId: user.id, sessionId: current.id, dayKey: workDayKey(now, user.timezone), at: now })
     })
   } catch (error) {
     if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
@@ -998,10 +998,10 @@ export async function onRunningDurationText(ctx: Ctx, user: User, sessionId: str
 // человек это не выключил.
 export async function scheduleSummary(tx: Prisma.TransactionClient, user: User, now: Date): Promise<void> {
   if (!user.proactive) return
-  const day = dayKey(now, user.timezone)
+  const day = workDayKey(now, user.timezone)
   const clock = parseClock(user.eveningTime) ?? { h: 21, m: 0 }
   const at = nextLocalTime(user.timezone, clock, now)
-  if (dayKey(at, user.timezone) !== day) return
+  if (workDayKey(at, user.timezone) !== day) return
   await enqueue(tx, { userId: user.id, kind: 'summary', key: `summary:${user.id}:${day}`, sendAfter: at, payload: { dayKey: day } })
 }
 
@@ -1081,7 +1081,7 @@ export async function onOutcome(ctx: Ctx, user: User, sessionId: string, outcome
   const elapsed = Math.floor(activeElapsedMs(session, now) / MIN)
   const counted = isCounted('finished', elapsed)
   const early = session.plannedEndAt !== null && now < session.plannedEndAt
-  const day = dayKey(now, user.timezone)
+  const day = workDayKey(now, user.timezone)
 
   let credit: Credit | null = null
   try {
