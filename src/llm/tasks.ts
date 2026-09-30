@@ -49,7 +49,7 @@ const SYSTEM = [
   'Пример 5: «с этим разобрался, теперь наберу Ивана» при has_current_task=true → {"kind":"complete_and_start","new_tasks":[],"start_title":"Позвонить Ивану"}.',
   'Пример 6: «я сделал одну из своих задач — планирование дня» → {"kind":"complete_task","new_tasks":[],"start_title":null,"complete_title":"Сделать планирование дня"}.',
   'Пример 7: «эту закончил» при has_current_task=true → {"kind":"complete_task","new_tasks":[],"start_title":null,"complete_title":null}.',
-  'Пример 8: «всё, я закончил на сегодня работу. Милавицу я выкатил» → {"kind":"complete_and_close_day","new_tasks":[],"start_title":null,"complete_title":"Выкатить Милавицу"}.',
+  'Пример 8: «всё, я закончил на сегодня работу. Сайт я выкатил» → {"kind":"complete_and_close_day","new_tasks":[],"start_title":null,"complete_title":"Выкатить сайт"}.',
   'Пример 9: «задача коллекция» → {"kind":"capture","new_tasks":["Коллекция"],"start_title":null}.',
   'Пример 10: «добавь задачу позвонить в банк» → {"kind":"capture","new_tasks":["Позвонить в банк"],"start_title":null}.',
   'Не выдумывай отсутствующие действия.',

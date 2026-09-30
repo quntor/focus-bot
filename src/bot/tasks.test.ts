@@ -183,10 +183,10 @@ describe.skipIf(!hasDb)('список задач из текста и голос
 
   it('показывает весь повторный список и создаёт только отсутствующие задачи', async () => {
     const repeated = llm(
-      '{"kind":"capture","new_tasks":["Доделать выкат Милавицы на VDS","Поправить все косяки","Запустить умные функции FocusBot","Сделать функцию планирования дня"]}',
+      '{"kind":"capture","new_tasks":["Доделать выкат сайта на сервер","Поправить все косяки","Запустить умные функции FocusBot","Сделать функцию планирования дня"]}',
     )
     const transcript =
-      'Мне завтра нужно доделать выкат Милавицы на VDS и поправить все косяки. Второе про FocusBot. Нужно запустить умные функции. Надо сделать функцию планирования дня.'
+      'Мне завтра нужно доделать выкат сайта на сервер и поправить все косяки. Второе про FocusBot. Нужно запустить умные функции. Надо сделать функцию планирования дня.'
     const stt: SttProvider = { enabled: true, model: 'test-stt', async transcribe() { return transcript } }
     const bot = makeBot({ llm: repeated, stt })
     bot.tg.downloads.set('voice-repeat', new Uint8Array([1, 2, 3]))
@@ -194,7 +194,7 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(B) } })
     await prisma.task.createMany({
       data: [
-        { userId: user.id, title: 'Доделать выкат Милавицы на VDS' },
+        { userId: user.id, title: 'Доделать выкат сайта на сервер' },
         { userId: user.id, title: 'Запустить умные функции FocusBot' },
         { userId: user.id, title: 'Сделать функцию планирования дня' },
       ],
@@ -203,7 +203,7 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     await bot.voice(B, { fileId: 'voice-repeat', duration: 30, mimeType: 'audio/ogg', fileSize: 3 })
 
     expect(await prisma.task.count({ where: { userId: user.id } })).toBe(4)
-    expect(bot.lastText(B)).toContain('Доделать выкат Милавицы на VDS')
+    expect(bot.lastText(B)).toContain('Доделать выкат сайта на сервер')
     expect(bot.lastText(B)).toContain('Поправить все косяки')
     expect(bot.lastText(B)).toContain('Запустить умные функции FocusBot')
     expect(bot.lastText(B)).toContain('Сделать функцию планирования дня')
@@ -314,14 +314,14 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     const bot = makeBot({
       stt: { enabled: true, model: 'test-stt', async transcribe() { return transcript } },
       llm: conversational(
-        () => '{"kind":"complete_and_close_day","new_tasks":[],"start_title":null,"complete_title":"Выкатить Милавицу"}',
-        (_intent, active) => JSON.stringify({ task: active[0]?.label ?? null, title: 'Выкатить Милавицу', scope: 'step' }),
+        () => '{"kind":"complete_and_close_day","new_tasks":[],"start_title":null,"complete_title":"Выкатить сайт"}',
+        (_intent, active) => JSON.stringify({ task: active[0]?.label ?? null, title: 'Выкатить сайт', scope: 'step' }),
       ),
     })
     bot.tg.downloads.set('voice-complete-day', new Uint8Array([1, 2, 3]))
     await bot.onboard(A)
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
-    const task = await prisma.task.create({ data: { userId: user.id, title: 'Выкатить Милавицу' } })
+    const task = await prisma.task.create({ data: { userId: user.id, title: 'Выкатить сайт' } })
 
     await bot.voice(A, { fileId: 'voice-complete-day', duration: 6, mimeType: 'audio/ogg', fileSize: 3 })
 

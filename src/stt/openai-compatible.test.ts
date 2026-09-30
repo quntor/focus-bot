@@ -7,7 +7,7 @@ describe('OpenAI-compatible STT', () => {
       const form = init?.body as FormData
       expect(form.get('model')).toBe('whisper-large-v3')
       expect(form.get('language')).toBe('ru')
-      expect(form.get('prompt')).toBe('Милавица, VDS, FocusBot, фокус-бот, планирование дня.')
+      expect(form.get('prompt')).toBe('Фокус-бот, фокус-сессия, перерыв, задача, планирование дня.')
       expect(form.get('file')).toBeInstanceOf(File)
       return new Response(JSON.stringify({ text: 'добавь задачу купить корм' }), { status: 200 })
     })
@@ -32,11 +32,10 @@ describe('OpenAI-compatible STT', () => {
       const form = init?.body as FormData
       const prompt = form.get('prompt')
       expect(prompt).toBeTypeOf('string')
-      expect(prompt).toContain('Милавица')
-      expect(prompt).toContain('VDS')
-      expect(prompt).toContain('FocusBot')
+      expect(prompt).toContain('Фокус-бот')
+      expect(prompt).toContain('планирование дня')
       expect(prompt).not.toContain('поправить все косяки')
-      return new Response(JSON.stringify({ text: 'доделать выкат Милавицы на VDS' }), { status: 200 })
+      return new Response(JSON.stringify({ text: 'доделать выкат сайта на сервер' }), { status: 200 })
     })
     const stt = createOpenAiCompatibleSttProvider({
       apiKey: 'secret',

@@ -11,7 +11,7 @@ type Options = {
 }
 
 const responseSchema = z.object({ text: z.string().min(1).max(20_000) })
-const TRANSCRIPTION_PROMPT = 'Милавица, VDS, FocusBot, фокус-бот, планирование дня.'
+const TRANSCRIPTION_PROMPT = 'Фокус-бот, фокус-сессия, перерыв, задача, планирование дня.'
 
 export function createOpenAiCompatibleSttProvider(options: Options): SttProvider {
   const fetchFn = options.fetchFn ?? fetch

@@ -141,7 +141,7 @@ describe.skipIf(!hasDb)('границы недопониманий', () => {
   it('завершает названную задачу и сессию в момент явного ухода на отдых', async () => {
     const bot = makeBot({
       llm: provider({
-        sessionHelp: '{"kind":"complete_and_rest","reply":null,"action":null,"task_title":"починить пилот в миловице в меге"}',
+        sessionHelp: '{"kind":"complete_and_rest","reply":null,"action":null,"task_title":"починить форму оплаты на сайте"}',
       }),
     })
     await bot.onboard(A)
@@ -149,12 +149,12 @@ describe.skipIf(!hasDb)('границы недопониманий', () => {
     const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
     bot.advance(25)
 
-    await bot.text(A, 'Я сделал задачу починить пилот в миловице в меге теперь отдыхаю')
+    await bot.text(A, 'Я сделал задачу починить форму оплаты на сайте теперь отдыхаю')
 
     const finished = await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })
     expect(finished).toMatchObject({ state: 'finished', outcome: 'done', restChoice: 'rest', finishedAt: bot.now() })
     const task = await prisma.task.findFirstOrThrow({ where: { userId: running.userId } })
-    expect(task).toMatchObject({ title: 'починить пилот в миловице в меге', status: 'done' })
+    expect(task).toMatchObject({ title: 'починить форму оплаты на сайте', status: 'done' })
     const owner = await prisma.user.findUniqueOrThrow({ where: { id: running.userId } })
     const summary = await buildSummary(prisma, owner, workDayKey(bot.now(), owner.timezone))
     expect(summary.taskTimes).toEqual([{ title: task.title, minutes: 25, completed: true }])
