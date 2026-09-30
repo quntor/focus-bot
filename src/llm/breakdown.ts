@@ -53,10 +53,13 @@ export async function breakDownTask(
 }
 
 // Шаги, написанные человеком: по строке, через «;» или с нумерацией «1.», «-».
-export function splitManualSteps(text: string): string[] {
+export function splitManualSteps(text: string, limit = MAX_STEPS): string[] {
+  return splitLines(text).slice(0, limit)
+}
+
+export function splitLines(text: string): string[] {
   return text
     .split(/\n|;/)
     .map((line) => line.replace(/^\s*(?:\d{1,2}[.)]|[-–—•*])\s*/, '').replace(/\s+/g, ' ').trim().slice(0, STEP_MAX))
     .filter(Boolean)
-    .slice(0, MAX_STEPS)
 }

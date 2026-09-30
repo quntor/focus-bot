@@ -2,7 +2,7 @@ import type { User } from '@prisma/client'
 import { llmMeter } from '../analytics/calls.js'
 import { logEvent } from '../analytics/log.js'
 import { dayKey } from '../lib/day.js'
-import { breakDownTask, splitManualSteps } from '../llm/breakdown.js'
+import { breakDownTask, splitLines, splitManualSteps } from '../llm/breakdown.js'
 import { parseIntent } from '../llm/intent.js'
 import { parseTaskMessage } from '../llm/tasks.js'
 import { SttCallError } from '../stt/provider.js'
@@ -16,6 +16,7 @@ import { reply, type Ctx } from './context.js'
 import { recentConversationContext } from './conversation-context.js'
 import { activeElapsedMinutes, activeSession, onStartButton, startTaskSession } from './session-flow.js'
 import { T, hhmm } from './texts.js'
+import { findOrCreateTask } from './task-store.js'
 
 export type TaskInputSource = 'text' | 'voice'
 type TaskCompletionSource = TaskInputSource | 'button'
@@ -94,19 +95,42 @@ function taskKeyboard(
   return keyboard
 }
 
-async function activeTaskPage(ctx: Ctx, user: User, page: number): Promise<TaskPage | null> {
-  const count = await ctx.db.task.count({ where: { userId: user.id, status: 'active' } })
-  if (count === 0) return null
-  const pages = Math.ceil(count / TASKS_PER_PAGE)
-  const safePage = Math.max(0, Math.min(page, pages - 1))
-  const tasks = await ctx.db.task.findMany({
-    where: { userId: user.id, status: 'active' },
+// Шаги разбора идут сразу под исходной задачей: «↳ Открыть черновик (шаг 1 из 3)».
+// Шаг, чья исходная задача уже закрыта, показывается как обычная задача.
+async function orderedActiveTasks(ctx: Ctx, userId: string): Promise<{ id: string; title: string }[]> {
+  const active = await ctx.db.task.findMany({
+    where: { userId, status: 'active' },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-    skip: safePage * TASKS_PER_PAGE,
-    take: TASKS_PER_PAGE,
-    select: { id: true, title: true },
+    select: { id: true, title: true, parentId: true },
   })
-  return { tasks, page: safePage, pages }
+  const activeIds = new Set(active.map((task) => task.id))
+  const parentIds = [...new Set(active.map((task) => task.parentId).filter((id): id is string => id !== null && activeIds.has(id)))]
+  const allSteps = parentIds.length
+    ? await ctx.db.task.findMany({
+        where: { userId, parentId: { in: parentIds }, status: { not: 'dropped' } },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        select: { id: true, parentId: true },
+      })
+    : []
+  const isStep = (task: { parentId: string | null }) => task.parentId !== null && activeIds.has(task.parentId)
+  const ordered: { id: string; title: string }[] = []
+  for (const root of active.filter((task) => !isStep(task))) {
+    ordered.push({ id: root.id, title: root.title })
+    const siblings = allSteps.filter((step) => step.parentId === root.id)
+    for (const step of active.filter((task) => task.parentId === root.id)) {
+      const n = siblings.findIndex((sibling) => sibling.id === step.id) + 1
+      ordered.push({ id: step.id, title: T.stepLabel(step.title, n, siblings.length) })
+    }
+  }
+  return ordered
+}
+
+async function activeTaskPage(ctx: Ctx, user: User, page: number): Promise<TaskPage | null> {
+  const all = await orderedActiveTasks(ctx, user.id)
+  if (all.length === 0) return null
+  const pages = Math.ceil(all.length / TASKS_PER_PAGE)
+  const safePage = Math.max(0, Math.min(page, pages - 1))
+  return { tasks: all.slice(safePage * TASKS_PER_PAGE, (safePage + 1) * TASKS_PER_PAGE), page: safePage, pages }
 }
 
 export async function buildTaskStartPrompt(
@@ -280,16 +304,23 @@ export async function onTaskAddRequested(ctx: Ctx, user: User): Promise<void> {
   await reply(ctx, user, T.taskAddAsk)
 }
 
+const ADD_MAX = 10
+
 export async function onTaskAddText(ctx: Ctx, user: User, text: string, source: TaskInputSource): Promise<void> {
-  const titles = splitManualSteps(text)
-  if (!titles.length) return reply(ctx, user, T.taskAddAsk)
+  const lines = splitLines(text)
+  if (!lines.length) return reply(ctx, user, T.taskAddAsk)
   const claimed = await ctx.db.user.updateMany({ where: { id: user.id, pendingInput: 'task_add' }, data: { pendingInput: 'none' } })
   if (claimed.count !== 1) return reply(ctx, user, T.stale)
-  const saved = await captureTasks(ctx, user, titles, source)
+  const saved = await captureTasks(ctx, user, lines.slice(0, ADD_MAX), source)
   if (!saved.length) return reply(ctx, user, T.tasksParseFailed)
+  // Лишнее не пропадает молча: человек узнаёт, что записано не всё.
+  const trimmed = lines.length > ADD_MAX ? T.tasksTrimmed(ADD_MAX) : null
   // Одна задача — сразу её карточка: «Начать» или «Разобрать» в одно нажатие.
-  if (saved.length === 1) return onTaskOpened(ctx, user, saved[0]!.id, 0, T.taskAdded(saved[0]!.title))
-  await showTasks(ctx, user, 0, T.tasksCaptured(saved.map((task) => task.title)))
+  if (saved.length === 1) {
+    const one = saved[0]!
+    return onTaskOpened(ctx, user, one.id, 0, one.created ? T.taskAdded(one.title) : T.taskExists(one.title))
+  }
+  await showTasks(ctx, user, 0, [T.tasksCaptured(saved.map((task) => task.title)), trimmed].filter(Boolean).join('\n'))
 }
 
 // --- Разбор задачи на шаги. Ожидание ответа — pendingInput task_split:<id>;
@@ -383,12 +414,21 @@ export async function onTaskBreakdownAnswer(
     }
   }
   steps = steps.filter((step) => normalize(step) !== normalize(task.title))
-  if (!steps.length) return reply(ctx, user, T.breakdownManual)
+  if (!steps.length) {
+    // Писать шаги самому — значит следующий ответ не уходит снова к модели.
+    await ctx.db.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput: `task_split_manual:${task.id}` } })
+    return reply(ctx, user, T.breakdownManual)
+  }
 
   // Ожидание снимается до записи: пока шла модель, человек мог нажать другое.
   const claimed = await ctx.db.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput: 'none' } })
   if (claimed.count !== 1) return reply(ctx, user, T.stale)
-  const saved = await captureTasks(ctx, user, steps, source)
+  // Повторный разбор заменяет незакрытые и ещё не начатые шаги, а не копит их.
+  await ctx.db.task.updateMany({
+    where: { userId: user.id, parentId: task.id, status: 'active', sessionsCount: 0 },
+    data: { status: 'dropped' },
+  })
+  const saved = await captureTasks(ctx, user, steps, source, { parentId: task.id })
   if (!saved.length) return reply(ctx, user, T.tasksParseFailed)
   await logEvent(ctx.db, user.id, 'task_breakdown_done', { task_id: task.id, mode, steps: saved.length, llm_used: llmUsed }, { at: ctx.now() })
   await reply(ctx, user, T.breakdownDone(task.title, saved.map((step) => step.title)), [
@@ -397,22 +437,18 @@ export async function onTaskBreakdownAnswer(
   ])
 }
 
-async function captureTasks(ctx: Ctx, user: User, titles: string[], source: TaskInputSource) {
+// created — задача новая; false — такая уже была в активных. Шаги разбора
+// передают parentId исходной задачи.
+async function captureTasks(ctx: Ctx, user: User, titles: string[], source: TaskInputSource, opts: { parentId?: string } = {}) {
   return ctx.db.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
-    const active = await tx.task.findMany({ where: { userId: user.id, status: 'active' } })
-    const byTitle = new Map(active.map((task) => [normalize(task.title), task]))
-    const selected: { id: string; title: string }[] = []
-    for (const raw of titles) {
-      const title = raw.replace(/\s+/g, ' ').trim().slice(0, 80)
-      const key = normalize(title)
-      if (!key) continue
-      let task = byTitle.get(key)
-      if (!task) {
-        task = await tx.task.create({ data: { userId: user.id, title, createdAt: ctx.now() } })
-        byTitle.set(key, task)
-      }
-      selected.push({ id: task.id, title: task.title })
+    const selected: { id: string; title: string; created: boolean }[] = []
+    // Порядок списка — порядок в сообщении: createdAt с шагом в миллисекунду,
+    // иначе при равном времени порядок решал бы случайный id.
+    const base = ctx.now().getTime()
+    for (const [i, raw] of titles.entries()) {
+      if (!normalize(raw)) continue
+      selected.push(await findOrCreateTask(tx, { userId: user.id, title: raw, now: new Date(base + i), parentId: opts.parentId ?? null }))
     }
     const unique = [...new Map(selected.map((task) => [task.id, task])).values()]
     if (unique.length) {
@@ -580,11 +616,22 @@ async function completeTask(
     const prompt = await buildTaskStartPrompt(ctx, user, notice)
     if (prompt) await reply(ctx, user, prompt.text, prompt.keyboard)
     else await reply(ctx, user, `${notice}\n${T.taskDoneTimerRunsEmpty}`)
-    return true
-  }
-  if (showList) await showTasks(ctx, user, 0, T.taskCompleted(doneTitle))
+  } else if (showList) await showTasks(ctx, user, 0, T.taskCompleted(doneTitle))
   else await reply(ctx, user, T.taskCompleted(doneTitle))
+  await offerParentClose(ctx, user, task.id)
   return true
+}
+
+// Закрыт последний шаг разбора — предлагаем закрыть и исходную задачу.
+// Сама она не закрывается: шаги могли быть не всей работой.
+async function offerParentClose(ctx: Ctx, user: User, stepId: string): Promise<void> {
+  const step = await ctx.db.task.findFirst({ where: { id: stepId, userId: user.id }, select: { parentId: true } })
+  if (!step?.parentId) return
+  const parent = await ctx.db.task.findFirst({ where: { id: step.parentId, userId: user.id, status: 'active' }, select: { id: true, title: true } })
+  if (!parent) return
+  const left = await ctx.db.task.count({ where: { userId: user.id, parentId: parent.id, status: 'active' } })
+  if (left > 0) return
+  await reply(ctx, user, T.allStepsDone(parent.title), [[{ text: taskLabel(T.closeParentButton(parent.title)), data: cb('task', parent.id, 'done') }]])
 }
 
 export async function onTaskCompleted(ctx: Ctx, user: User, taskId: string): Promise<void> {
@@ -625,7 +672,7 @@ async function completeAndStart(
       } else {
         const duplicate = await tx.task.findMany({ where: { userId: user.id, status: 'active' } })
         next = duplicate.find((task) => normalize(task.title) === normalize(input.start.title)) ?? null
-        if (!next) next = await tx.task.create({ data: { userId: user.id, title: input.start.title, createdAt: now } })
+        if (!next) next = await tx.task.findUniqueOrThrow({ where: { id: (await findOrCreateTask(tx, { userId: user.id, title: input.start.title, now })).id } })
       }
       if (!next || next.id === completed.id) throw new StaleTransition()
 
@@ -671,9 +718,25 @@ async function completeAndStart(
 
   const selectedNext = next as { id: string; title: string } | null
   if (!selectedNext) return reply(ctx, user, T.stale)
-  if (keptRunning) return reply(ctx, user, T.taskSwitchedRunning(doneTitle, selectedNext.title))
-  await reply(ctx, user, T.taskSwitched(doneTitle, selectedNext.title))
-  await startTaskSession(ctx, user, selectedNext.id)
+  if (keptRunning) await reply(ctx, user, T.taskSwitchedRunning(doneTitle, selectedNext.title))
+  else {
+    await reply(ctx, user, T.taskSwitched(doneTitle, selectedNext.title))
+    await startTaskSession(ctx, user, selectedNext.id)
+  }
+  await offerParentClose(ctx, user, input.completeTaskId)
+}
+
+// Задача последней сессии, закрытой не больше двух часов назад, — если она
+// ещё активна. Нужна, чтобы «эту закончил» на отдыхе понималось.
+async function recentSessionTaskId(ctx: Ctx, userId: string): Promise<string | null> {
+  const last = await ctx.db.focusSession.findFirst({
+    where: { userId, state: 'finished', taskId: { not: null }, finishedAt: { gte: new Date(ctx.now().getTime() - 2 * 60 * 60_000) } },
+    orderBy: { finishedAt: 'desc' },
+    select: { taskId: true },
+  })
+  if (!last?.taskId) return null
+  const task = await ctx.db.task.findFirst({ where: { id: last.taskId, userId, status: 'active' }, select: { id: true } })
+  return task?.id ?? null
 }
 
 // Модель только классифицирует свободную речь. Вызывающий выполняет
@@ -686,6 +749,8 @@ export async function onTaskMessage(
   contextEventId: number | null = null,
 ): Promise<TaskMessageOutcome> {
   const current = await activeSession(ctx, user.id)
+  // «Эту закончил» сразу после сессии — про её задачу, а не «не понял».
+  const currentTaskId = current?.taskId ?? (current ? null : await recentSessionTaskId(ctx, user.id))
   const storedTasks = await ctx.db.task.findMany({
     where: { userId: user.id, status: 'active' },
     orderBy: { createdAt: 'desc' },
@@ -694,8 +759,8 @@ export async function onTaskMessage(
   })
   // Текущая задача всегда t1: тогда фразы «эту сделал» устойчивы к NULL-order
   // базы и не зависят от того, когда создавались остальные дела.
-  const activeTasks = current?.taskId
-    ? [...storedTasks.filter((task) => task.id === current.taskId), ...storedTasks.filter((task) => task.id !== current.taskId)]
+  const activeTasks = currentTaskId
+    ? [...storedTasks.filter((task) => task.id === currentTaskId), ...storedTasks.filter((task) => task.id !== currentTaskId)]
     : storedTasks
   const sessionState = current?.state === 'collecting_intent' || current?.state === 'running' || current?.state === 'paused'
     ? current.state
@@ -705,7 +770,7 @@ export async function onTaskMessage(
     {
       text,
       tasks: activeTasks,
-      currentTaskId: current?.taskId ?? null,
+      currentTaskId,
       sessionState,
       recentContext: recentConversationContext(user.id, ctx.now(), { beforeEventId: contextEventId }),
     },
@@ -745,13 +810,13 @@ export async function onTaskMessage(
       await reply(ctx, user, T.tasksParseFailed)
       return 'handled'
     }
-    if (tasks.length === 1) await onTaskOpened(ctx, user, tasks[0]!.id, 0, T.taskAdded(tasks[0]!.title))
+    if (tasks.length === 1) await onTaskOpened(ctx, user, tasks[0]!.id, 0, tasks[0]!.created ? T.taskAdded(tasks[0]!.title) : T.taskExists(tasks[0]!.title))
     else await showTasks(ctx, user, 0, T.tasksCaptured(tasks.map((task) => task.title)))
     return 'handled'
   }
 
   if (parsed.result.kind === 'complete_task' || parsed.result.kind === 'complete_and_close_day') {
-    const completed = await resolveExistingTask(ctx, user, parsed.result.title, activeTasks, current?.taskId ?? null, current?.id ?? null)
+    const completed = await resolveExistingTask(ctx, user, parsed.result.title, activeTasks, currentTaskId, current?.id ?? null)
     if (!completed) {
       await reply(ctx, user, T.taskCompleteUnknown)
       return 'handled'
@@ -766,16 +831,16 @@ export async function onTaskMessage(
     await startTaskSession(ctx, user, next.id)
     return 'handled'
   }
-  if (!current?.taskId) {
+  if (!currentTaskId) {
     await reply(ctx, user, T.taskSwitchNoCurrent)
     return 'handled'
   }
-  if (current.state === 'paused') {
+  if (current?.state === 'paused') {
     await reply(ctx, user, T.taskSwitchPaused)
     return 'handled'
   }
-  const next = await resolveOrCreateTask(ctx, user, parsed.result.title, activeTasks, source, current.id)
-  await completeAndStart(ctx, user, { completeTaskId: current.taskId, start: { taskId: next.id, title: next.title } }, source)
+  const next = await resolveOrCreateTask(ctx, user, parsed.result.title, activeTasks, source, current?.id ?? null)
+  await completeAndStart(ctx, user, { completeTaskId: currentTaskId, start: { taskId: next.id, title: next.title } }, source)
   return 'handled'
 }
 

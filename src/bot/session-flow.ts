@@ -16,6 +16,7 @@ import { cb } from './callbacks.js'
 import { reply, type Ctx } from './context.js'
 import { recentConversationContext, resetConversationContext } from './conversation-context.js'
 import { DEADLINE_EXTEND_MINUTES, T, hhmm } from './texts.js'
+import { findOrCreateTask } from './task-store.js'
 import type { Keyboard } from '../tg/client.js'
 
 const MIN = 60_000
@@ -256,7 +257,7 @@ async function completeTaskAndRest(
         : current.taskId
           ? activeTasks.find((candidate) => candidate.id === current.taskId) ?? null
           : null
-      if (!task && cleanTitle) task = await tx.task.create({ data: { userId: user.id, title: cleanTitle, createdAt: now } })
+      if (!task && cleanTitle) task = await tx.task.findUniqueOrThrow({ where: { id: (await findOrCreateTask(tx, { userId: user.id, title: cleanTitle, now })).id } })
       // Сессия без задачи тоже заканчивается по «готово, иду отдыхать»:
       // закрывается сессия, а отмечать готовой нечего.
       taskTitle = task?.title ?? null
@@ -388,6 +389,9 @@ export async function startUnassigned(ctx: Ctx, user: User): Promise<void> {
   const session = await openCollecting(ctx, user.id)
   if (session.state === 'running') return reply(ctx, user, T.alreadyRunning(endText(ctx, user, session)))
   if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
+  // Намерение уже написано и длина предложена — «Начать сессию» значит «Ок»,
+  // а не «стереть, что я написал».
+  if (session.intentText !== null && session.plannedMinutes !== null) return startRunning(ctx, user, session.id)
 
   const technique: Technique = isTechnique(user.technique) ? user.technique : 'auto'
   const minutes =
@@ -468,8 +472,11 @@ export async function startTaskSession(ctx: Ctx, user: User, taskId: string): Pr
   if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
 
   const technique: Technique = isTechnique(user.technique) ? user.technique : 'auto'
-  const minutes = technique === 'auto' ? proposeMinutes(await sessionHistory(ctx, user.id)) : PRESETS[technique].minutes
-  const rest = technique === 'auto' ? restFor(minutes) : PRESETS[technique].rest
+  // Предустановка («давай 10 минут» после «не получается начать») действует и
+  // при выборе задачи кнопкой, а не только при ответе текстом.
+  const preset = session.intentText === null && session.plannedMinutes !== null && session.minutesSource === 'bot' ? session.plannedMinutes : null
+  const minutes = preset ?? (technique === 'auto' ? proposeMinutes(await sessionHistory(ctx, user.id)) : PRESETS[technique].minutes)
+  const rest = preset !== null || technique === 'auto' ? restFor(minutes) : PRESETS[technique].rest
   const updated = await ctx.db.$transaction(async (tx) => {
     const res = await tx.focusSession.updateMany({
       where: { id: session.id, userId: user.id, state: 'collecting_intent' },
@@ -580,6 +587,10 @@ async function handleIntent(ctx: Ctx, user: User, session: FocusSession, text: s
   if (named !== null) {
     minutes = named
     source = 'user'
+  } else if (refining && session.plannedMinutes !== null && session.minutesSource === 'user') {
+    // «Диплом за час» → «с плана»: названный час не забывается при уточнении.
+    minutes = session.plannedMinutes
+    source = 'user'
   } else if (session.plannedMinutes !== null && session.minutesSource === 'bot' && !refining) {
     minutes = session.plannedMinutes
     source = 'bot'
@@ -594,6 +605,14 @@ async function handleIntent(ctx: Ctx, user: User, session: FocusSession, text: s
 
   try {
     await ctx.db.$transaction(async (tx) => {
+      // Большая задача сохраняется сразу: сессия будет её первым шагом, а
+      // «Написать диплом» остаётся в списке, а не теряется за «составить план».
+      let bigTaskCreated = false
+      if (!refining && scope === 'multi_session' && taskId === null) {
+        const big = await findOrCreateTask(tx, { userId: user.id, title, now })
+        taskId = big.id
+        bigTaskCreated = big.created
+      }
       const res = await tx.focusSession.updateMany({
         where: {
           id: session.id,
@@ -615,7 +634,7 @@ async function handleIntent(ctx: Ctx, user: User, session: FocusSession, text: s
       if (res.count !== 1) throw new StaleTransition()
       await logEvent(tx, user.id, 'intent_submitted', { length_chars: text.length, named_minutes: named !== null }, { at: now, sessionId: session.id })
       if (!refining) {
-        await logEvent(tx, user.id, 'intent_parsed', { llm_used: llmUsed, task_id: taskId, is_new_task: taskId === null, scope }, { at: now, sessionId: session.id })
+        await logEvent(tx, user.id, 'intent_parsed', { llm_used: llmUsed, task_id: taskId, is_new_task: taskId === null || bigTaskCreated, scope }, { at: now, sessionId: session.id })
         if (failure) await logEvent(tx, user.id, 'llm_fallback', { stage: 'intent', reason: failure }, { at: now })
       }
     })
@@ -705,9 +724,9 @@ export async function startRunning(ctx: Ctx, user: User, sessionId: string): Pro
       let taskId = session.taskId
       let isNewTask = false
       if (taskId === null && session.intentText) {
-        const task = await tx.task.create({ data: { userId: user.id, title: session.intentText, createdAt: now } })
+        const task = await findOrCreateTask(tx, { userId: user.id, title: session.intentText, now })
         taskId = task.id
-        isNewTask = true
+        isNewTask = task.created
       }
       await transition(tx, { sessionId, userId: user.id }, 'collecting_intent', 'running', { startedAt: now, plannedEndAt, pingAt })
       if (isNewTask && taskId) {
@@ -799,9 +818,9 @@ export async function onRunningWorkText(ctx: Ctx, user: User, sessionId: string,
       let taskId = matched?.id ?? null
       let isNewTask = false
       if (taskId === null) {
-        const task = await tx.task.create({ data: { userId: user.id, title: workTitle, createdAt: ctx.now() } })
+        const task = await findOrCreateTask(tx, { userId: user.id, title: workTitle, now: ctx.now() })
         taskId = task.id
-        isNewTask = true
+        isNewTask = task.created
       }
       const changed = await tx.focusSession.updateMany({
         where: {
@@ -1184,7 +1203,7 @@ async function finalizeReport(
   )
   const failure = parsed.failure && !parsed.failure.ok ? parsed.failure.reason : null
   const continuationRelevant = session.restChoice === null && !options.endDay && parsed.result.continueNow && (await activeSession(ctx, user.id)) === null
-  let stuckTask: string | null = null
+  let stuckTask: { id: string; title: string } | null = null
   let allocatedMinutes: number | null = null
   let allocationInvalid = false
 
@@ -1228,10 +1247,9 @@ async function finalizeReport(
         let task = allocation.taskLabel
           ? labelledTasks.find((candidate) => candidate.label === allocation.taskLabel) ?? null
           : labelledTasks.find((candidate) => normalizeTaskTitle(candidate.title) === normalizeTaskTitle(allocation.title)) ?? null
-        if (!task && allocation.taskLabel === null) {
-          const created = await tx.task.create({ data: { userId: user.id, title: allocation.title, createdAt: now } })
-          task = { id: created.id, title: created.title, label: '' }
-        }
+        // Отчёт не создаёт новых задач (решение 01.10): «20 минут ушло на почту»
+        // не должно появляться в «Мои задачи». Такое время остаётся без задачи.
+        if (!task && allocation.taskLabel === null) continue
         if (!task) {
           unresolved = true
           break
@@ -1283,8 +1301,9 @@ async function finalizeReport(
         } else {
           const n = task.sessionsSinceProgress + 1
           await tx.task.update({ where: { id: task.id }, data: { sessionsSinceProgress: n } })
-          if (n === STUCK_AFTER) {
-            stuckTask = task.title
+          // Застревание называется вслух на третьей сессии и каждой третьей после.
+          if (n % STUCK_AFTER === 0) {
+            stuckTask = { id: task.id, title: task.title }
             await logEvent(tx, user.id, 'task_stuck_detected', { task_id: task.id, sessions_without_progress: n }, { at: now })
           }
         }
@@ -1311,7 +1330,9 @@ async function finalizeReport(
     return
   }
 
-  if (stuckTask) await reply(ctx, user, T.stuck(stuckTask))
+  // Застряла — предлагаем разобрать её на шаги, а не только сказать об этом.
+  const stuck = stuckTask as { id: string; title: string } | null
+  if (stuck) await reply(ctx, user, T.stuck(stuck.title), [[{ text: T.taskBreakdownButton, data: cb('task', stuck.id, 'split') }]])
   if (allocationInvalid) await reply(ctx, user, T.timeAllocationInvalid)
   else if (allocatedMinutes !== null) await reply(ctx, user, T.timeAllocated(allocatedMinutes))
   if (!options.endDay && session.restChoice === null) await askRest(ctx, user, session, { continueSuggested: continuationRelevant })
@@ -1356,6 +1377,12 @@ async function askRest(
     sendAfter: new Date(now.getTime() + rest * MIN),
     payload: { sessionId: session.id },
   })
+  // «Готово» — про заход, а не про задачу: сессия — шаг. Закрыть задачу
+  // целиком — отдельная кнопка, по выбору человека.
+  const doneTask = session.outcome === 'done' && session.taskId
+    ? await ctx.db.task.findFirst({ where: { id: session.taskId, userId: user.id, status: 'active' }, select: { id: true, title: true } })
+    : null
+  const closeRow = doneTask ? [[{ text: shortLabel(T.closeTaskButton(doneTask.title)), data: cb('task', doneTask.id, 'done') }]] : []
   if (options.continueSuggested && session.taskId) {
     const task = await ctx.db.task.findFirst({ where: { id: session.taskId, userId: user.id, status: 'active' }, select: { title: true } })
     if (task) {
@@ -1369,6 +1396,7 @@ async function askRest(
         [{ text: T.restOk(rest), data: cb('rest', session.id, 'rest') }],
         [{ text: T.restLater, data: cb('rest', session.id, 'later') }],
         [{ text: T.dayEnd, data: cb('rest', session.id, 'day_end') }],
+        ...closeRow,
       ])
       return
     }
@@ -1378,8 +1406,11 @@ async function askRest(
     [{ text: T.restContinue, data: cb('rest', session.id, 'continue') }],
     [{ text: T.restLater, data: cb('rest', session.id, 'later') }],
     [{ text: T.dayEnd, data: cb('rest', session.id, 'day_end') }],
+    ...closeRow,
   ])
 }
+
+const shortLabel = (text: string) => (Array.from(text).length > 60 ? `${Array.from(text).slice(0, 59).join('')}…` : text)
 
 export type RestChoice = 'rest' | 'continue' | 'later' | 'day_end'
 

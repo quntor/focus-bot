@@ -89,7 +89,7 @@ export const T = {
   voiceRateLimited: 'За час можно разобрать до 5 голосовых. Следующие задачи пока пришли текстом.',
   voiceFailed: 'Не смог распознать голосовое. Попробуй ещё раз или напиши задачи текстом.',
   voiceTranscript: (text: string) => `Распознал: «${text.replace(/\s+/g, ' ').trim().slice(0, 500)}».`,
-  tasksParseFailed: 'Не смог надёжно разобрать список. Напиши задачи отдельными пунктами или по одной.',
+  tasksParseFailed: 'Не понял. Напиши по-другому — одной задачей или списком, каждую с новой строки.',
   tasksCaptured: (tasks: string[]) =>
     [`В списке ${tasks.length} ${plural(tasks.length, 'задача', 'задачи', 'задач')}:`, ...tasks.map((task, i) => `${i + 1}. ${task}`), '', 'Что берём сейчас?'].join('\n'),
   tasksEmpty: 'Активных задач пока нет. Надиктуй или напиши, что нужно сделать.',
@@ -110,11 +110,17 @@ export const T = {
   },
   taskActions: (task: string) => `Задача: «${task}»\n\nЧто сделать?`,
   taskBreakdownButton: '🧩 Разобрать',
+  stepLabel: (step: string, n: number, total: number) => `↳ ${step} (шаг ${n} из ${total})`,
+  allStepsDone: (task: string) => `Все шаги «${task}» готовы. Закрыть и саму задачу?`,
+  closeParentButton: (task: string) => `✅ Закрыть «${task}»`,
+  closeTaskButton: (task: string) => `✅ «${task}» готова целиком`,
   // Добавить задачу без старта сессии: отдельное название в свободном тексте
   // по-прежнему означает «начинаю» (решение 25.09).
   taskAddButton: '➕ Добавить задачу',
   taskAddAsk: 'Как назвать задачу? Можно сразу несколько — каждую с новой строки.',
   taskAdded: (task: string) => `Добавил «${task}».`,
+  taskExists: (task: string) => `«${task}» уже есть в списке.`,
+  tasksTrimmed: (n: number) => `Записал первые ${n} — остальное пришли следующим сообщением.`,
   // Сначала — как человек сам видит задачу: нюансы знает он.
   breakdownAsk: (task: string) =>
     `Как ты видишь задачу «${task}»? С чего хочется начать?\n\nМожно просто перечислить шаги — запишу как есть.`,
