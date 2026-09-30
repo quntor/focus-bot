@@ -125,4 +125,12 @@ describe.skipIf(!hasDb)('/delete_me', () => {
     expect(meeting.sendAfter.toISOString()).toBe('2026-10-03T07:00:00.000Z')
     expect(bot.lastText(A)).toContain('послезавтра в 10:00')
   })
+
+  it('встреча, названная словами: «завтра в девять тридцать», «в семь вечера»', async () => {
+    const moscow = { timezone: 'Europe/Moscow' } as Parameters<typeof explicitMeetingAt>[1]
+    const now = new Date('2026-10-01T12:00:00Z')
+    expect(explicitMeetingAt('завтра в девять тридцать', moscow, now)?.toISOString()).toBe('2026-10-02T06:30:00.000Z')
+    expect(explicitMeetingAt('начну завтра в семь вечера', moscow, now)?.toISOString()).toBe('2026-10-02T16:00:00.000Z')
+    expect(explicitMeetingAt('завтра в 7 вечера', moscow, now)?.toISOString()).toBe('2026-10-02T16:00:00.000Z')
+  })
 })

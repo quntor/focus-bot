@@ -1,7 +1,7 @@
 import type { Prisma, User } from '@prisma/client'
 import { logEvent } from '../analytics/log.js'
 import { addDays, dayKey, daysBetween, weekStart, WORK_DAY_START_HOUR, workDayKey } from '../lib/day.js'
-import { localDateTime, nextLocalTime, parseClock } from '../lib/time.js'
+import { localDateTime, nextLocalTime, parseClock, spelledTime } from '../lib/time.js'
 import { cancelPending, enqueue } from '../outbox/queue.js'
 import { DAYS_OFF_PER_WEEK } from '../retention/rules.js'
 import { transition } from '../session/fsm.js'
@@ -461,21 +461,25 @@ export async function onMeetingTimeText(ctx: Ctx, user: User, text: string, opts
 }
 
 function softMeetingAt(text: string, user: User, now: Date): Date | null {
-  const normalized = text.toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/\s+/g, ' ').replace(/[.!]+$/, '').trim()
-  const onlyTime = parseClock(normalized) !== null || /^(?:(?:сегодня|завтра)\s+)?(?:в|к)\s*\d{1,2}(?:[:.]\d{2})?$/u.test(normalized)
+  const normalized = spelledTime(text).replace(/\s+/g, ' ').replace(/[.!]+$/, '').trim()
+  const onlyTime = parseClock(normalized) !== null || /^(?:(?:сегодня|завтра)\s+)?(?:в|к)\s*\d{1,2}(?:[:.\s]\d{2})?(?:\s+(?:утра|дня|вечера|ночи))?$/u.test(normalized)
   return onlyTime ? meetingAtFromText(normalized, user, now) : explicitMeetingAt(text, user, now)
 }
 
 function meetingAtFromText(text: string, user: User, now: Date): Date | null {
-  const normalized = text.toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/\s+/g, ' ').trim()
+  // Голос пишет время словами: «завтра в девять тридцать», «в семь вечера».
+  const normalized = spelledTime(text).replace(/\s+/g, ' ').trim()
   const hasToday = /(?:^|[^\p{L}\p{N}_])сегодня(?=$|[^\p{L}\p{N}_])/u.test(normalized)
   const hasTomorrow = /(?:^|[^\p{L}\p{N}_])завтра(?=$|[^\p{L}\p{N}_])/u.test(normalized)
-  const embedded = /(?:^|\s)(?:в|к)\s*(\d{1,2})(?:[:.](\d{2}))?(?=$|[\s,.!?])/u.exec(normalized)
+  const embedded = /(?:^|\s)(?:в|к)\s*(\d{1,2})(?:[:.\s](\d{2}))?(?=$|[\s,.!?])/u.exec(normalized)
     ?? /(?:^|\s)(\d{1,2})[:.](\d{2})(?=$|[\s,.!?])/u.exec(normalized)
-  const clock = parseClock(normalized) ?? (embedded
+  let clock = parseClock(normalized) ?? (embedded
     ? parseClock(`${embedded[1] ?? ''}:${embedded[2] ?? '00'}`)
     : null)
   if (!clock) return null
+  // «В семь вечера», «в два дня» — вторая половина суток.
+  const tail = embedded ? normalized.slice(embedded.index + embedded[0].length) : ''
+  if (clock.h < 12 && /^\s+(?:вечера|дня)(?!\p{L})/u.test(tail)) clock = { h: clock.h + 12, m: clock.m }
 
   let at: Date
   if (hasTomorrow) {

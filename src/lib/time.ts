@@ -17,8 +17,32 @@ export function offsetMinutes(timezone: string, at: Date): number {
   return Math.round((asUtc - Math.floor(at.getTime() / 60_000) * 60_000) / 60_000)
 }
 
-// «14:30», «9.05», «21 40» → часы и минуты.
-export function parseClock(text: string): { h: number; m: number } | null {
+// Числа словами — цифрами: распознавание голоса пишет «четырнадцать тридцать»,
+// «к девяти», «девять ноль пять». Только то, что бывает во времени суток.
+const UNITS: Record<string, number> = { один: 1, одна: 1, одну: 1, два: 2, две: 2, три: 3, четыре: 4, пять: 5, шесть: 6, семь: 7, восемь: 8, девять: 9 }
+const TENS: Record<string, number> = { двадцать: 20, тридцать: 30, сорок: 40, пятьдесят: 50 }
+const OTHER: Record<string, number> = {
+  ноль: 0, десять: 10, одиннадцать: 11, двенадцать: 12, тринадцать: 13, четырнадцать: 14, пятнадцать: 15,
+  шестнадцать: 16, семнадцать: 17, восемнадцать: 18, девятнадцать: 19,
+  двух: 2, трех: 3, четырех: 4, пяти: 5, шести: 6, семи: 7, восьми: 8, девяти: 9, десяти: 10, одиннадцати: 11, двенадцати: 12,
+}
+const word = (words: Record<string, number>) => Object.keys(words).join('|')
+const TENS_UNITS = new RegExp(String.raw`(?<!\p{L})(${word(TENS)})\s+(${word(UNITS)})(?!\p{L})`, 'gu')
+const ZERO_UNIT = new RegExp(String.raw`(?<!\p{L})ноль\s+(${word(UNITS)})(?!\p{L})`, 'gu')
+const SINGLE = new RegExp(String.raw`(?<!\p{L})(${word(UNITS)}|${word(TENS)}|${word(OTHER)})(?!\p{L})`, 'gu')
+
+export function spelledTime(text: string): string {
+  return text
+    .toLocaleLowerCase('ru')
+    .replace(/ё/g, 'е')
+    .replace(TENS_UNITS, (_, tens: string, unit: string) => String(TENS[tens]! + UNITS[unit]!))
+    .replace(ZERO_UNIT, (_, unit: string) => `0${UNITS[unit]!}`)
+    .replace(SINGLE, (value: string) => String(UNITS[value] ?? TENS[value] ?? OTHER[value]))
+}
+
+// «14:30», «9.05», «21 40», «девять тридцать» → часы и минуты.
+export function parseClock(raw: string): { h: number; m: number } | null {
+  const text = spelledTime(raw)
   const match = /^\s*(\d{1,2})\s*[:.\s]\s*(\d{2})\s*$/.exec(text) ?? /^\s*(\d{1,2})\s*$/.exec(text)
   if (!match) return null
   const h = Number(match[1])

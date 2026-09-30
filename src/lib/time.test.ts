@@ -32,3 +32,14 @@ describe('время', () => {
     expect(nextLocalTime('Europe/Moscow', { h: 9, m: 0 }, now).toISOString()).toBe('2026-09-23T06:00:00.000Z')
   })
 })
+
+describe('время словами — как его пишет распознавание голоса', () => {
+  it.each([
+    ['четырнадцать тридцать', { h: 14, m: 30 }],
+    ['девять ноль пять', { h: 9, m: 5 }],
+    ['двадцать один сорок пять', { h: 21, m: 45 }],
+    ['десять', { h: 10, m: 0 }],
+  ])('%s', (text, clock) => {
+    expect(parseClock(text)).toEqual(clock)
+  })
+})
