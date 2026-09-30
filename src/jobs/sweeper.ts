@@ -3,6 +3,7 @@ import { ACTIVE_WINDOW_MS, NEW_DAYS } from '../analytics/roles.js'
 import { log } from '../lib/log.js'
 import type { Ctx } from '../bot/context.js'
 import { cancelPending } from '../outbox/queue.js'
+import { ensureNextMeeting } from '../bot/day-flow.js'
 
 const MIN = 60_000
 // Незакрытая сессия через час после планового конца — брошена. Не висит вечно и
@@ -58,6 +59,21 @@ export async function sweepOnce(ctx: Ctx): Promise<void> {
     take: 200,
   })
   for (const u of candidates) await ctx.db.$transaction((tx) => refreshRole(tx, u.id, now))
+
+  // Страховка инварианта «всегда есть следующая встреча»: тем, у кого с
+  // «писать первым» нет ни одного будущего сообщения и нет идущей сессии,
+  // ставим утро. Знакомство не прошли — не трогаем.
+  const silent = await ctx.db.user.findMany({
+    where: {
+      proactive: true,
+      blockedAt: null,
+      pendingInput: { notIn: ['timezone', 'start_time', 'ritual'] },
+      outbox: { none: { status: 'pending', kind: { in: ['meeting', 'summary', 'rest_over'] } } },
+      sessions: { none: { state: { in: ['collecting_intent', 'running', 'paused'] } } },
+    },
+    take: 200,
+  })
+  for (const u of silent) await ctx.db.$transaction((tx) => ensureNextMeeting(tx, u, now))
 
   // Дубли апдейтов приходят в пределах минут; неделя — с большим запасом.
   await ctx.db.processedUpdate.deleteMany({ where: { receivedAt: { lt: new Date(now.getTime() - 7 * 86_400_000) } } })

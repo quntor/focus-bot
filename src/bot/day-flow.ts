@@ -218,15 +218,21 @@ export async function planDayOff(ctx: Ctx, user: User): Promise<void> {
     // Блокировка пользователя: два одновременных нажатия не должны дать два
     // выходных на одной неделе.
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'dayoff:' + user.id}))`
-    const taken = await tx.dayOff.count({ where: { userId: user.id, dayKey: { gte: week, lte: addDays(week, 6) } } })
-    if (taken >= DAYS_OFF_PER_WEEK) return false
+    const taken = await tx.dayOff.findMany({ where: { userId: user.id, dayKey: { gte: week, lte: addDays(week, 6) } }, select: { dayKey: true } })
+    // Завтра уже выходной — подтверждаем его, а не отказываем «выходной уже был».
+    if (taken.some((off) => off.dayKey === tomorrow)) {
+      await putMeeting(tx, user, at, { defaulted: false, morning: true })
+      return 'already' as const
+    }
+    if (taken.length >= DAYS_OFF_PER_WEEK) return 'taken' as const
     await tx.dayOff.create({ data: { userId: user.id, dayKey: tomorrow, createdAt: now } })
     await logEvent(tx, user.id, 'day_off_planned', { day_key: tomorrow }, { at: now })
     await putMeeting(tx, user, at, { defaulted: false, morning: true })
     await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
-    return true
+    return 'set' as const
   })
-  if (!ok) return reply(ctx, user, T.dayOffTaken)
+  if (ok === 'taken') return reply(ctx, user, T.dayOffTaken)
+  if (ok === 'already') return reply(ctx, user, T.dayOffAlready(hhmm(at, user.timezone)))
   await reply(ctx, user, T.dayOffSet(hhmm(at, user.timezone)))
 }
 
@@ -266,7 +272,40 @@ async function putMeeting(
 // тишиной. Выбор человека её заменит.
 export async function putDefaultMeeting(tx: Prisma.TransactionClient, user: User, now: Date): Promise<void> {
   if (!user.proactive) return
-  await putMeeting(tx, user, nextLocalTime(user.timezone, morningClock(user), now), { defaulted: true, morning: true })
+  await putMeeting(tx, user, await nextMorning(tx, user, now), { defaulted: true, morning: true })
+}
+
+// Ближайшее утро после `after`, не попадающее на объявленный выходной.
+export async function nextMorning(tx: Prisma.TransactionClient, user: User, after: Date): Promise<Date> {
+  let at = nextLocalTime(user.timezone, morningClock(user), after)
+  for (let i = 0; i < 7; i++) {
+    const off = await tx.dayOff.findFirst({ where: { userId: user.id, dayKey: dayKey(at, user.timezone) }, select: { id: true } })
+    if (!off) return at
+    at = nextLocalTime(user.timezone, morningClock(user), at)
+  }
+  return at
+}
+
+// Инвариант: у пользователя с «писать первым» всегда есть одна будущая
+// встреча. Без него бот замолкал навсегда после пропущенного утра, вопроса
+// «Третий раз откладываем» или повторного включения настройки. Уже
+// поставленную встречу не трогает.
+export async function ensureNextMeeting(tx: Prisma.TransactionClient, user: User, now: Date): Promise<void> {
+  if (!user.proactive || user.blockedAt) return
+  const pending = await tx.outboxMessage.count({ where: { userId: user.id, kind: 'meeting', status: 'pending' } })
+  if (pending > 0) return
+  await putMeeting(tx, user, await nextMorning(tx, user, now), { defaulted: true, morning: true })
+}
+
+// Пояс или время утра сменились — утренняя встреча переезжает на новое утро.
+// Встреча на конкретное время («в 18:30») остаётся как договорились.
+export async function rescheduleMorning(tx: Prisma.TransactionClient, user: User, now: Date): Promise<void> {
+  const morning = await tx.outboxMessage.findFirst({
+    where: { userId: user.id, kind: 'meeting', status: 'pending', payload: { path: ['morning'], equals: true } },
+  })
+  if (!morning) return
+  const defaulted = (morning.payload as { defaulted?: unknown } | null)?.defaulted === true
+  await putMeeting(tx, user, await nextMorning(tx, user, now), { defaulted, morning: true })
 }
 
 // «Всё, на сегодня» — работает всегда и без уговоров, но заканчивается итогом
@@ -369,7 +408,7 @@ export async function onSummaryConfirm(ctx: Ctx, user: User, arg: string): Promi
     })
     if (res.count !== 1) return false
     const s = await buildSummary(tx, user, day)
-    await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'meeting_time_soft' } })
+    await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'meeting_time_soft', declinesInRow: 0 } })
     await logEvent(tx, user.id, 'daily_summary_confirmed', { day_key: day, sessions: s.sessions }, { at: now })
     return true
   })
@@ -504,6 +543,8 @@ export async function onPostpone(ctx: Ctx, user: User): Promise<void> {
       await tx.user.update({ where: { id: user.id }, data: { declinesInRow: 0 } })
       await cancelPending(tx, { userId: user.id, kind: { in: ['meeting', 'rest_over'] } })
       await logEvent(tx, user.id, 'decline_check_sent', { declines_in_row: updated.declinesInRow }, { at: now })
+      // Вопрос без ответа не должен оборачиваться тишиной: утро остаётся.
+      await ensureNextMeeting(tx, updated, now)
       return updated.declinesInRow
     }
     await putMeeting(tx, user, at, { defaulted: false, morning: false })

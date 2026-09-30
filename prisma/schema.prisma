@@ -334,6 +334,8 @@ model OutboxMessage {
   attempts    Int       @default(0)
   // Код ошибки без текста: описания Telegram бывают с данными запроса.
   lastError   String?   @map("last_error")
+  // Молчание на это напоминание уже засчитано отказом (один раз на сообщение).
+  silenceCountedAt DateTime? @map("silence_counted_at")
 
   createdAt DateTime @default(now()) @map("created_at")
 

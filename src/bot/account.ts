@@ -6,6 +6,7 @@ import { isTechnique } from '../session/technique.js'
 import { cb } from './callbacks.js'
 import { reply, type Ctx } from './context.js'
 import { resetConversationContext } from './conversation-context.js'
+import { ensureNextMeeting, rescheduleMorning } from './day-flow.js'
 import { askIntent } from './session-flow.js'
 import { T, hhmm } from './texts.js'
 
@@ -72,6 +73,7 @@ export async function onTimezoneText(ctx: Ctx, user: User, text: string): Promis
   await ctx.db.$transaction(async (tx) => {
     await tx.user.update({ where: { id: user.id }, data: { timezone: zone.timezone, pendingInput: next } })
     await logEvent(tx, user.id, 'timezone_set', { offset_minutes: offsetMinutes(zone.timezone, now), via: 'typed' }, { at: now })
+    await rescheduleMorning(tx, { ...user, timezone: zone.timezone }, now)
   })
   const updated = { ...user, timezone: zone.timezone }
   await reply(ctx, updated, T.timezoneSet(hhmm(now, zone.timezone)))
@@ -86,8 +88,10 @@ export async function onOnboardingButton(ctx: Ctx, user: User, arg: string): Pro
     const next = await afterTimezone(ctx, user)
     const done = await ctx.db.$transaction(async (tx) => {
       const r = await tx.user.updateMany({ where: { id: user.id, pendingInput: 'timezone' }, data: { timezone: MOSCOW, pendingInput: next } })
-      if (r.count === 1) await logEvent(tx, user.id, 'timezone_set', { offset_minutes: offsetMinutes(MOSCOW, now), via: 'confirmed' }, { at: now })
-      return r.count === 1
+      if (r.count !== 1) return false
+      await logEvent(tx, user.id, 'timezone_set', { offset_minutes: offsetMinutes(MOSCOW, now), via: 'confirmed' }, { at: now })
+      await rescheduleMorning(tx, { ...user, timezone: MOSCOW }, now)
+      return true
     })
     if (!done) return reply(ctx, user, T.stale)
     if (next === 'start_time') return reply(ctx, user, T.askStartTime, startTimeKeyboard())
@@ -121,8 +125,12 @@ async function saveStartTime(ctx: Ctx, user: User, value: string | null): Promis
       where: { id: user.id, pendingInput: 'start_time' },
       data: { pendingInput: 'ritual', ...(value ? { morningTime: value } : {}) },
     })
-    if (r.count === 1 && value) await logEvent(tx, user.id, 'settings_changed', { key: 'morning_time' }, { at: now })
-    return r.count === 1
+    if (r.count !== 1) return false
+    if (value) {
+      await logEvent(tx, user.id, 'settings_changed', { key: 'morning_time' }, { at: now })
+      await rescheduleMorning(tx, { ...user, morningTime: value }, now)
+    }
+    return true
   })
   if (!done) return reply(ctx, user, T.stale)
   await reply(ctx, user, T.askRitual, ritualKeyboard())
@@ -193,6 +201,8 @@ export async function onSetting(ctx: Ctx, user: User, arg: string): Promise<void
         await tx.user.update({ where: { id: user.id }, data: { proactive: !user.proactive } })
         // Выключил «писать первым» — снимаем встречи и сводки, которые уже ждут.
         if (user.proactive) await cancelPending(tx, { userId: user.id, kind: { in: ['meeting', 'summary'] } })
+        // Включил снова — утро появляется сразу, а не «когда-нибудь».
+        else await ensureNextMeeting(tx, { ...user, proactive: true }, now)
       }
       await logEvent(tx, user.id, 'settings_changed', { key: arg === 'pings' ? 'pings_enabled' : 'proactive' }, { at: now })
     })
@@ -220,6 +230,7 @@ export async function onMorningText(ctx: Ctx, user: User, text: string): Promise
   await ctx.db.$transaction(async (tx) => {
     await tx.user.update({ where: { id: user.id }, data: { morningTime: value, pendingInput: 'none' } })
     await logEvent(tx, user.id, 'settings_changed', { key: 'morning_time' }, { at: now })
+    await rescheduleMorning(tx, { ...user, morningTime: value }, now)
   })
   await reply(ctx, user, T.saved)
 }

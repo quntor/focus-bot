@@ -60,9 +60,14 @@ describe.skipIf(!hasDb)('геймификация в сообщениях', () =
     const { user } = await session(bot)
     await bot.text(A, '/dayoff')
     expect(bot.lastText(A)).toContain('Завтра выходной — серия не прервётся')
+    // Повторно в тот же день — это тот же выходной, а не второй.
+    await bot.text(A, '/dayoff')
+    expect(bot.lastText(A)).toContain('Завтра и так выходной')
+    // В сам выходной (среда) взять ещё один на четверг нельзя.
+    bot.advance(DAY)
     await bot.text(A, '/dayoff')
     expect(bot.lastText(A)).toContain('выходной уже был')
-    bot.advance(2 * DAY)
+    bot.advance(DAY)
     await session(bot)
     const streak = await prisma.streak.findUniqueOrThrow({ where: { userId: user.id } })
     expect([streak.current, streak.freezesLeft]).toEqual([2, 2])

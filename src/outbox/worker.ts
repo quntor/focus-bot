@@ -5,7 +5,7 @@ import { localHour } from '../lib/time.js'
 import { cb } from '../bot/callbacks.js'
 import { markBlocked, type Ctx } from '../bot/context.js'
 import { rememberConversationContext } from '../bot/conversation-context.js'
-import { buildSummary, declineKeyboard, DECLINES_BEFORE_ASK, putDefaultMeeting, reminderKeyboard } from '../bot/day-flow.js'
+import { buildSummary, declineKeyboard, DECLINES_BEFORE_ASK, ensureNextMeeting, reminderKeyboard } from '../bot/day-flow.js'
 import { deadlineKeyboard, openCollecting } from '../bot/session-flow.js'
 import { buildTaskStartPrompt } from '../bot/tasks.js'
 import { T } from '../bot/texts.js'
@@ -57,8 +57,13 @@ async function countSilentDecline(ctx: Ctx, user: User): Promise<number> {
   })
   if (!last?.sentAt) return user.declinesInRow
   if (user.lastUserActionAt && user.lastUserActionAt > last.sentAt) return user.declinesInRow
-  const updated = await ctx.db.user.update({ where: { id: user.id }, data: { declinesInRow: { increment: 1 } } })
-  return updated.declinesInRow
+  // Одно молчание — один отказ, даже если это напоминание собирается повторно.
+  return ctx.db.$transaction(async (tx) => {
+    const marked = await tx.outboxMessage.updateMany({ where: { id: last.id, silenceCountedAt: null }, data: { silenceCountedAt: ctx.now() } })
+    if (marked.count !== 1) return user.declinesInRow
+    const updated = await tx.user.update({ where: { id: user.id }, data: { declinesInRow: { increment: 1 } } })
+    return updated.declinesInRow
+  })
 }
 
 async function renderReminder(ctx: Ctx, user: User, text: string, keyboard: Keyboard, openSession: boolean): Promise<Render> {
@@ -71,6 +76,7 @@ async function renderReminder(ctx: Ctx, user: User, text: string, keyboard: Keyb
         after: async (tx) => {
           await tx.user.update({ where: { id: user.id }, data: { declinesInRow: 0 } })
           await logEvent(tx, user.id, 'decline_check_sent', { declines_in_row: declines }, { at: ctx.now() })
+          await ensureNextMeeting(tx, user, ctx.now())
         },
       },
     }
@@ -158,7 +164,10 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
     const active = await ctx.db.focusSession.count({ where: { userId: user.id, state: { in: ['running', 'paused'] } } })
     if (active > 0) return { skip: true }
     const r = await renderReminder(ctx, user, T.restOver, reminderKeyboard(), true)
-    return withEvent(r, (tx) => logEvent(tx, user.id, 'rest_over_sent', { session_id: sessionId }, { at: now, sessionId }))
+    return withEvent(r, async (tx) => {
+      await logEvent(tx, user.id, 'rest_over_sent', { session_id: sessionId }, { at: now, sessionId })
+      await ensureNextMeeting(tx, user, now)
+    })
   }
 
   if (m.kind === 'meeting') {
@@ -184,6 +193,8 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
       })
       await logEvent(tx, user.id, 'meeting_sent', {}, { at: now })
       if (p.defaulted === true) await logEvent(tx, user.id, 'meeting_defaulted', { minutes_ahead: 0 }, { at: now })
+      // Отправленная встреча — не последняя: следующее утро ставится сразу.
+      await ensureNextMeeting(tx, user, now)
     })
   }
 
@@ -204,8 +215,7 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
         })
         await logEvent(tx, user.id, 'daily_summary_sent', { day_key: day }, { at: now })
         // Сводка тоже не заканчивается тишиной: встреча на утро ставится сразу.
-        const pending = await tx.outboxMessage.count({ where: { userId: user.id, kind: 'meeting', status: 'pending' } })
-        if (pending === 0) await putDefaultMeeting(tx, user, now)
+        await ensureNextMeeting(tx, user, now)
       },
     }
   }
