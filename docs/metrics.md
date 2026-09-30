@@ -133,13 +133,15 @@ UPDATE и DELETE запрещены триггером.
 | `session_completed` | выбрал исход | да | `session_id`, `outcome`, `elapsed_minutes`, `early`, `counted` |
 | `session_stopped` | `/stop` или новая сессия с экрана перерыва | да | `session_id`, `elapsed_minutes` |
 | `session_abandoned` | до 01.10: отчёта нет через час после конца / нет ответа на пинги; теперь не пишется | нет | `session_id`, `reason` |
-| `session_auto_finished` | сессия засчитана без исхода: час без ответа после конца (время до планового конца), пропущенные проверки свободного режима, новая сессия из перерыва | нет | `session_id`, `elapsed_minutes`, `counted`, `reason` |
+| `session_auto_finished` | сессия засчитана без исхода: час без ответа после конца (`timeout`, время до планового конца), пропущенные проверки свободного режима (`no_ping`), новая сессия из перерыва (`new_session`), перерыв дольше 3 часов (`break_timeout`, время до перерыва), «на сегодня всё» посреди сессии (`day_end`, время до планового конца). Сессия кончается в засчитанный момент | нет | `session_id`, `elapsed_minutes`, `counted`, `reason` |
 | `report_submitted` | написал пару слов об итоге | да | `session_id`, `length_chars` |
 | `report_parsed` | отчёт разобран | нет | `session_id`, `llm_used`, `progress` |
-| `llm_fallback` | модель недоступна или ответила не по схеме | нет | `stage`, `reason` |
+| `llm_fallback` | модель недоступна, ответила не по схеме или исчерпан дневной лимит (`budget`) | нет | `stage`, `reason` |
+| `llm_budget_exceeded` | исчерпан лимит 300 вызовов модели за сутки; раз в сутки на человека | нет | `limit` |
 | `task_stuck_detected` | третья сессия подряд без сдвига | нет | `task_id`, `sessions_without_progress` |
 | `rest_chosen` | выбор после отчёта | да | `session_id`, `choice`, `rest_minutes` |
 | `rest_over_sent` | отдых кончился | нет | `session_id` |
+| `break_over_sent` | перерыв кончился, бот зовёт обратно | нет | `session_id` |
 | `meeting_scheduled` | назначил следующую встречу | да | `kind`, `minutes_ahead` |
 | `meeting_defaulted` | не назначил — бот поставил утро | нет | `minutes_ahead` |
 | `meeting_sent` | напоминание о встрече | нет | — |
