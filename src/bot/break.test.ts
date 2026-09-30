@@ -355,4 +355,19 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
     }
     expect(bot.tg.sent.slice(before).filter((m) => m.text.includes('Пора работать')).length).toBeGreaterThanOrEqual(2)
   })
+
+  it('вечерняя сводка на перерыве не пишет «сессий не было»', async () => {
+    const bot = makeBot({ now: new Date('2026-09-22T17:30:00Z') }) // 20:30 МСК
+    await bot.onboard(A, '20:30')
+    await bot.text(A, 'Начать сессию')
+    bot.advance(20)
+    await bot.text(A, 'Перерыв')
+    bot.advance(15)
+
+    await runOutboxOnce(bot.ctx)
+
+    const summary = bot.textsTo(A).find((text) => text.includes('Серия:'))
+    expect(summary).toContain('Сессия на перерыве — итог посчитаю, когда закончишь.')
+    expect(summary).not.toContain('сессий не было')
+  })
 })

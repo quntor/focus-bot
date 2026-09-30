@@ -190,6 +190,8 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
   const recent = await db.dailyGoal.count({
     where: { userId: user.id, dayKey: { gte: addDays(day, -6), lte: day }, completedSessions: { gt: 0 } },
   })
+  // Идущая сессия в итог ещё не вошла — но и «сессий не было» про неё неправда.
+  const active = await db.focusSession.findFirst({ where: { userId: user.id, state: { in: ['running', 'paused'] } }, select: { state: true } })
 
   return {
     sessions: finished.length,
@@ -206,6 +208,7 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
     bestWeek,
     activeDays: recent,
     taskTimes,
+    inProgress: active?.state === 'running' || active?.state === 'paused' ? active.state : null,
   }
 }
 

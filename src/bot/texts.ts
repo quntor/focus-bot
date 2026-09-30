@@ -329,9 +329,12 @@ export const T = {
   summary: (s: DaySummary) =>
     [
       s.sessions === 0
-        ? 'Сегодня сессий не было — бывает.'
+        ? s.inProgress
+          ? `${s.inProgress === 'paused' ? 'Сессия на перерыве' : 'Сессия ещё идёт'} — итог посчитаю, когда закончишь.`
+          : 'Сегодня сессий не было — бывает.'
         : `За сегодня: ${s.sessions} ${plural(s.sessions, 'сессия', 'сессии', 'сессий')}` +
           outcomesLine(s),
+      s.sessions > 0 && s.inProgress ? (s.inProgress === 'paused' ? 'Ещё одна — на перерыве.' : 'Ещё одна идёт сейчас.') : null,
       s.target ? `Цель: ${s.counted} из ${s.target}.` : null,
       s.abandoned > 0 ? `Брошено: ${s.abandoned}.` : null,
       s.taskTimes.length
@@ -429,6 +432,8 @@ export type DaySummary = {
   bestWeek: boolean
   activeDays: number
   taskTimes: { title: string; minutes: number; completed: boolean }[]
+  // Сессия, которая идёт или стоит на перерыве в момент итога.
+  inProgress: 'running' | 'paused' | null
 }
 
 // Очки — сведения о прогрессе, а не плата и не угроза: сравнение с собой же
