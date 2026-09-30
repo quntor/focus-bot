@@ -54,14 +54,15 @@ const TASK_SPLIT = /^task_split(?:_clarify|_manual)?:([0-9a-f-]{36})$/
 // с чужого аккаунта не должен размножать сессии и события.
 export const RATE_LIMIT_PER_MINUTE = 30
 
-async function allowed(ctx: Ctx, tgId: bigint): Promise<boolean> {
+// Номер апдейта пользователя в текущем минутном окне.
+async function countInWindow(ctx: Ctx, tgId: bigint): Promise<number> {
   const now = ctx.now()
   const window = new Date(Math.floor(now.getTime() / 60_000) * 60_000)
   const rows = await ctx.db.$queryRaw<{ count: number }[]>`
     INSERT INTO rate_limits (tg_id, window_start, count) VALUES (${tgId}, ${window}, 1)
     ON CONFLICT (tg_id, window_start) DO UPDATE SET count = rate_limits.count + 1
     RETURNING count`
-  return (rows[0]?.count ?? 0) <= RATE_LIMIT_PER_MINUTE
+  return rows[0]?.count ?? 0
 }
 
 // Владелец данных — только from.id проверенного апдейта. Ни текст сообщения, ни
@@ -101,8 +102,12 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
   if (chatType !== undefined && chatType !== 'private') return
 
   const tgId = BigInt(sender.id)
-  if (!(await allowed(ctx, tgId))) {
+  const count = await countInWindow(ctx, tgId)
+  if (count > RATE_LIMIT_PER_MINUTE) {
+    // Молчание выглядит как сломанный бот. Но отвечать на каждое сообщение
+    // сверх лимита — снова размножать отправки: пишем один раз за окно.
     if (cq) await ctx.tg.answerCallback(cq.id, T.tooFast).catch(() => {})
+    else if (count === RATE_LIMIT_PER_MINUTE + 1) await ctx.tg.send(tgId, T.tooFast).catch(() => {})
     log.warn('rate_limited')
     return
   }
@@ -129,6 +134,11 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
       }
     }
     else if (msg?.text) await onText(ctx, user, msg.text, created, contextEventId)
+    // Фото, стикер, кружок, файл: разобрать не можем, но и молчать нельзя.
+    else if (msg) {
+      if (created) await account.beginOnboarding(ctx, user)
+      else await reply(ctx, user, T.unsupported)
+    }
   } catch (error) {
     // Наружу — общая фраза, подробности — во внутренний лог без текста.
     log.error('handle_failed', error)

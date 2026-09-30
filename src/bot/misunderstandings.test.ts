@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import type { LlmProvider } from '../llm/provider.js'
 import { prisma, hasDb, resetDb } from '../test/db.js'
 import { makeBot } from '../test/bot.js'
+import { handleUpdate } from '../tg/webhook.js'
 import { workDayKey } from '../lib/day.js'
 import { buildSummary } from './day-flow.js'
 import { T } from './texts.js'
@@ -215,5 +216,24 @@ describe.skipIf(!hasDb)('границы недопониманий', () => {
     expect(running.taskId).toBeNull()
     expect(await prisma.task.count()).toBe(0)
     expect(await prisma.event.count({ where: { type: 'route_stale' } })).toBe(1)
+  })
+
+  it('на фото и стикер отвечает, а не молчит', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+
+    await handleUpdate(bot.ctx, { update_id: 990001, message: { photo: [{ file_id: 'p' }], from: { id: A }, chat: { id: A, type: 'private' } } })
+
+    expect(bot.lastText(A)).toBe(T.unsupported)
+  })
+
+  it('сверх лимита частоты пишет «Слишком быстро» один раз, а не на каждое сообщение', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    bot.advance(1)
+
+    for (let i = 0; i < 34; i++) await bot.text(A, '/help')
+
+    expect(bot.textsTo(A).filter((text) => text === T.tooFast)).toHaveLength(1)
   })
 })
