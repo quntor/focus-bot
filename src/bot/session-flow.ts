@@ -514,6 +514,11 @@ export async function onIntentText(ctx: Ctx, user: User, text: string): Promise<
   await handleIntent(ctx, user, session, text.trim().slice(0, INTENT_MAX))
 }
 
+// Свободная техника длины не имеет: «Короче/Длиннее» ей не к чему.
+function freeKeyboard(sessionId: string): Keyboard {
+  return [[{ text: T.ok, data: cb('len', sessionId, 'ok') }], [{ text: T.cancel, data: cb('len', sessionId, 'cancel') }]]
+}
+
 function lengthKeyboard(sessionId: string): Keyboard {
   return [
     [{ text: T.ok, data: cb('len', sessionId, 'ok') }],
@@ -657,8 +662,8 @@ async function handleIntent(ctx: Ctx, user: User, session: FocusSession, text: s
     return
   }
   const text2 =
-    minutes === null ? T.proposeFree : technique !== 'auto' ? T.proposeTechnique(minutes, rest) : T.propose(minutes, rest)
-  await reply(ctx, user, text2, lengthKeyboard(session.id))
+    minutes === null ? T.proposeFree(user.pingsEnabled) : technique !== 'auto' ? T.proposeTechnique(minutes, rest) : T.propose(minutes, rest)
+  await reply(ctx, user, text2, minutes === null ? freeKeyboard(session.id) : lengthKeyboard(session.id))
 }
 
 export async function onLength(ctx: Ctx, user: User, sessionId: string, arg: string): Promise<void> {
@@ -1335,7 +1340,7 @@ async function finalizeReport(
   if (stuck) await reply(ctx, user, T.stuck(stuck.title), [[{ text: T.taskBreakdownButton, data: cb('task', stuck.id, 'split') }]])
   if (allocationInvalid) await reply(ctx, user, T.timeAllocationInvalid)
   else if (allocatedMinutes !== null) await reply(ctx, user, T.timeAllocated(allocatedMinutes))
-  if (!options.endDay && session.restChoice === null) await askRest(ctx, user, session, { continueSuggested: continuationRelevant })
+  if (!options.endDay && session.restChoice === null) await askRest(ctx, user, session, { continueSuggested: continuationRelevant, skipped: text === null })
 }
 
 // После нескольких сессий бот сам замечает рисунок и предлагает технику одной
@@ -1366,7 +1371,7 @@ async function askRest(
   ctx: Ctx,
   user: User,
   session: FocusSession,
-  options: { continueSuggested?: boolean } = {},
+  options: { continueSuggested?: boolean; skipped?: boolean } = {},
 ): Promise<void> {
   const now = ctx.now()
   const rest = session.plannedRestMinutes ?? restFor(session.plannedMinutes)
@@ -1401,7 +1406,7 @@ async function askRest(
       return
     }
   }
-  await reply(ctx, user, T.askRest(rest), [
+  await reply(ctx, user, T.askRest(rest, options.skipped), [
     [{ text: T.restOk(rest), data: cb('rest', session.id, 'rest') }],
     [{ text: T.restContinue, data: cb('rest', session.id, 'continue') }],
     [{ text: T.restLater, data: cb('rest', session.id, 'later') }],

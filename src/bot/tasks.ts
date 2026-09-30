@@ -147,6 +147,14 @@ export async function buildTaskStartPrompt(
   }
 }
 
+// Список, где нажатие на задачу сразу её запускает (или привязывает к идущему
+// таймеру), а не открывает карточку.
+export async function showTaskPicker(ctx: Ctx, user: User, prefix: string): Promise<void> {
+  const prompt = await buildTaskStartPrompt(ctx, user, prefix)
+  if (!prompt) return reply(ctx, user, T.tasksEmpty)
+  await reply(ctx, user, prompt.text, prompt.keyboard)
+}
+
 async function showTaskStartPrompt(ctx: Ctx, user: User, page: number): Promise<void> {
   const prompt = await buildTaskStartPrompt(ctx, user, T.meetingPlain, page)
   if (!prompt) return reply(ctx, user, T.tasksEmpty)

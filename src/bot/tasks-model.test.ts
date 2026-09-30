@@ -122,8 +122,8 @@ describe.skipIf(!hasDb)('шаги разбора связаны с исходн�
     const bot = makeBot({ llm: llm({ breakdown: () => JSON.stringify({ steps }) }) })
     await bot.onboard(A)
     const u = await user()
-    const parent = await prisma.task.create({ data: { userId: u.id, title: 'Курсовая' } })
-    await prisma.task.create({ data: { userId: u.id, title: 'Позвонить маме' } })
+    const parent = await prisma.task.create({ data: { userId: u.id, title: 'Курсовая', createdAt: new Date('2026-09-20T10:00:00Z') } })
+    await prisma.task.create({ data: { userId: u.id, title: 'Позвонить маме', createdAt: new Date('2026-09-20T11:00:00Z') } })
 
     await bot.press(A, `task:${parent.id}:split`)
     await bot.press(A, `task:${parent.id}:splitauto`)
@@ -153,5 +153,38 @@ describe.skipIf(!hasDb)('шаги разбора связаны с исходн�
     await bot.press(A, 'tasks::add')
     await bot.text(A, 'Задача 1')
     expect(bot.lastText(A)).toContain('«Задача 1» уже есть в списке.')
+  })
+})
+
+describe.skipIf(!hasDb)('тексты совпадают с поведением', () => {
+  beforeEach(resetDb)
+
+  it('«Сменить задачу» после отчёта не говорит «Таймер уже идёт» и запускает выбранную', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    const u = await user()
+    const task = await prisma.task.create({ data: { userId: u.id, title: 'Эссе' } })
+    await bot.text(A, 'глава, 40 минут')
+    const s = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+    bot.advance(40)
+    await bot.press(A, `out:${s.id}:done`)
+    await bot.press(A, `skiprep:${s.id}:`)
+    expect(bot.lastText(A)).toMatch(/^Отдохнёшь/)
+    // Кнопки продолжения появляются, когда разбор отчёта предложил продолжить.
+    await prisma.focusSession.update({ where: { id: s.id }, data: { continueSuggested: true } })
+
+    await bot.press(A, `again:${s.id}:change`)
+    expect(bot.lastText(A)).not.toContain('Таймер уже идёт')
+    await bot.press(A, bot.lastButton(A, `task:${task.id}:start`))
+    expect(await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })).toMatchObject({ taskId: task.id })
+  })
+
+  it('свободная техника: без «Короче/Длиннее» и без обещания заглянуть при выключенных пингах', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    await prisma.user.update({ where: { id: (await user()).id }, data: { technique: 'free', pingsEnabled: false } })
+    await bot.text(A, 'глава')
+    expect(bot.lastText(A)).toBe('Без таймера. Начинаем? Закончишь — /done.')
+    expect(bot.buttons(A).some((b) => b.data.endsWith(':down'))).toBe(false)
   })
 })

@@ -299,7 +299,7 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
       case 'again':
         if (id && (arg === 'same' || arg === 'step' || arg === 'change')) {
           return await session.onContinueChoice(ctx, user, id, arg, {
-            change: () => tasks.showTasks(ctx, user, 0, T.tasksChoose),
+            change: () => tasks.showTaskPicker(ctx, user, T.tasksPick),
           })
         }
         break
