@@ -134,6 +134,22 @@ describe.skipIf(!hasDb)('конец сессии', () => {
     ])
   })
 
+  it('«✅ Завершить» на перерыве закрывает задачу, но не сессию', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    const u = await user()
+    const task = await prisma.task.create({ data: { userId: u.id, title: 'Слайды' } })
+    await bot.press(A, `task:${task.id}:start`)
+    bot.advance(20)
+    await bot.text(A, 'Перерыв')
+
+    await bot.press(A, `task:${task.id}:done`)
+
+    expect(await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).toMatchObject({ status: 'done' })
+    expect(await prisma.focusSession.findFirstOrThrow({ where: { userId: u.id } })).toMatchObject({ state: 'paused', taskId: null })
+    expect(bot.lastText(A)).toContain('Ты на перерыве')
+  })
+
   it('кнопки «Время вышло» работают, даже если бот ждал другого ответа', async () => {
     const bot = makeBot()
     await bot.onboard(A)

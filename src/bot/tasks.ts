@@ -545,6 +545,7 @@ async function completeTask(
   const now = ctx.now()
   let doneTitle = task.title
   let runningUntil: Date | null | undefined
+  let onBreak = false
   try {
     await ctx.db.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
@@ -564,16 +565,18 @@ async function completeTask(
       } else if (
         keepRunning &&
         current?.taskId === completed.id &&
-        current.state === 'running'
+        (current.state === 'running' || current.state === 'paused')
       ) {
-        // Сессия — заход, а не задача: период продолжается без задачи, следующую
-        // человек выберет, и она получит время от начала периода.
+        // Сессия — заход, а не задача: период (или перерыв) продолжается без
+        // задачи, следующую человек выберет, и она получит время с этого момента.
+        // Закрытие задачи сессию не заканчивает никогда (решение 01.10).
         const released = await tx.focusSession.updateMany({
-          where: { id: current.id, userId: user.id, state: 'running', taskId: completed.id },
+          where: { id: current.id, userId: user.id, state: current.state, taskId: completed.id },
           data: { taskId: null, intentText: null, scope: 'step' },
         })
         if (released.count !== 1) throw new StaleTransition()
-        runningUntil = current.plannedEndAt
+        if (current.state === 'running') runningUntil = current.plannedEndAt
+        else onBreak = true
       } else if (current?.taskId === completed.id && (current.state === 'running' || current.state === 'paused')) {
         const openPauseSeconds =
           current.state === 'paused' && current.pausedAt
@@ -624,7 +627,8 @@ async function completeTask(
     const prompt = await buildTaskStartPrompt(ctx, user, notice)
     if (prompt) await reply(ctx, user, prompt.text, prompt.keyboard)
     else await reply(ctx, user, `${notice}\n${T.taskDoneTimerRunsEmpty}`)
-  } else if (showList) await showTasks(ctx, user, 0, T.taskCompleted(doneTitle))
+  } else if (onBreak) await reply(ctx, user, `${T.taskCompleted(doneTitle)}\n${T.breakChoice}`)
+  else if (showList) await showTasks(ctx, user, 0, T.taskCompleted(doneTitle))
   else await reply(ctx, user, T.taskCompleted(doneTitle))
   await offerParentClose(ctx, user, task.id)
   return true
