@@ -181,7 +181,7 @@ describe.skipIf(!hasDb)('границы недопониманий', () => {
 
     await bot.text(A, 'Приступаю к интервью')
 
-    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: previous.id } })).toMatchObject({ state: 'abandoned' })
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: previous.id } })).toMatchObject({ state: 'finished', outcome: null })
     const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
     expect(running).toMatchObject({ taskId: task.id, intentText: 'Интервью', startedAt: bot.now() })
   })

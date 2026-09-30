@@ -15,7 +15,7 @@ import { PRESETS, isTechnique, type Technique } from '../session/technique.js'
 import { cb } from './callbacks.js'
 import { reply, type Ctx } from './context.js'
 import { recentConversationContext, resetConversationContext } from './conversation-context.js'
-import { T, hhmm } from './texts.js'
+import { DEADLINE_EXTEND_MINUTES, T, hhmm } from './texts.js'
 import type { Keyboard } from '../tg/client.js'
 
 const MIN = 60_000
@@ -94,6 +94,45 @@ function periodPingAt(user: User, session: FocusSession, now: Date): Date | null
 
 export function activeElapsedMinutes(session: FocusSession, now: Date): number {
   return Math.floor(activeElapsedMs(session, now) / MIN)
+}
+
+export type AutoFinishReason = 'timeout' | 'no_ping' | 'new_session'
+
+// Засчитать сессию без исхода: человек не ответил на «Время вышло», пропустил
+// проверки в свободном режиме или из перерыва начал новую. Отработанное
+// время — до `until` (плановый конец, последняя проверка, начало перерыва),
+// но не дольше фактического. Бросает сессию только /stop.
+export async function autoFinish(
+  tx: Prisma.TransactionClient,
+  user: User,
+  session: FocusSession,
+  until: Date,
+  now: Date,
+  reason: AutoFinishReason,
+): Promise<{ elapsed: number; counted: boolean; credit: Credit | null }> {
+  if (session.state !== 'running' && session.state !== 'paused') throw new StaleTransition()
+  const end = until < now ? until : now
+  const elapsed = Math.floor(activeElapsedMs(session, end) / MIN)
+  const counted = isCounted('finished', elapsed)
+  const openPauseSeconds = session.state === 'paused' && session.pausedAt ? Math.floor(Math.max(0, now.getTime() - session.pausedAt.getTime()) / 1000) : 0
+  await transition(tx, { sessionId: session.id, userId: user.id }, session.state, 'finished', {
+    outcome: null,
+    finishedAt: now,
+    counted,
+    pausedAt: null,
+    pausedSeconds: session.pausedSeconds + openPauseSeconds,
+  })
+  await tx.outboxMessage.updateMany({
+    where: {
+      userId: user.id,
+      status: { in: ['pending', 'paused'] },
+      OR: [{ idempotencyKey: { startsWith: `ping:${session.id}` } }, { idempotencyKey: { startsWith: `session_end:${session.id}` } }],
+    },
+    data: { status: 'canceled' },
+  })
+  await logEvent(tx, user.id, 'session_auto_finished', { session_id: session.id, elapsed_minutes: elapsed, counted, reason }, { at: now, sessionId: session.id })
+  const credit = counted ? await creditCountedSession(tx, { userId: user.id, sessionId: session.id, dayKey: dayKey(end, user.timezone), at: now }) : null
+  return { elapsed, counted, credit }
 }
 
 function sessionHistory(ctx: Ctx, userId: string) {
@@ -218,14 +257,17 @@ async function completeTaskAndRest(
           ? activeTasks.find((candidate) => candidate.id === current.taskId) ?? null
           : null
       if (!task && cleanTitle) task = await tx.task.create({ data: { userId: user.id, title: cleanTitle, createdAt: now } })
-      if (!task) throw new StaleTransition()
-      taskTitle = task.title
+      // Сессия без задачи тоже заканчивается по «готово, иду отдыхать»:
+      // закрывается сессия, а отмечать готовой нечего.
+      taskTitle = task?.title ?? null
 
-      const associated = await tx.focusSession.updateMany({
-        where: { id: current.id, userId: user.id, state: 'running', taskId: current.taskId },
-        data: { taskId: task.id, intentText: task.title },
-      })
-      if (associated.count !== 1) throw new StaleTransition()
+      if (task) {
+        const associated = await tx.focusSession.updateMany({
+          where: { id: current.id, userId: user.id, state: 'running', taskId: current.taskId },
+          data: { taskId: task.id, intentText: task.title },
+        })
+        if (associated.count !== 1) throw new StaleTransition()
+      }
       await transition(tx, { sessionId: current.id, userId: user.id }, 'running', 'finished', {
         outcome: 'done',
         finishedAt: now,
@@ -236,28 +278,30 @@ async function completeTaskAndRest(
       await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `ping:${current.id}` } })
       await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `session_end:${current.id}` } })
 
-      if (current.taskId && current.taskId !== task.id) {
-        await tx.task.updateMany({
-          where: { id: current.taskId, userId: user.id, sessionsCount: { gt: 0 } },
-          data: { sessionsCount: { decrement: 1 } },
+      if (task) {
+        if (current.taskId && current.taskId !== task.id) {
+          await tx.task.updateMany({
+            where: { id: current.taskId, userId: user.id, sessionsCount: { gt: 0 } },
+            data: { sessionsCount: { decrement: 1 } },
+          })
+        }
+        const marked = await tx.task.updateMany({
+          where: { id: task.id, userId: user.id, status: 'active' },
+          data: {
+            status: 'done',
+            lastProgressAt: now,
+            lastSessionAt: now,
+            sessionsSinceProgress: 0,
+            ...(current.taskId === task.id ? {} : { sessionsCount: { increment: 1 } }),
+          },
+        })
+        if (marked.count !== 1) throw new StaleTransition()
+
+        await tx.taskTimeAllocation.deleteMany({ where: { userId: user.id, sessionId: current.id } })
+        await tx.taskTimeAllocation.create({
+          data: { userId: user.id, sessionId: current.id, taskId: task.id, seconds: elapsedSeconds, source: 'report', createdAt: now, updatedAt: now },
         })
       }
-      const marked = await tx.task.updateMany({
-        where: { id: task.id, userId: user.id, status: 'active' },
-        data: {
-          status: 'done',
-          lastProgressAt: now,
-          lastSessionAt: now,
-          sessionsSinceProgress: 0,
-          ...(current.taskId === task.id ? {} : { sessionsCount: { increment: 1 } }),
-        },
-      })
-      if (marked.count !== 1) throw new StaleTransition()
-
-      await tx.taskTimeAllocation.deleteMany({ where: { userId: user.id, sessionId: current.id } })
-      await tx.taskTimeAllocation.create({
-        data: { userId: user.id, sessionId: current.id, taskId: task.id, seconds: elapsedSeconds, source: 'report', createdAt: now, updatedAt: now },
-      })
       await enqueue(tx, {
         userId: user.id,
         kind: 'rest_over',
@@ -273,14 +317,16 @@ async function completeTaskAndRest(
         early: current.plannedEndAt !== null && now < current.plannedEndAt,
         counted,
       }, { at: now, sessionId: current.id })
-      await logEvent(tx, user.id, 'task_completed', { task_id: task.id, source: 'text' }, { at: now, sessionId: current.id })
-      await logEvent(tx, user.id, 'task_time_allocated', {
-        session_id: current.id,
-        task_count: 1,
-        allocated_seconds: elapsedSeconds,
-        unassigned_seconds: 0,
-        source: 'report',
-      }, { at: now, sessionId: current.id })
+      if (task) {
+        await logEvent(tx, user.id, 'task_completed', { task_id: task.id, source: 'text' }, { at: now, sessionId: current.id })
+        await logEvent(tx, user.id, 'task_time_allocated', {
+          session_id: current.id,
+          task_count: 1,
+          allocated_seconds: elapsedSeconds,
+          unassigned_seconds: 0,
+          source: 'report',
+        }, { at: now, sessionId: current.id })
+      }
       await logEvent(tx, user.id, 'rest_chosen', { session_id: current.id, choice: 'rest', rest_minutes: rest }, { at: now, sessionId: current.id })
       if (counted) await creditCountedSession(tx, { userId: user.id, sessionId: current.id, dayKey: dayKey(now, user.timezone), at: now })
     })
@@ -292,7 +338,7 @@ async function completeTaskAndRest(
   await reply(
     ctx,
     user,
-    `${T.taskCompleted(taskTitle!)}\n${T.restStarted(hhmm(new Date(now.getTime() + rest * MIN), user.timezone))}\nКак прошло? ${T.askReport}`,
+    [taskTitle ? T.taskCompleted(taskTitle) : null, T.restStarted(hhmm(new Date(now.getTime() + rest * MIN), user.timezone)), `Как прошло? ${T.askReport}`].filter(Boolean).join('\n'),
     [[{ text: T.skip, data: cb('skiprep', session.id) }]],
   )
 }
@@ -986,8 +1032,19 @@ export async function onDeadlineChoice(
     data: { pendingInput: 'none' },
   })
   if (cleared.count !== 1) return reply(ctx, user, T.stale)
-  if (choice === 'break') return onBreak(ctx, { ...user, pendingInput: 'none' })
-  await reply(ctx, user, T.deadlineContinue)
+  // «Пора отдыхать» после отработанного периода — конец сессии, а не перерыв:
+  // исход, отчёт и отдых, как у /done. Перерыв посреди работы — кнопка «Перерыв».
+  if (choice === 'break') return reply(ctx, user, T.deadlineBreak, outcomeKeyboard(sessionId))
+  // «Ещё поработаю» сдвигает конец: иначе через час сессия считалась бы брошенной.
+  const now = ctx.now()
+  const end = new Date(now.getTime() + DEADLINE_EXTEND_MINUTES * MIN)
+  await ctx.db.$transaction(async (tx) => {
+    const moved = await tx.focusSession.updateMany({ where: { id: sessionId, userId: user.id, state: 'running' }, data: { plannedEndAt: end } })
+    if (moved.count !== 1) throw new StaleTransition()
+    await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `session_end:${sessionId}` } })
+    await enqueue(tx, { userId: user.id, kind: 'session_end', key: `session_end:${sessionId}:${end.getTime()}`, sendAfter: end, payload: { sessionId } })
+  })
+  await reply(ctx, user, T.deadlineContinue(hhmm(end, user.timezone)))
 }
 
 export async function onDone(ctx: Ctx, user: User): Promise<void> {
@@ -1551,22 +1608,14 @@ export async function onNewAfterBreak(ctx: Ctx, user: User, afterClose?: () => P
     else await onStartButton(ctx, user)
     return
   }
-  const pauseMs = session.state === 'paused' && session.pausedAt ? Math.max(0, now.getTime() - session.pausedAt.getTime()) : 0
-  const elapsed = Math.floor(activeElapsedMs(session, now) / MIN)
-
   try {
     await ctx.db.$transaction(async (tx) => {
       if (session.state === 'collecting_intent') {
         await transition(tx, { sessionId: session.id, userId: user.id }, 'collecting_intent', 'cancelled', { finishedAt: now })
         await logEvent(tx, user.id, 'session_cancelled', {}, { at: now, sessionId: session.id })
       } else {
-        const from = session.state === 'paused' ? 'paused' : 'running'
-        await transition(tx, { sessionId: session.id, userId: user.id }, from, 'abandoned', {
-          pausedAt: null,
-          pausedSeconds: { increment: Math.floor(pauseMs / 1000) },
-          finishedAt: now,
-          abandonReason: 'new_session',
-        })
+        // Новая сессия из перерыва засчитывает прошлую по отработанному времени.
+        await autoFinish(tx, user, session, now, now, 'new_session')
       }
       await tx.outboxMessage.updateMany({
         where: {
@@ -1580,9 +1629,6 @@ export async function onNewAfterBreak(ctx: Ctx, user: User, afterClose?: () => P
         data: { status: 'canceled' },
       })
       await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
-      if (session.state !== 'collecting_intent') {
-        await logEvent(tx, user.id, 'session_stopped', { session_id: session.id, elapsed_minutes: elapsed }, { at: now, sessionId: session.id })
-      }
     })
   } catch (error) {
     if (error instanceof StaleTransition) return reply(ctx, user, T.stale)

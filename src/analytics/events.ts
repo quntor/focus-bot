@@ -34,6 +34,7 @@ export const EVENT_TYPES = [
   'session_completed',
   'session_stopped',
   'session_abandoned',
+  'session_auto_finished',
   'report_submitted',
   'report_parsed',
   'task_time_allocated',
@@ -117,6 +118,7 @@ export const USER_ACTIONS = [
 // Истечение времени (session_expired, session_abandoned по таймауту,
 // meeting_defaulted) — тоже «мы»: человек в этот момент ничего не делал.
 export const BOT_EVENTS = [
+  'session_auto_finished',
   'intent_parsed',
   'task_breakdown_vague',
   'tasks_parsed',

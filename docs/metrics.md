@@ -132,7 +132,8 @@ UPDATE и DELETE запрещены триггером.
 | `session_end_sent` | бот сказал «время» | нет | `session_id` |
 | `session_completed` | выбрал исход | да | `session_id`, `outcome`, `elapsed_minutes`, `early`, `counted` |
 | `session_stopped` | `/stop` или новая сессия с экрана перерыва | да | `session_id`, `elapsed_minutes` |
-| `session_abandoned` | отчёта нет через час после конца / нет ответа на пинги | нет | `session_id`, `reason` |
+| `session_abandoned` | до 01.10: отчёта нет через час после конца / нет ответа на пинги; теперь не пишется | нет | `session_id`, `reason` |
+| `session_auto_finished` | сессия засчитана без исхода: час без ответа после конца (время до планового конца), пропущенные проверки свободного режима, новая сессия из перерыва | нет | `session_id`, `elapsed_minutes`, `counted`, `reason` |
 | `report_submitted` | написал пару слов об итоге | да | `session_id`, `length_chars` |
 | `report_parsed` | отчёт разобран | нет | `session_id`, `llm_used`, `progress` |
 | `llm_fallback` | модель недоступна или ответила не по схеме | нет | `stage`, `reason` |

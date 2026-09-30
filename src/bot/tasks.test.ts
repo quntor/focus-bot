@@ -332,7 +332,7 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     expect(bot.lastText(A)).toContain('Когда встретимся')
   })
 
-  it('завершает текущую задачу и её таймер по слову «эту»', async () => {
+  it('по слову «эту» закрывает текущую задачу, а таймер идёт дальше', async () => {
     const bot = makeBot({
       llm: conversational(() => '{"kind":"complete_task","new_tasks":[],"start_title":null,"complete_title":null}'),
     })
@@ -345,12 +345,10 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     await bot.text(A, 'Эту закончил')
 
     expect(await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).toMatchObject({ status: 'done' })
-    expect(await prisma.focusSession.findFirstOrThrow({ where: { taskId: task.id } })).toMatchObject({
-      state: 'finished',
-      outcome: 'done',
-      progress: 'moved',
-    })
-    expect(await prisma.outboxMessage.count({ where: { userId: user.id, status: { in: ['pending', 'paused'] }, kind: { in: ['ping', 'session_end'] } } })).toBe(0)
+    // Закрытие задачи сессию не заканчивает (решение 01.10).
+    expect(await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })).toMatchObject({ taskId: null })
+    expect(await prisma.outboxMessage.count({ where: { userId: user.id, status: 'pending', kind: 'session_end' } })).toBe(1)
+    expect(bot.lastText(A)).toContain('Таймер идёт дальше')
   })
 
   it('не создаёт задачу, если завершить названную задачу не удалось сопоставить', async () => {

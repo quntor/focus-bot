@@ -34,9 +34,10 @@ describe('предложение длины', () => {
     expect(proposeMinutes([s({ plannedMinutes: 200, minutesAdjusted: 'up' }), s({ plannedMinutes: 200, minutesAdjusted: 'up' }), s({ plannedMinutes: 200, minutesAdjusted: 'up' })])).toBe(90)
     expect(proposeMinutes([s({ plannedMinutes: 10, state: 'abandoned' }), s({ plannedMinutes: 10, state: 'abandoned' })])).toBe(15)
   })
-  it('кнопки двигают на 10 в границах 5–240', () => {
+  it('кнопки двигают на 10 в границах 10–240 (не меньше порога засчёта)', () => {
     expect(adjust(40, 'up')).toBe(50)
-    expect(adjust(10, 'down')).toBe(5)
+    expect(adjust(20, 'down')).toBe(10)
+    expect(adjust(10, 'down')).toBe(10)
     expect(adjust(240, 'up')).toBe(240)
   })
   it('отдых по длине сессии', () => {

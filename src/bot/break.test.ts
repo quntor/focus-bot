@@ -48,9 +48,11 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
 
     bot.advance(5)
     await bot.text(A, 'Начать новую сессию')
+    // Прошлая засчитывается по отработанному; 5 минут — меньше порога.
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: first.id } })).toMatchObject({
-      state: 'abandoned',
-      abandonReason: 'new_session',
+      state: 'finished',
+      outcome: null,
+      counted: false,
     })
     const second = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
     expect(second.id).not.toBe(first.id)
@@ -269,9 +271,9 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
     bot.advance(25)
     await bot.text(A, 'Начать новую сессию')
 
-    const abandoned = await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })
-    expect(abandoned).toMatchObject({ state: 'abandoned', abandonReason: 'new_session' })
-    expect((abandoned as { pausedSeconds?: number }).pausedSeconds).toBe((25 * MIN) / 1000)
+    const closed = await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })
+    expect(closed).toMatchObject({ state: 'finished', counted: true })
+    expect(closed.pausedSeconds).toBe((25 * MIN) / 1000)
     expect(
       await prisma.outboxMessage.findMany({
         where: {
@@ -285,8 +287,8 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
     expect(next).toMatchObject({ intentText: null, taskId: null, plannedMinutes: 40 })
     expect(bot.lastText(A)).toContain('Таймер уже идёт')
 
-    const stopped = await prisma.event.findFirstOrThrow({ where: { sessionId: old.id, type: 'session_stopped' } })
-    expect(stopped.payload).toMatchObject({ session_id: old.id, elapsed_minutes: 10 })
+    const finished = await prisma.event.findFirstOrThrow({ where: { sessionId: old.id, type: 'session_auto_finished' } })
+    expect(finished.payload).toMatchObject({ session_id: old.id, elapsed_minutes: 10, counted: true, reason: 'new_session' })
   })
 
   it('не возвращает отложенный пинг, если его отключили во время перерыва', async () => {

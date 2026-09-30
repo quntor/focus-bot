@@ -51,7 +51,7 @@ describe.skipIf(!hasDb)('целостность учёта', () => {
     expect(events).toBe(1)
   })
 
-  it('abandoned не даёт очков: /stop и таймаут', async () => {
+  it('/stop не даёт очков, а таймаут засчитывает время до планового конца', async () => {
     const bot = makeBot()
     await bot.onboard(A)
     await bot.text(A, 'глава, 30 минут')
@@ -61,10 +61,11 @@ describe.skipIf(!hasDb)('целостность учёта', () => {
     bot.advance(30 + 61)
     await sweepOnce(bot.ctx)
     const user = await userOf(A)
-    const states = (await prisma.focusSession.findMany({ where: { userId: user.id } })).map((s) => s.state)
-    expect(states).toEqual(['abandoned', 'abandoned'])
-    expect(await prisma.pointsEntry.count({ where: { userId: user.id } })).toBe(0)
-    expect((await prisma.streak.findUnique({ where: { userId: user.id } }))?.current ?? 0).toBe(0)
+    const sessions = await prisma.focusSession.findMany({ where: { userId: user.id }, orderBy: { createdAt: 'asc' } })
+    expect(sessions.map((s) => [s.state, s.counted])).toEqual([['abandoned', false], ['finished', true]])
+    expect(await prisma.pointsEntry.count({ where: { userId: user.id } })).toBe(1)
+    expect((await prisma.event.findFirstOrThrow({ where: { type: 'session_auto_finished' } })).payload).toMatchObject({ elapsed_minutes: 30, reason: 'timeout' })
+    expect(bot.lastText(A)).toContain('засчитал 30 минут работы')
   })
 
   it('короткая сессия (меньше 10 минут) закрывается, но очков и серии не даёт', async () => {

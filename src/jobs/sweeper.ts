@@ -1,9 +1,12 @@
 import { logEvent, refreshRole } from '../analytics/log.js'
 import { ACTIVE_WINDOW_MS, NEW_DAYS } from '../analytics/roles.js'
 import { log } from '../lib/log.js'
-import type { Ctx } from '../bot/context.js'
 import { cancelPending } from '../outbox/queue.js'
 import { ensureNextMeeting } from '../bot/day-flow.js'
+import { reply, type Ctx } from '../bot/context.js'
+import { autoFinish } from '../bot/session-flow.js'
+import { T } from '../bot/texts.js'
+import { StaleTransition } from '../session/fsm.js'
 
 const MIN = 60_000
 // Незакрытая сессия через час после планового конца — брошена. Не висит вечно и
@@ -15,21 +18,28 @@ export const EXPIRE_COLLECTING_MS = 60 * MIN
 export async function sweepOnce(ctx: Ctx): Promise<void> {
   const now = ctx.now()
 
+  // Час без ответа после планового конца — сессия засчитывается до планового
+  // конца, и бот говорит об этом. Раньше она молча бросалась, и честная работа
+  // пропадала.
   const overdue = await ctx.db.focusSession.findMany({
     where: { state: 'running', plannedEndAt: { lt: new Date(now.getTime() - ABANDON_AFTER_MS) } },
-    select: { id: true, userId: true },
+    include: { user: true },
     take: 200,
   })
   for (const s of overdue) {
-    await ctx.db.$transaction(async (tx) => {
-      const res = await tx.focusSession.updateMany({
-        where: { id: s.id, userId: s.userId, state: 'running' },
-        data: { state: 'abandoned', abandonReason: 'timeout', finishedAt: now },
+    let result: { elapsed: number; counted: boolean } | null = null
+    try {
+      result = await ctx.db.$transaction(async (tx) => {
+        const r = await autoFinish(tx, s.user, s, s.plannedEndAt!, now, 'timeout')
+        if (r.counted) await tx.user.update({ where: { id: s.userId }, data: { pendingInput: 'report_text' } })
+        else await tx.user.updateMany({ where: { id: s.userId, pendingInput: `session_end:${s.id}` }, data: { pendingInput: 'none' } })
+        return r
       })
-      if (res.count !== 1) return
-      await cancelPending(tx, { userId: s.userId, idempotencyKey: { startsWith: `ping:${s.id}` } })
-      await logEvent(tx, s.userId, 'session_abandoned', { session_id: s.id, reason: 'timeout' }, { at: now, sessionId: s.id })
-    })
+    } catch (error) {
+      if (error instanceof StaleTransition) continue
+      throw error
+    }
+    if (result && !s.user.blockedAt) await reply(ctx, s.user, T.autoFinished(result.elapsed, result.counted))
   }
 
   const stale = await ctx.db.focusSession.findMany({

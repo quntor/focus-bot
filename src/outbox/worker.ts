@@ -6,7 +6,7 @@ import { cb } from '../bot/callbacks.js'
 import { markBlocked, type Ctx } from '../bot/context.js'
 import { rememberConversationContext } from '../bot/conversation-context.js'
 import { buildSummary, declineKeyboard, DECLINES_BEFORE_ASK, ensureNextMeeting, reminderKeyboard } from '../bot/day-flow.js'
-import { deadlineKeyboard, openCollecting } from '../bot/session-flow.js'
+import { autoFinish, deadlineKeyboard, openCollecting } from '../bot/session-flow.js'
 import { buildTaskStartPrompt } from '../bot/tasks.js'
 import { T } from '../bot/texts.js'
 import { DeliveryError, TelegramError, type Keyboard } from '../tg/client.js'
@@ -126,14 +126,17 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
       // Свободный режим: два неотвеченных пинга подряд — сессия брошена.
       const missed = session.pingsMissed + 1
       if (missed >= 2) {
-        await ctx.db.$transaction(async (tx) => {
-          const res = await tx.focusSession.updateMany({
-            where: { id: sessionId, userId: user.id, state: 'running' },
-            data: { state: 'abandoned', abandonReason: 'no_ping', finishedAt: now, pingsMissed: missed },
-          })
-          if (res.count === 1) await logEvent(tx, user.id, 'session_abandoned', { session_id: sessionId, reason: 'no_ping' }, { at: now, sessionId })
+        // Засчитываем время до первой пропущенной проверки и говорим об этом.
+        const r = await ctx.db.$transaction(async (tx) => {
+          await tx.focusSession.update({ where: { id: sessionId }, data: { pingsMissed: missed } })
+          return autoFinish(tx, user, { ...session, pingsMissed: missed }, session.pingAt ?? now, now, 'no_ping')
         })
-        return { skip: true }
+        return {
+          text: T.autoFinished(r.elapsed, r.counted),
+          after: async (tx) => {
+            if (r.counted) await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'report_text' } })
+          },
+        }
       }
       await ctx.db.focusSession.update({ where: { id: sessionId }, data: { pingsMissed: missed } })
     }

@@ -179,7 +179,7 @@ describe.skipIf(!hasDb)('outbox', () => {
     })
   })
 
-  it('после дедлайна без ответа продолжает сессию, а кнопки меняют состояние', async () => {
+  it('после дедлайна: «Ещё поработаю» сдвигает конец, «Пора отдыхать» спрашивает исход', async () => {
     const continuingBot = makeBot()
     const continuing = await runningSession(continuingBot)
     continuingBot.advance(40)
@@ -187,7 +187,11 @@ describe.skipIf(!hasDb)('outbox', () => {
 
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: continuing.id } })).toMatchObject({ state: 'running' })
     await continuingBot.press(A, `end:${continuing.id}:continue`)
-    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: continuing.id } })).toMatchObject({ state: 'running' })
+    const extended = await prisma.focusSession.findUniqueOrThrow({ where: { id: continuing.id } })
+    expect(extended).toMatchObject({ state: 'running' })
+    expect(extended.plannedEndAt).toEqual(new Date(continuingBot.now().getTime() + 15 * 60_000))
+    expect(await prisma.outboxMessage.count({ where: { kind: 'session_end', status: 'pending' } })).toBe(1)
+    expect(continuingBot.lastText(A)).toContain('ещё 15 минут')
     expect(await prisma.user.findUniqueOrThrow({ where: { id: continuing.userId } })).toMatchObject({ pendingInput: 'none' })
 
     await resetDb()
@@ -196,7 +200,9 @@ describe.skipIf(!hasDb)('outbox', () => {
     breakBot.advance(40)
     await runOutboxOnce(breakBot.ctx)
     await breakBot.press(A, `end:${pausing.id}:break`)
-    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: pausing.id } })).toMatchObject({ state: 'paused' })
+    expect(breakBot.lastText(A)).toBe('Отдых заслужен. Как прошло?')
+    await breakBot.press(A, `out:${pausing.id}:done`)
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: pausing.id } })).toMatchObject({ state: 'finished', counted: true })
   })
 
   it('упавший посреди отправки процесс: сообщение не переотправляется, а помечается uncertain', async () => {

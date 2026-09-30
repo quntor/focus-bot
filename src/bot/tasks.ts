@@ -8,7 +8,7 @@ import { parseTaskMessage } from '../llm/tasks.js'
 import { SttCallError } from '../stt/provider.js'
 import { cancelPending } from '../outbox/queue.js'
 import { creditCountedSession } from '../retention/credit.js'
-import { MIN_COUNTED_MINUTES, isCounted } from '../retention/rules.js'
+import { isCounted } from '../retention/rules.js'
 import { StaleTransition, transition } from '../session/fsm.js'
 import { TelegramError, type Keyboard } from '../tg/client.js'
 import { cb } from './callbacks.js'
@@ -496,7 +496,7 @@ async function completeTask(
   task: { id: string; title: string },
   source: TaskCompletionSource,
   showList = false,
-  keepShortRunning = false,
+  keepRunning = false,
 ): Promise<boolean> {
   const now = ctx.now()
   let doneTitle = task.title
@@ -518,10 +518,9 @@ async function completeTask(
         await transition(tx, { sessionId: current.id, userId: user.id }, 'collecting_intent', 'cancelled', { finishedAt: now })
         await logEvent(tx, user.id, 'session_cancelled', {}, { at: now, sessionId: current.id })
       } else if (
-        keepShortRunning &&
+        keepRunning &&
         current?.taskId === completed.id &&
-        current.state === 'running' &&
-        activeElapsedMinutes(current, now) < MIN_COUNTED_MINUTES
+        current.state === 'running'
       ) {
         // Сессия — заход, а не задача: период продолжается без задачи, следующую
         // человек выберет, и она получит время от начала периода.
