@@ -2,19 +2,20 @@ import type { User } from '@prisma/client'
 import { llmMeter } from '../analytics/calls.js'
 import { logEvent } from '../analytics/log.js'
 import { dayKey } from '../lib/day.js'
+import { breakDownTask, splitManualSteps } from '../llm/breakdown.js'
 import { parseIntent } from '../llm/intent.js'
 import { parseTaskMessage } from '../llm/tasks.js'
 import { SttCallError } from '../stt/provider.js'
 import { cancelPending } from '../outbox/queue.js'
 import { creditCountedSession } from '../retention/credit.js'
-import { isCounted } from '../retention/rules.js'
+import { MIN_COUNTED_MINUTES, isCounted } from '../retention/rules.js'
 import { StaleTransition, transition } from '../session/fsm.js'
 import { TelegramError, type Keyboard } from '../tg/client.js'
 import { cb } from './callbacks.js'
 import { reply, type Ctx } from './context.js'
 import { recentConversationContext } from './conversation-context.js'
 import { activeElapsedMinutes, activeSession, onStartButton, startTaskSession } from './session-flow.js'
-import { T } from './texts.js'
+import { T, hhmm } from './texts.js'
 
 export type TaskInputSource = 'text' | 'voice'
 type TaskCompletionSource = TaskInputSource | 'button'
@@ -172,6 +173,7 @@ export async function onTaskOpened(ctx: Ctx, user: User, taskId: string, page: n
       { text: T.taskEditButton, data: cb('task', task.id, 'edit') },
       { text: T.taskDropButton, data: cb('task', task.id, 'drop') },
     ],
+    [{ text: T.taskBreakdownButton, data: cb('task', task.id, 'split') }],
     [{ text: T.tasksBackButton, data: cb('tasks', null, `p${page}`) }],
   ])
 }
@@ -265,6 +267,89 @@ export async function onTaskRestored(ctx: Ctx, user: User, taskId: string): Prom
   })
   if (restored.count !== 1) return reply(ctx, user, T.stale)
   await showTasks(ctx, user, 0, T.taskRestored(task.title))
+}
+
+// --- Разбор задачи на шаги. Ожидание ответа — pendingInput task_split:<id>;
+// если модель не ответила — task_split_manual:<id>, и следующий текст
+// записывается как шаги без модели. Шаги — обычные задачи: «Начать» и
+// «Завершить» у них работают как у любой другой.
+const SPLIT_ANSWER_MAX = 500
+
+export async function onTaskBreakdownRequested(ctx: Ctx, user: User, taskId: string): Promise<void> {
+  const task = await ctx.db.task.findFirst({
+    where: { id: taskId, userId: user.id, status: 'active' },
+    select: { id: true, title: true },
+  })
+  if (!task) return reply(ctx, user, T.stale)
+  await ctx.db.$transaction(async (tx) => {
+    await tx.user.update({ where: { id: user.id }, data: { pendingInput: `task_split:${task.id}` } })
+    await logEvent(tx, user.id, 'task_breakdown_requested', { task_id: task.id }, { at: ctx.now() })
+  })
+  await reply(ctx, user, T.breakdownAsk(task.title), [[{ text: T.breakdownAuto, data: cb('task', task.id, 'splitauto') }]])
+}
+
+// answer === null — «Предложи сам».
+export async function onTaskBreakdownAnswer(
+  ctx: Ctx,
+  user: User,
+  taskId: string,
+  answer: string | null,
+  source: TaskInputSource,
+): Promise<void> {
+  const waiting = user.pendingInput === `task_split:${taskId}`
+  const manual = user.pendingInput === `task_split_manual:${taskId}`
+  if (!waiting && !manual) return reply(ctx, user, T.stale)
+  const task = await ctx.db.task.findFirst({
+    where: { id: taskId, userId: user.id, status: 'active' },
+    select: { id: true, title: true },
+  })
+  if (!task) {
+    await ctx.db.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput: 'none' } })
+    return reply(ctx, user, T.stale)
+  }
+  const text = answer?.trim().slice(0, SPLIT_ANSWER_MAX) ?? null
+
+  let steps: string[]
+  let mode: 'answered' | 'auto' | 'manual'
+  let llmUsed = false
+  if (manual) {
+    if (text === null) return reply(ctx, user, T.breakdownManual)
+    steps = splitManualSteps(text)
+    mode = 'manual'
+  } else {
+    const out = await breakDownTask(ctx.llm, { title: task.title, answer: text }, llmMeter(ctx, user.id, 'task_breakdown', null))
+    if (out.ok) {
+      steps = out.value
+      mode = text === null ? 'auto' : 'answered'
+      llmUsed = true
+    } else {
+      await logEvent(ctx.db, user.id, 'llm_fallback', { stage: 'breakdown', reason: out.reason }, { at: ctx.now() })
+      // Человек уже перечислил шаги — записываем их и без модели.
+      const listed = text === null ? [] : splitManualSteps(text)
+      if (listed.length < 2) {
+        const moved = await ctx.db.user.updateMany({
+          where: { id: user.id, pendingInput: `task_split:${task.id}` },
+          data: { pendingInput: `task_split_manual:${task.id}` },
+        })
+        return reply(ctx, user, moved.count === 1 ? T.breakdownManual : T.stale)
+      }
+      steps = listed
+      mode = 'manual'
+    }
+  }
+  steps = steps.filter((step) => normalize(step) !== normalize(task.title))
+  if (!steps.length) return reply(ctx, user, T.breakdownManual)
+
+  // Ожидание снимается до записи: пока шла модель, человек мог нажать другое.
+  const claimed = await ctx.db.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput: 'none' } })
+  if (claimed.count !== 1) return reply(ctx, user, T.stale)
+  const saved = await captureTasks(ctx, user, steps, source)
+  if (!saved.length) return reply(ctx, user, T.tasksParseFailed)
+  await logEvent(ctx.db, user.id, 'task_breakdown_done', { task_id: task.id, mode, steps: saved.length, llm_used: llmUsed }, { at: ctx.now() })
+  await reply(ctx, user, T.breakdownDone(task.title, saved.map((step) => step.title)), [
+    [{ text: T.breakdownStartFirst, data: cb('task', saved[0]!.id, 'start') }],
+    [{ text: T.tasksButton, data: cb('tasks', null, 'p0') }],
+  ])
 }
 
 async function captureTasks(ctx: Ctx, user: User, titles: string[], source: TaskInputSource) {
@@ -366,9 +451,11 @@ async function completeTask(
   task: { id: string; title: string },
   source: TaskCompletionSource,
   showList = false,
+  keepShortRunning = false,
 ): Promise<boolean> {
   const now = ctx.now()
   let doneTitle = task.title
+  let runningUntil: Date | null | undefined
   try {
     await ctx.db.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
@@ -385,6 +472,20 @@ async function completeTask(
       if (current?.taskId === completed.id && current.state === 'collecting_intent') {
         await transition(tx, { sessionId: current.id, userId: user.id }, 'collecting_intent', 'cancelled', { finishedAt: now })
         await logEvent(tx, user.id, 'session_cancelled', {}, { at: now, sessionId: current.id })
+      } else if (
+        keepShortRunning &&
+        current?.taskId === completed.id &&
+        current.state === 'running' &&
+        activeElapsedMinutes(current, now) < MIN_COUNTED_MINUTES
+      ) {
+        // Сессия — заход, а не задача: период продолжается без задачи, следующую
+        // человек выберет, и она получит время от начала периода.
+        const released = await tx.focusSession.updateMany({
+          where: { id: current.id, userId: user.id, state: 'running', taskId: completed.id },
+          data: { taskId: null, intentText: null, scope: 'step' },
+        })
+        if (released.count !== 1) throw new StaleTransition()
+        runningUntil = current.plannedEndAt
       } else if (current?.taskId === completed.id && (current.state === 'running' || current.state === 'paused')) {
         const openPauseSeconds =
           current.state === 'paused' && current.pausedAt
@@ -430,6 +531,13 @@ async function completeTask(
     }
     throw error
   }
+  if (runningUntil !== undefined) {
+    const notice = T.taskDoneTimerRuns(doneTitle, runningUntil ? hhmm(runningUntil, user.timezone) : null)
+    const prompt = await buildTaskStartPrompt(ctx, user, notice)
+    if (prompt) await reply(ctx, user, prompt.text, prompt.keyboard)
+    else await reply(ctx, user, `${notice}\n${T.taskDoneTimerRunsEmpty}`)
+    return true
+  }
   if (showList) await showTasks(ctx, user, 0, T.taskCompleted(doneTitle))
   else await reply(ctx, user, T.taskCompleted(doneTitle))
   return true
@@ -441,7 +549,7 @@ export async function onTaskCompleted(ctx: Ctx, user: User, taskId: string): Pro
     select: { id: true, title: true },
   })
   if (!task) return reply(ctx, user, T.stale)
-  await completeTask(ctx, user, task, 'button', true)
+  await completeTask(ctx, user, task, 'button', true, true)
 }
 
 async function completeAndStart(
@@ -603,7 +711,7 @@ export async function onTaskMessage(
       await reply(ctx, user, T.taskCompleteUnknown)
       return 'handled'
     }
-    const completedNow = await completeTask(ctx, user, completed, source)
+    const completedNow = await completeTask(ctx, user, completed, source, false, parsed.result.kind === 'complete_task')
     if (!completedNow) return 'handled'
     return parsed.result.kind === 'complete_and_close_day' ? 'close_day' : 'handled'
   }

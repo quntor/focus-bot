@@ -47,6 +47,9 @@ const updateSchema = z.object({
 
 export type Update = z.infer<typeof updateSchema>
 
+// Ждём ответа на «Разобрать»: task_split:<taskId> или task_split_manual:<taskId>.
+const TASK_SPLIT = /^task_split(?:_manual)?:([0-9a-f-]{36})$/
+
 // Лимит апдейтов на пользователя в минуту. Человеку столько не нужно, а скрипт
 // с чужого аккаунта не должен размножать сессии и события.
 export const RATE_LIMIT_PER_MINUTE = 30
@@ -122,6 +125,10 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
         const text = await tasks.transcribeVoice(ctx, user, msg.voice)
         if (!text) return
         const voiceContextEventId = rememberConversationContext(user.id, 'user', text, ctx.now())
+        // Шаги знакомства ждут ответа и голосом: иначе voice ушёл бы в разбор задач.
+        if (user.pendingInput === 'timezone') return account.onTimezoneText(ctx, user, text)
+        if (user.pendingInput === 'start_time') return account.onStartTimeText(ctx, user, text)
+        if (user.pendingInput === 'ritual') return account.onRitualText(ctx, user, text)
         if (user.pendingInput === 'meeting_time') return day.onMeetingTimeText(ctx, user, text)
         if (user.pendingInput === 'report_text' && await onPendingReport(ctx, user, text, 'voice')) return
         const runningEdit = /^running_(work|duration):([0-9a-f-]{36})$/.exec(user.pendingInput)
@@ -129,6 +136,8 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
         if (runningEdit?.[1] === 'duration' && runningEdit[2]) return session.onRunningDurationText(ctx, user, runningEdit[2], text)
         const taskEdit = /^task_edit:([0-9a-f-]{36})$/.exec(user.pendingInput)
         if (taskEdit?.[1]) return tasks.onTaskEditText(ctx, user, taskEdit[1], text)
+        const taskSplit = TASK_SPLIT.exec(user.pendingInput)
+        if (taskSplit?.[1]) return tasks.onTaskBreakdownAnswer(ctx, user, taskSplit[1], text, 'voice')
         if (await session.onRunningFreeText(ctx, user, text, voiceContextEventId)) return
         const outcome = await tasks.onTaskMessage(ctx, user, text, 'voice', voiceContextEventId)
         if (outcome === 'session_intent') await session.onIntentText(ctx, user, text)
@@ -148,7 +157,7 @@ async function onCommand(ctx: Ctx, user: User, command: string, args: string, cr
   if (command === 'start') {
     await logEvent(ctx.db, user.id, 'bot_started', { source: user.source, returning: !created }, { at: now })
     if (created) return account.beginOnboarding(ctx, user)
-    if (user.pendingInput === 'timezone' || user.pendingInput === 'ritual') return account.resumeOnboarding(ctx, user)
+    if (['timezone', 'start_time', 'ritual'].includes(user.pendingInput)) return account.resumeOnboarding(ctx, user)
     return session.askIntent(ctx, user, { prefix: T.welcomeBack })
   }
   if (command === 'delete_me') return account.askDelete(ctx, user)
@@ -193,9 +202,13 @@ async function onText(ctx: Ctx, user: User, text: string, created: boolean, cont
   if (runningEdit?.[1] === 'duration' && runningEdit[2]) return session.onRunningDurationText(ctx, user, runningEdit[2], text)
   const taskEdit = /^task_edit:([0-9a-f-]{36})$/.exec(user.pendingInput)
   if (taskEdit?.[1]) return tasks.onTaskEditText(ctx, user, taskEdit[1], text)
+  const taskSplit = TASK_SPLIT.exec(user.pendingInput)
+  if (taskSplit?.[1]) return tasks.onTaskBreakdownAnswer(ctx, user, taskSplit[1], text, 'text')
   switch (user.pendingInput) {
     case 'timezone':
       return account.onTimezoneText(ctx, user, text)
+    case 'start_time':
+      return account.onStartTimeText(ctx, user, text)
     case 'ritual':
       return account.onRitualText(ctx, user, text)
     case 'meeting_time':
@@ -305,6 +318,9 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
       case 'skip':
         if (arg === 'ritual') return await account.onRitualText(ctx, user, null)
         break
+      case 'onb':
+        if (arg) return await account.onOnboardingButton(ctx, user, arg)
+        break
       case 'off':
         if (arg === 'tomorrow') return await day.planDayOff(ctx, user)
         break
@@ -318,6 +334,8 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
         if (id && arg === 'edit') return await tasks.onTaskEditRequested(ctx, user, id)
         if (id && arg === 'drop') return await tasks.onTaskDropped(ctx, user, id)
         if (id && arg === 'restore') return await tasks.onTaskRestored(ctx, user, id)
+        if (id && arg === 'split') return await tasks.onTaskBreakdownRequested(ctx, user, id)
+        if (id && arg === 'splitauto') return await tasks.onTaskBreakdownAnswer(ctx, user, id, null, 'text')
         break
       case 'tasks':
         if (arg) return await tasks.onTasksPage(ctx, user, arg)

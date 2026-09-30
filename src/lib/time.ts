@@ -82,3 +82,8 @@ export function zoneFromLocalClock(clock: { h: number; m: number }, now: Date): 
   const timezone = hours === 0 ? 'UTC' : `Etc/GMT${hours > 0 ? '-' : '+'}${Math.abs(hours)}`
   return { timezone, offset: hours * 60 }
 }
+
+// Час в поясе пользователя, 0–23.
+export function localHour(timezone: string, at: Date): number {
+  return Number(new Intl.DateTimeFormat('en-US', { timeZone: timezone, hourCycle: 'h23', hour: '2-digit' }).format(at))
+}

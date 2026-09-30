@@ -108,6 +108,24 @@ describe.skipIf(!hasDb)('outbox', () => {
     })
   })
 
+  it('после полудня по местному времени здоровается без «доброго утра»', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    bot.advance(5 * 60) // 15:00 по Москве
+    await enqueue(prisma, {
+      userId: user.id,
+      kind: 'meeting',
+      key: `meeting:${user.id}:afternoon`,
+      sendAfter: bot.now(),
+      payload: { defaulted: false, morning: true },
+    })
+
+    await runOutboxOnce(bot.ctx)
+
+    expect(bot.lastText(A)).toBe('Привет! Пора работать. Можно начать без задачи или написать, что будешь делать.')
+  })
+
   it('два воркера одновременно не отправляют одно сообщение дважды', async () => {
     const bot = makeBot()
     await runningSession(bot)

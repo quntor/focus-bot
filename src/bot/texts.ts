@@ -51,11 +51,21 @@ const onboardingGuide =
 
 export const T = {
   // --- Знакомство.
-  welcome: ['Привет! Я напарник по фокус-сессиям: сижу рядом, пока ты работаешь.', '', askTimezone].join('\n'),
+  // Большинство пишет из московского пояса: подтверждение — одно нажатие,
+  // остальные вводят время, как раньше.
+  welcome: (moscowTime: string) =>
+    ['Привет! Я напарник по фокус-сессиям: сижу рядом, пока ты работаешь.', '', `У тебя сейчас ${moscowTime}, как в Москве?`].join('\n'),
+  timezoneYes: 'Да',
+  timezoneNo: 'Нет, другое время',
   onboardingGuide,
   askTimezone,
   badTimezone: 'Не понял время. Напиши часы и минуты, например 9:05 или 21:40.',
   timezoneSet: (time: string) => `Понял, у тебя ${time}.`,
+
+  // Время старта — это morningTime: в него приходит утреннее сообщение.
+  askStartTime: 'Во сколько обычно садишься работать?',
+  startTimeVaries: 'По-разному',
+  askStartTimeCustom: 'Напиши время, например 9:30.',
 
   askRitual:
     'Что ты обычно делаешь перед тем, как сесть? Два-три действия одной строкой — например, «выпить кофе, включить музыку, удобно сесть». Буду напоминать перед стартом.',
@@ -97,6 +107,15 @@ export const T = {
     return [...lead, ...tasks.map((task, i) => `${page * 6 + i + 1}. ${task}`), '', 'С чего начнёшь?'].join('\n')
   },
   taskActions: (task: string) => `Задача: «${task}»\n\nЧто сделать?`,
+  taskBreakdownButton: '🧩 Разобрать',
+  // Сначала — как человек сам видит задачу: нюансы знает он.
+  breakdownAsk: (task: string) =>
+    `Как ты видишь задачу «${task}»? С чего хочется начать?\n\nМожно просто перечислить шаги — запишу как есть.`,
+  breakdownAuto: 'Предложи сам',
+  breakdownManual: 'Не смог разобрать сам. Напиши шаги, каждый с новой строки, — запишу.',
+  breakdownDone: (task: string, steps: string[]) =>
+    [`Шаги по «${task}»:`, ...steps.map((step, i) => `${i + 1}. ${step}`), '', 'Начнём с первого?'].join('\n'),
+  breakdownStartFirst: '▶️ Начать с первого',
   taskStartButton: '▶️ Начать',
   taskCompleteButton: '✅ Завершить',
   taskEditButton: '✏️ Изменить',
@@ -114,6 +133,11 @@ export const T = {
   taskSwitched: (done: string, next: string) => `«${done}» отметил готовой. Перехожу к «${next}».`,
   taskSwitchedRunning: (done: string, next: string) => `«${done}» отметил готовой. Перехожу к «${next}». Таймер продолжает идти.`,
   taskCompleted: (task: string) => `«${task}» отметил готовой.`,
+  // Шаг закрыт раньше порога засчёта: таймер не обрываем, иначе короткий шаг
+  // стоил бы человеку засчитанной сессии.
+  taskDoneTimerRuns: (task: string, end: string | null) =>
+    `«${task}» отметил готовой. Таймер идёт дальше${end ? ` до ${end}` : ''} — берём следующий шаг.`,
+  taskDoneTimerRunsEmpty: 'Напиши, за что берёшься дальше, или нажми /done, если на этом всё.',
   taskCompleteUnknown: 'Не понял, какую задачу отметить готовой. Назови её точнее или выбери в «Мои задачи».',
   taskEditAsk: (task: string) => `Напиши новое название для задачи «${task}».`,
   taskEditInvalid: 'Название не может быть пустым. Напиши новое название задачи.',
@@ -225,9 +249,11 @@ export const T = {
   customTime: 'Своё время',
   askCustomTime: 'Напиши время, например 18:30.',
   meetingSet: (at: string, day: 'today' | 'tomorrow') => `Договорились: ${day === 'today' ? 'сегодня' : 'завтра'} в ${at}.`,
-  meetingMorning: 'Доброе утро! Пора работать.',
+  // «Доброе утро» в 15:00 звучит странно: приветствие — по местному часу.
+  meetingMorning: (hour: number) => `${hour < 12 ? 'Доброе утро!' : 'Привет!'} Пора работать.`,
   meetingPlain: 'Привет! С чего начнёшь?',
-  morningNoTasks: 'Доброе утро! Пора работать. Можно начать без задачи или написать, что будешь делать.',
+  morningNoTasks: (hour: number) =>
+    `${hour < 12 ? 'Доброе утро!' : 'Привет!'} Пора работать. Можно начать без задачи или написать, что будешь делать.`,
   quickStart: '▶️ Просто начать',
   planDay: 'План на день',
   later: 'Позже',

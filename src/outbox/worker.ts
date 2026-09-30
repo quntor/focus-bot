@@ -1,6 +1,7 @@
 import type { OutboxMessage, Prisma, User } from '@prisma/client'
 import { logEvent } from '../analytics/log.js'
 import { log } from '../lib/log.js'
+import { localHour } from '../lib/time.js'
 import { cb } from '../bot/callbacks.js'
 import { markBlocked, type Ctx } from '../bot/context.js'
 import { rememberConversationContext } from '../bot/conversation-context.js'
@@ -164,8 +165,9 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
     if (p.defaulted === true && !user.proactive) return { skip: true }
     const active = await ctx.db.focusSession.count({ where: { userId: user.id, state: { in: ['running', 'paused'] } } })
     if (active > 0) return { skip: true }
+    const hour = localHour(user.timezone, now)
     const taskPrompt = p.morning === true
-      ? await buildTaskStartPrompt(ctx, user, T.meetingMorning)
+      ? await buildTaskStartPrompt(ctx, user, T.meetingMorning(hour))
       : null
     const quickKeyboard: Keyboard = [
       [{ text: T.quickStart, data: cb('quick', null, 'start') }],
@@ -173,7 +175,7 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
     ]
     const morningKeyboard = taskPrompt ? [...taskPrompt.keyboard, ...quickKeyboard] : quickKeyboard
     const r = p.morning === true
-      ? await renderReminder(ctx, user, taskPrompt?.text ?? T.morningNoTasks, morningKeyboard, true)
+      ? await renderReminder(ctx, user, taskPrompt?.text ?? T.morningNoTasks(hour), morningKeyboard, true)
       : await renderReminder(ctx, user, T.meetingPlain, reminderKeyboard(), true)
     return withEvent(r, async (tx) => {
       await tx.user.updateMany({

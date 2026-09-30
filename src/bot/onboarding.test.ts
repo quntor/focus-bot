@@ -33,12 +33,69 @@ describe.skipIf(!hasDb)('онбординг нового пользовател�
 
     await bot.text(A, '/start')
     await bot.text(A, '10:00')
+    await bot.press(A, 'onb::st_1000')
     await bot.text(A, 'налить воду и закрыть лишние вкладки')
 
     const text = bot.lastText(A)
     expect(text).toContain('Быстрый старт')
     expect(text).toContain('Ритуал: налить воду и закрыть лишние вкладки.')
     expect(text).toContain('С чего начнёшь?')
+  })
+
+  it('подтверждение московского пояса — одно нажатие, затем время старта и ритуал', async () => {
+    const bot = makeBot()
+
+    await bot.text(A, '/start')
+    expect(bot.lastText(A)).toContain('У тебя сейчас 10:00, как в Москве?')
+    await bot.press(A, 'onb::tz_yes')
+    expect(bot.lastText(A)).toBe('Во сколько обычно садишься работать?')
+    await bot.press(A, 'onb::st_1200')
+    expect(bot.lastText(A)).toContain('Что ты обычно делаешь перед тем, как сесть?')
+
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    expect(user).toMatchObject({ timezone: 'Europe/Moscow', morningTime: '12:00', pendingInput: 'ritual' })
+    const event = await prisma.event.findFirstOrThrow({ where: { type: 'timezone_set' } })
+    expect(event.payload).toMatchObject({ via: 'confirmed', offset_minutes: 180 })
+  })
+
+  it('«Нет, другое время» — прежний ввод времени, «Своё время» принимает текст', async () => {
+    const bot = makeBot()
+
+    await bot.text(A, '/start')
+    await bot.press(A, 'onb::tz_no')
+    expect(bot.lastText(A)).toContain('Сколько у тебя сейчас времени?')
+    await bot.text(A, '12:00')
+    expect(bot.lastText(A)).toBe('Во сколько обычно садишься работать?')
+    await bot.press(A, 'onb::st_custom')
+    await bot.text(A, 'в обед')
+    expect(bot.lastText(A)).toContain('Не понял время')
+    await bot.text(A, '8:30')
+
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    expect(user).toMatchObject({ timezone: 'Asia/Yekaterinburg', morningTime: '08:30', pendingInput: 'ritual' })
+  })
+
+  it('«По-разному» не трогает время утра; старые кнопки знакомства не срабатывают повторно', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    const before = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    expect(before.morningTime).toBe('10:00')
+
+    await bot.press(A, 'onb::tz_yes')
+    expect(bot.lastText(A)).toBe('Это уже неактуально.')
+    await bot.press(A, 'onb::st_0900')
+    expect(bot.lastText(A)).toBe('Это уже неактуально.')
+    expect(await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })).toMatchObject({ morningTime: '10:00', pendingInput: before.pendingInput })
+  })
+
+  it('/start посреди знакомства продолжает с шага времени старта', async () => {
+    const bot = makeBot()
+    await bot.text(A, '/start')
+    await bot.press(A, 'onb::tz_yes')
+
+    await bot.text(A, '/start')
+
+    expect(bot.lastText(A)).toBe('Во сколько обычно садишься работать?')
   })
 
   it('не повторяет вводную памятку возвращающемуся пользователю', async () => {

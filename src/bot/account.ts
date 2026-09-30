@@ -12,17 +12,42 @@ import { T, hhmm } from './texts.js'
 const RITUAL_MAX = 200
 const PROFILE_MAX = 2000
 
-// --- Знакомство: пояс и ритуал, затем сразу работа.
+// --- Знакомство: пояс, время старта и ритуал, затем сразу работа.
+
+const MOSCOW = 'Europe/Moscow'
+const START_PRESETS: Record<string, string> = { st_0900: '09:00', st_1000: '10:00', st_1200: '12:00' }
+
+function ritualKeyboard() {
+  return [[{ text: T.skip, data: cb('skip', null, 'ritual') }]]
+}
+
+function startTimeKeyboard() {
+  return [
+    [
+      { text: '9:00', data: cb('onb', null, 'st_0900') },
+      { text: '10:00', data: cb('onb', null, 'st_1000') },
+      { text: '12:00', data: cb('onb', null, 'st_1200') },
+    ],
+    [
+      { text: T.customTime, data: cb('onb', null, 'st_custom') },
+      { text: T.startTimeVaries, data: cb('onb', null, 'st_skip') },
+    ],
+  ]
+}
 
 export async function beginOnboarding(ctx: Ctx, user: User): Promise<void> {
   await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: 'timezone' } })
-  await reply(ctx, user, T.welcome)
+  await reply(ctx, user, T.welcome(hhmm(ctx.now(), MOSCOW)), [
+    [
+      { text: T.timezoneYes, data: cb('onb', null, 'tz_yes') },
+      { text: T.timezoneNo, data: cb('onb', null, 'tz_no') },
+    ],
+  ])
 }
 
 export async function resumeOnboarding(ctx: Ctx, user: User): Promise<void> {
-  if (user.pendingInput === 'ritual') {
-    return reply(ctx, user, T.askRitual, [[{ text: T.skip, data: cb('skip', null, 'ritual') }]])
-  }
+  if (user.pendingInput === 'ritual') return reply(ctx, user, T.askRitual, ritualKeyboard())
+  if (user.pendingInput === 'start_time') return reply(ctx, user, T.askStartTime, startTimeKeyboard())
   await beginOnboarding(ctx, user)
 }
 
@@ -30,20 +55,75 @@ async function isOnboarding(ctx: Ctx, userId: string): Promise<boolean> {
   return (await ctx.db.focusSession.count({ where: { userId } })) === 0
 }
 
+// После пояса в знакомстве — время старта; вне знакомства пояс меняется из
+// настроек и больше ничего не спрашиваем.
+async function afterTimezone(ctx: Ctx, user: User): Promise<'start_time' | 'none'> {
+  return (await isOnboarding(ctx, user.id)) && user.ritualText === null ? 'start_time' : 'none'
+}
+
 export async function onTimezoneText(ctx: Ctx, user: User, text: string): Promise<void> {
   const clock = parseClock(text)
   if (!clock) return reply(ctx, user, T.badTimezone)
   const now = ctx.now()
   const zone = zoneFromLocalClock(clock, now)
-  const onboarding = await isOnboarding(ctx, user.id)
-  const next = onboarding && user.ritualText === null ? 'ritual' : 'none'
+  const next = await afterTimezone(ctx, user)
   await ctx.db.$transaction(async (tx) => {
     await tx.user.update({ where: { id: user.id }, data: { timezone: zone.timezone, pendingInput: next } })
-    await logEvent(tx, user.id, 'timezone_set', { offset_minutes: offsetMinutes(zone.timezone, now) }, { at: now })
+    await logEvent(tx, user.id, 'timezone_set', { offset_minutes: offsetMinutes(zone.timezone, now), via: 'typed' }, { at: now })
   })
   const updated = { ...user, timezone: zone.timezone }
   await reply(ctx, updated, T.timezoneSet(hhmm(now, zone.timezone)))
-  if (next === 'ritual') return reply(ctx, updated, T.askRitual, [[{ text: T.skip, data: cb('skip', null, 'ritual') }]])
+  if (next === 'start_time') return reply(ctx, updated, T.askStartTime, startTimeKeyboard())
+}
+
+// Кнопки знакомства. Каждая срабатывает только на своём шаге: повторное
+// нажатие на старое сообщение не запускает знакомство заново.
+export async function onOnboardingButton(ctx: Ctx, user: User, arg: string): Promise<void> {
+  const now = ctx.now()
+  if (arg === 'tz_yes') {
+    const next = await afterTimezone(ctx, user)
+    const done = await ctx.db.$transaction(async (tx) => {
+      const r = await tx.user.updateMany({ where: { id: user.id, pendingInput: 'timezone' }, data: { timezone: MOSCOW, pendingInput: next } })
+      if (r.count === 1) await logEvent(tx, user.id, 'timezone_set', { offset_minutes: offsetMinutes(MOSCOW, now), via: 'confirmed' }, { at: now })
+      return r.count === 1
+    })
+    if (!done) return reply(ctx, user, T.stale)
+    if (next === 'start_time') return reply(ctx, user, T.askStartTime, startTimeKeyboard())
+    return reply(ctx, user, T.timezoneSet(hhmm(now, MOSCOW)))
+  }
+  if (arg === 'tz_no') {
+    if (user.pendingInput !== 'timezone') return reply(ctx, user, T.stale)
+    return reply(ctx, user, T.askTimezone)
+  }
+  if (arg === 'st_custom') {
+    if (user.pendingInput !== 'start_time') return reply(ctx, user, T.stale)
+    return reply(ctx, user, T.askStartTimeCustom)
+  }
+  if (arg === 'st_skip') return saveStartTime(ctx, user, null)
+  const preset = START_PRESETS[arg]
+  if (preset) return saveStartTime(ctx, user, preset)
+  return reply(ctx, user, T.stale)
+}
+
+export async function onStartTimeText(ctx: Ctx, user: User, text: string): Promise<void> {
+  const clock = parseClock(text)
+  if (!clock) return reply(ctx, user, T.badTimezone)
+  await saveStartTime(ctx, user, `${String(clock.h).padStart(2, '0')}:${String(clock.m).padStart(2, '0')}`)
+}
+
+// «По-разному» — null: morningTime остаётся по умолчанию.
+async function saveStartTime(ctx: Ctx, user: User, value: string | null): Promise<void> {
+  const now = ctx.now()
+  const done = await ctx.db.$transaction(async (tx) => {
+    const r = await tx.user.updateMany({
+      where: { id: user.id, pendingInput: 'start_time' },
+      data: { pendingInput: 'ritual', ...(value ? { morningTime: value } : {}) },
+    })
+    if (r.count === 1 && value) await logEvent(tx, user.id, 'settings_changed', { key: 'morning_time' }, { at: now })
+    return r.count === 1
+  })
+  if (!done) return reply(ctx, user, T.stale)
+  await reply(ctx, user, T.askRitual, ritualKeyboard())
 }
 
 export async function onRitualText(ctx: Ctx, user: User, text: string | null): Promise<void> {

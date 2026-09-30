@@ -104,7 +104,7 @@ UPDATE и DELETE запрещены триггером.
 |---|---|---|---|
 | `bot_started` | `/start` | да | `source`, `returning` |
 | `consent_given` | историческое событие старого онбординга, больше не создаётся | да | — |
-| `timezone_set` | человек назвал своё время | да | `offset_minutes` |
+| `timezone_set` | человек назвал своё время или подтвердил московское | да | `offset_minutes`, `via` (typed \| confirmed) |
 | `intent_submitted` | ответ на «с чего начнёшь» | да | `length_chars`, `named_minutes` |
 | `intent_parsed` | намерение разобрано | нет | `llm_used`, `task_id`, `is_new_task`, `scope` |
 | `voice_transcribed` | голосовое распознано | да | `duration_seconds`, `length_chars` |
@@ -117,6 +117,8 @@ UPDATE и DELETE запрещены триггером.
 | `task_selected` | выбрал задачу для сессии | да | `task_id` |
 | `task_completed` | отметил существующую задачу готовой | да | `task_id`, `source` (`text`, `voice`, `button`) |
 | `task_switched` | завершил одну задачу и начал другую | да | `from_task_id`, `to_task_id`, `source` |
+| `task_breakdown_requested` | нажал «Разобрать» в карточке задачи | да | `task_id` |
+| `task_breakdown_done` | шаги задачи записаны | да | `task_id`, `mode` (answered \| auto \| manual), `steps`, `llm_used` |
 | `session_length_adjusted` | человек сдвинул предложенную длину | да | `direction`, `planned_minutes` |
 | `session_help_requested` | попросил помощи во время активной сессии | да | `kind`, `action`, `llm_used` |
 | `session_started` | подтвердил, таймер пошёл | да | `task_id`, `is_new_task`, `planned_minutes`, `planned_rest_minutes`, `minutes_source`, `technique`, `scope` |

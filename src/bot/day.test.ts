@@ -73,7 +73,7 @@ describe.skipIf(!hasDb)('/delete_me', () => {
   it('новый пользователь проходит настройку времени без согласия и не сохраняет её как задачу', async () => {
     const bot = makeBot()
     await bot.text(A, '/start')
-    expect(bot.lastText(A)).toContain('Сколько у тебя сейчас времени?')
+    expect(bot.lastText(A)).toContain('как в Москве?')
     expect(bot.lastText(A)).not.toContain('согласие')
     await bot.text(A, '10:00')
     expect(await prisma.focusSession.count()).toBe(0)

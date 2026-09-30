@@ -20,7 +20,7 @@ export const TECHNIQUES = ['auto', 'pomodoro', 'medium', 'long', 'free'] as cons
 export const REST_CHOICES = ['rest', 'continue', 'later', 'day_end'] as const
 export const SCOPES = ['step', 'multi_session'] as const
 export const POINT_REASONS = ['session_completed', 'daily_goal', 'comeback'] as const
-export const LLM_STAGES = ['intent', 'report', 'tasks', 'session_help'] as const
+export const LLM_STAGES = ['intent', 'report', 'tasks', 'session_help', 'breakdown'] as const
 export const LLM_FALLBACK_REASONS = ['disabled', 'error', 'timeout', 'invalid'] as const
 export const OUTBOX_KINDS = ['ping', 'session_end', 'rest_over', 'meeting', 'summary'] as const
 export const SETTINGS_KEYS = [
@@ -36,7 +36,7 @@ export const PAYLOADS = {
   // Метка источника проходит parseSource: [a-z0-9_-]{1,32}, это не текст человека.
   bot_started: z.strictObject({ source: z.string().regex(/^[a-z0-9_-]{1,32}$/).nullable(), returning: z.boolean() }),
   consent_given: empty,
-  timezone_set: z.strictObject({ offset_minutes: z.int().min(-12 * 60).max(14 * 60) }),
+  timezone_set: z.strictObject({ offset_minutes: z.int().min(-12 * 60).max(14 * 60), via: z.enum(['typed', 'confirmed']) }),
   intent_submitted: z.strictObject({ length_chars: z.int().min(0), named_minutes: z.boolean() }),
   intent_parsed: z.strictObject({
     llm_used: z.boolean(),
@@ -97,6 +97,15 @@ export const PAYLOADS = {
     allocated_seconds: z.int().min(0).max(24 * 60 * 60),
     unassigned_seconds: z.int().min(0).max(24 * 60 * 60),
     source: z.literal('report'),
+  }),
+  task_breakdown_requested: z.strictObject({ task_id: id }),
+  // answered — человек сам описал задачу, auto — «Предложи сам», manual — шаги
+  // записаны как есть, потому что модель не ответила.
+  task_breakdown_done: z.strictObject({
+    task_id: id,
+    mode: z.enum(['answered', 'auto', 'manual']),
+    steps: z.int().min(1).max(6),
+    llm_used: z.boolean(),
   }),
   llm_fallback: z.strictObject({ stage: z.enum(LLM_STAGES), reason: z.enum(LLM_FALLBACK_REASONS) }),
   task_stuck_detected: z.strictObject({ task_id: id, sessions_without_progress: z.int().min(0) }),

@@ -462,5 +462,133 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     await bot.press(A, `task:${task.id}:done`)
     expect(await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).toMatchObject({ status: 'active' })
     expect(bot.lastText(A)).toContain('неактуально')
+
+    await bot.press(A, `task:${task.id}:split`)
+    expect(await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })).toMatchObject({ pendingInput: 'none' })
+    await bot.press(A, `task:${task.id}:splitauto`)
+    expect(bot.lastText(A)).toContain('неактуально')
+    expect(await prisma.task.count({ where: { userId: other.id } })).toBe(1)
+  })
+})
+
+// Модель разбора: отвечает только на свой промт и запоминает, что получила.
+const breakdown = (steps: string[] | null) => {
+  const inputs: { task: string; answer: string | null }[] = []
+  const provider: LlmProvider = {
+    enabled: true,
+    model: 'test-model',
+    async complete(req) {
+      if (!req.system.includes('разбить задачу пользователя')) throw new Error('unexpected LLM call')
+      inputs.push(JSON.parse(req.input))
+      return reply(steps ? JSON.stringify({ steps }) : 'не json')
+    },
+  }
+  return { provider, inputs }
+}
+
+describe.skipIf(!hasDb)('разбор задачи на шаги', () => {
+  beforeEach(resetDb)
+
+  async function taskCard(bot: ReturnType<typeof makeBot>, tgId: number, title = 'Написать курсовую') {
+    await bot.onboard(tgId)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(tgId) } })
+    const task = await prisma.task.create({ data: { userId: user.id, title } })
+    await bot.press(tgId, `task:${task.id}:view0`)
+    return { user, task }
+  }
+
+  it('сначала спрашивает, как человек видит задачу, и строит шаги от его ответа', async () => {
+    const llm = breakdown(['Перечитать требования', 'Набросать план', 'Написать введение'])
+    const bot = makeBot({ llm: llm.provider })
+    const { user, task } = await taskCard(bot, A)
+    expect(bot.lastButton(A, `task:${task.id}:split`)).toBe(`task:${task.id}:split`)
+
+    await bot.press(A, `task:${task.id}:split`)
+    expect(bot.lastText(A)).toContain('Как ты видишь задачу «Написать курсовую»? С чего хочется начать?')
+    await bot.text(A, 'начну с требований, потом план')
+
+    expect(llm.inputs).toEqual([{ task: 'Написать курсовую', answer: 'начну с требований, потом план' }])
+    expect(bot.lastText(A)).toBe(['Шаги по «Написать курсовую»:', '1. Перечитать требования', '2. Набросать план', '3. Написать введение', '', 'Начнём с первого?'].join('\n'))
+    const steps = await prisma.task.findMany({ where: { userId: user.id, id: { not: task.id } }, orderBy: { createdAt: 'asc' } })
+    expect(steps.map((step) => step.title)).toEqual(['Перечитать требования', 'Набросать план', 'Написать введение'])
+    expect(await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).toMatchObject({ status: 'active' })
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ pendingInput: 'none' })
+    expect(await prisma.componentCall.count({ where: { name: 'task_breakdown', status: 'ok' } })).toBe(1)
+    expect((await prisma.event.findFirstOrThrow({ where: { type: 'task_breakdown_done' } })).payload).toMatchObject({ mode: 'answered', steps: 3, llm_used: true })
+
+    const first = steps.find((step) => step.title === 'Перечитать требования')!
+    await bot.press(A, bot.lastButton(A, 'task:', ':start'))
+    expect(await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })).toMatchObject({ taskId: first.id })
+  })
+
+  it('«Предложи сам» зовёт модель без ответа человека', async () => {
+    const llm = breakdown(['Открыть черновик', 'Выписать три тезиса'])
+    const bot = makeBot({ llm: llm.provider })
+    const { task } = await taskCard(bot, A)
+
+    await bot.press(A, `task:${task.id}:split`)
+    await bot.press(A, `task:${task.id}:splitauto`)
+
+    expect(llm.inputs).toEqual([{ task: 'Написать курсовую', answer: null }])
+    expect(bot.lastText(A)).toContain('2. Выписать три тезиса')
+    expect((await prisma.event.findFirstOrThrow({ where: { type: 'task_breakdown_done' } })).payload).toMatchObject({ mode: 'auto', llm_used: true })
+  })
+
+  it('без модели записывает перечисленные шаги, а на одну фразу просит список', async () => {
+    const bot = makeBot()
+    const { user, task } = await taskCard(bot, A)
+
+    await bot.press(A, `task:${task.id}:split`)
+    await bot.text(A, 'сначала разберусь с темой')
+    expect(bot.lastText(A)).toBe('Не смог разобрать сам. Напиши шаги, каждый с новой строки, — запишу.')
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ pendingInput: `task_split_manual:${task.id}` })
+
+    await bot.text(A, '1. Выбрать тему\n2. Найти три источника')
+
+    expect(bot.lastText(A)).toContain('1. Выбрать тему\n2. Найти три источника')
+    expect(await prisma.task.count({ where: { userId: user.id } })).toBe(3)
+    expect((await prisma.event.findFirstOrThrow({ where: { type: 'task_breakdown_done' } })).payload).toMatchObject({ mode: 'manual', steps: 2, llm_used: false })
+    expect(await prisma.event.findFirst({ where: { type: 'llm_fallback', payload: { path: ['stage'], equals: 'breakdown' } } })).not.toBeNull()
+  })
+
+  it('ответ голосом тоже идёт в разбор, а не в список задач', async () => {
+    const llm = breakdown(['Позвонить научруку', 'Согласовать тему'])
+    const bot = makeBot({ llm: llm.provider, stt: { enabled: true, model: 'test-stt', async transcribe() { return 'сначала позвоню научруку' } } })
+    bot.tg.downloads.set('voice-split', new Uint8Array([1, 2, 3]))
+    const { task } = await taskCard(bot, A)
+
+    await bot.press(A, `task:${task.id}:split`)
+    await bot.voice(A, { fileId: 'voice-split', duration: 4, mimeType: 'audio/ogg', fileSize: 3 })
+
+    expect(llm.inputs).toEqual([{ task: 'Написать курсовую', answer: 'сначала позвоню научруку' }])
+    expect(bot.lastText(A)).toContain('Шаги по «Написать курсовую»')
+  })
+})
+
+describe.skipIf(!hasDb)('короткий шаг внутри сессии', () => {
+  beforeEach(resetDb)
+
+  it('задача, закрытая раньше порога засчёта, не обрывает таймер', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    const first = await prisma.task.create({ data: { userId: user.id, title: 'Открыть черновик' } })
+    const second = await prisma.task.create({ data: { userId: user.id, title: 'Выписать тезисы' } })
+    await bot.press(A, `task:${first.id}:start`)
+    const started = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })
+    bot.advance(6)
+
+    await bot.press(A, `task:${first.id}:done`)
+
+    expect(await prisma.task.findUniqueOrThrow({ where: { id: first.id } })).toMatchObject({ status: 'done' })
+    const running = await prisma.focusSession.findUniqueOrThrow({ where: { id: started.id } })
+    expect(running).toMatchObject({ state: 'running', taskId: null })
+    expect(running.plannedEndAt).toEqual(started.plannedEndAt)
+    expect(bot.lastText(A)).toContain('«Открыть черновик» отметил готовой. Таймер идёт дальше до 10:40')
+    expect(bot.lastText(A)).toContain('1. Выписать тезисы')
+    expect(await prisma.event.count({ where: { type: 'session_completed' } })).toBe(0)
+
+    await bot.press(A, `task:${second.id}:start`)
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: started.id } })).toMatchObject({ state: 'running', taskId: second.id, startedAt: started.startedAt })
   })
 })

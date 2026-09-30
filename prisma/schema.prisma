@@ -34,8 +34,9 @@ model User {
   // Что бот ждёт от следующего свободного текста вне сессии: пояс, ритуал,
   // время встречи, правку профиля. Состояний мало, и они видны в одной колонке,
   // а не размазаны по памяти процесса.
-  // none | timezone | ritual | meeting_time | morning_time | profile | report_text
+  // none | timezone | start_time | ritual | meeting_time | morning_time | profile | report_text
   // | running_work:<sessionId> | running_duration:<sessionId> | task_edit:<taskId>
+  // | task_split:<taskId> | task_split_manual:<taskId>
   pendingInput String @default("none") @map("pending_input")
 
   // Роль на текущий момент: new | active | observer | dormant. История переходов
