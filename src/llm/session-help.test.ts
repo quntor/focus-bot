@@ -33,6 +33,30 @@ describe('помощь во время активной сессии', () => {
     expect(templateSessionHelp(text)).toMatchObject({ kind, action, llmUsed: false })
   })
 
+  it.each([
+    ['не закончил, пойду отдыхать', 'pause', null],
+    ['ничего не сделал, иду отдыхать', 'pause', null],
+    ['так и не доделал, ухожу на перерыв', 'pause', null],
+    ['сделал и иду отдыхать', 'complete_and_rest', null],
+    ['сделал это и иду отдыхать', 'complete_and_rest', null],
+    ['сделал всё, иду отдыхать', 'complete_and_rest', null],
+    ['закончил отчёт и иду отдыхать', 'complete_and_rest', 'отчёт'],
+  ])('отрицание и мусор вместо названия: %s', (text, kind, taskTitle) => {
+    expect(templateSessionHelp(text)).toMatchObject({ kind, taskTitle })
+  })
+
+  it('«пока не готово» не считается досрочным финишем', () => {
+    expect(templateSessionHelp('пока не готово')).not.toMatchObject({ kind: 'finished_early' })
+  })
+
+  it('отрицание не превращается в готовую задачу и при включённой модели', async () => {
+    const parsed = await parseSessionHelp(
+      provider(['{"kind":"pause","reply":null,"action":null,"task_title":null}']),
+      input('не закончил, пойду отдыхать'),
+    )
+    expect(parsed.result.kind).toBe('pause')
+  })
+
   it('принимает только короткий ответ и действие из закрытого списка', async () => {
     const parsed = await parseSessionHelp(
       provider(['{"kind":"stuck","reply":"Сузь задачу до одного проверяемого шага.","action":"change_step"}']),

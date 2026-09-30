@@ -55,15 +55,38 @@ function isExistingFlowCommand(text: string): boolean {
 }
 
 const REST_MARKERS = ['отдыхаю', 'иду отдыхать', 'ухожу отдыхать', 'пойду отдыхать', 'пора отдыхать', 'я на перерыв', 'ухожу на перерыв', 'беру перерыв'] as const
-const DONE_MARKERS = ['сделал', 'сделала', 'закончил', 'закончила', 'завершил', 'завершила', 'готово'] as const
+
+// «Сделал» — отдельным словом: «переделал» сюда не относится. Отрицание («не
+// закончил», «ничего не сделал», «так и не доделал», «не готово») — не готовая
+// задача, а обычный уход на перерыв.
+const DONE_WORD = String.raw`(?:сделала?|закончила?|завершила?|доделала?|готово)`
+const DONE = new RegExp(String.raw`(?<!\p{L})${DONE_WORD}(?!\p{L})`, 'u')
+const NEGATED_DONE = new RegExp(String.raw`(?<!\p{L})не\s+(?:\p{L}+\s+){0,2}?(?:${DONE_WORD}|успела?)(?!\p{L})`, 'u')
+
+function reportsDone(value: string): boolean {
+  return DONE.test(value) && !NEGATED_DONE.test(value)
+}
+
+// Что регулярка вырезает вместо названия: «сделал и иду отдыхать», «закончил
+// это, иду отдыхать». Такое «название» означает текущую задачу, а не новую.
+const NOT_A_TITLE = new Set(['и', 'это', 'эту', 'этот', 'ее', 'её', 'его', 'их', 'все', 'всё', 'задачу', 'задача', 'работу', 'дело', 'перерыв', 'что', 'то', 'тут', 'там', 'уже', 'наконец'])
+
+function cleanCompletedTitle(raw: string | undefined): string | null {
+  const title = raw?.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '').trim().slice(0, 80) ?? ''
+  const words = title.match(/[\p{L}\p{N}]+/gu) ?? []
+  if (words.join('').length < 3 || words.every((word) => NOT_A_TITLE.has(word))) return null
+  return title
+}
 
 function explicitCompleteAndRestTitle(text: string): string | null | undefined {
   const value = normalized(text)
   if (containsAny(value, ['не отдыхаю', 'не иду отдыхать', 'не ухожу отдыхать', 'не иду на перерыв', 'не ухожу на перерыв'])) return undefined
   if (!containsAny(value, REST_MARKERS)) return undefined
-  if (!containsAny(value, DONE_MARKERS)) return null
-  const match = value.match(/(?:сделала?|закончила?|завершила?)\s+(?:задачу\s+)?(.+?)\s+(?:и\s+)?(?:теперь\s+)?(?:отдыхаю|иду отдыхать|ухожу отдыхать|пойду отдыхать|на перерыв|беру перерыв)/u)
-  return match?.[1]?.trim().slice(0, 80) || null
+  if (!reportsDone(value)) return null
+  // Название — из текста с «ё»: оно может стать названием задачи.
+  const lower = text.toLocaleLowerCase('ru').replace(/\s+/g, ' ').trim()
+  const match = lower.match(/(?:сделала?|закончила?|завершила?|доделала?)\s+(?:задачу\s+)?(.+?)\s+(?:и\s+)?(?:теперь\s+)?(?:отдыхаю|иду отдыхать|ухожу отдыхать|пойду отдыхать|на перерыв|беру перерыв)/u)
+  return cleanCompletedTitle(match?.[1])
 }
 
 export function templateSessionHelp(text: string): SessionHelpResult {
@@ -71,7 +94,7 @@ export function templateSessionHelp(text: string): SessionHelpResult {
   if (isExistingFlowCommand(value)) return { kind: 'other', reply: null, action: null, taskTitle: null, llmUsed: false }
   const completedTitle = explicitCompleteAndRestTitle(text)
   if (completedTitle !== undefined) {
-    if (containsAny(value, DONE_MARKERS)) return { kind: 'complete_and_rest', reply: null, action: null, taskTitle: completedTitle, llmUsed: false }
+    if (reportsDone(value)) return { kind: 'complete_and_rest', reply: null, action: null, taskTitle: completedTitle, llmUsed: false }
     return { kind: 'pause', reply: null, action: null, taskTitle: null, llmUsed: false }
   }
   if (containsAny(value, ['залип', 'отвлек', 'прокрастинир', 'уведомлен', 'лент', 'новост', 'открыл почт', 'вместо работы', 'смотрю в окно'])) {
@@ -92,7 +115,7 @@ export function templateSessionHelp(text: string): SessionHelpResult {
       llmUsed: false,
     }
   }
-  if (containsAny(value, ['готово', 'уже закончил', 'уже закончила', 'все сделал', 'все сделала', 'задача завершена', 'завершил досрочно', 'уложился', 'уложилась', 'результат уже готов', 'результат уже отправлен'])) {
+  if (!NEGATED_DONE.test(value) && containsAny(value, ['готово', 'уже закончил', 'уже закончила', 'все сделал', 'все сделала', 'задача завершена', 'завершил досрочно', 'уложился', 'уложилась', 'результат уже готов', 'результат уже отправлен'])) {
     return {
       kind: 'finished_early',
       reply: 'Отлично. Можно завершить сессию и записать результат.',

@@ -52,6 +52,44 @@ describe.skipIf(!hasDb)('конец сессии', () => {
     expect(bot.lastText(A)).not.toContain('неактуально')
   })
 
+  it('«не закончил, пойду отдыхать» — перерыв, задача остаётся открытой', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    await bot.text(A, '/focus Написать отчёт по продажам')
+    await bot.press(A, bot.lastButton(A, 'len:', ':ok'))
+    bot.advance(20)
+
+    await bot.text(A, 'не закончил, пойду отдыхать')
+
+    expect(await prisma.task.findMany({ select: { status: true } })).toEqual([{ status: 'active' }])
+    expect(await prisma.focusSession.findFirstOrThrow()).toMatchObject({ state: 'paused', outcome: null })
+  })
+
+  it('«сделал и иду отдыхать» закрывает текущую задачу, а не заводит задачу «и»', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    await bot.text(A, '/focus Написать отчёт по продажам')
+    await bot.press(A, bot.lastButton(A, 'len:', ':ok'))
+    bot.advance(20)
+
+    await bot.text(A, 'сделал и иду отдыхать')
+
+    expect(await prisma.task.findMany({ select: { title: true, status: true } })).toEqual([{ title: 'Написать отчёт по продажам', status: 'done' }])
+    expect(await prisma.focusSession.findFirstOrThrow()).toMatchObject({ state: 'finished', outcome: 'done' })
+  })
+
+  it('«закончил отчёт и иду отдыхать» узнаёт задачу своими словами', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    await bot.text(A, '/focus Написать отчёт по продажам')
+    await bot.press(A, bot.lastButton(A, 'len:', ':ok'))
+    bot.advance(20)
+
+    await bot.text(A, 'закончил отчёт и иду отдыхать')
+
+    expect(await prisma.task.findMany({ select: { title: true, status: true } })).toEqual([{ title: 'Написать отчёт по продажам', status: 'done' }])
+  })
+
   it('свободный режим: пропущенные проверки засчитывают время до первой пропущенной', async () => {
     const bot = makeBot()
     await bot.onboard(A)

@@ -16,7 +16,7 @@ import { cb } from './callbacks.js'
 import { reply, type Ctx } from './context.js'
 import { recentConversationContext, resetConversationContext } from './conversation-context.js'
 import { DEADLINE_EXTEND_MINUTES, T, hhmm } from './texts.js'
-import { findOrCreateTask } from './task-store.js'
+import { findOrCreateTask, matchTaskByTitle } from './task-store.js'
 import type { Keyboard } from '../tg/client.js'
 
 const MIN = 60_000
@@ -251,13 +251,15 @@ async function completeTaskAndRest(
       if (!current || !current.startedAt) throw new StaleTransition()
 
       const activeTasks = await tx.task.findMany({ where: { userId: user.id, status: 'active' } })
-      const normalize = (value: string) => value.toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
-      let task = cleanTitle
-        ? activeTasks.find((candidate) => normalize(candidate.title) === normalize(cleanTitle)) ?? null
-        : current.taskId
-          ? activeTasks.find((candidate) => candidate.id === current.taskId) ?? null
-          : null
-      if (!task && cleanTitle) task = await tx.task.findUniqueOrThrow({ where: { id: (await findOrCreateTask(tx, { userId: user.id, title: cleanTitle, now })).id } })
+      // Названное ищем среди активных своими словами: «закончил отчёт» — это
+      // «Написать отчёт по продажам». Не нашлось — речь о текущей задаче.
+      // Новую задачу заводим, только если сессия шла без задачи: иначе «сделал
+      // это» превращалось в готовую задачу «это», а настоящая оставалась.
+      let task = cleanTitle ? matchTaskByTitle(activeTasks, cleanTitle, current.taskId) : null
+      if (!task && current.taskId) task = activeTasks.find((candidate) => candidate.id === current.taskId) ?? null
+      if (!task && cleanTitle && !current.taskId) {
+        task = await tx.task.findUniqueOrThrow({ where: { id: (await findOrCreateTask(tx, { userId: user.id, title: cleanTitle, now })).id } })
+      }
       // Сессия без задачи тоже заканчивается по «готово, иду отдыхать»:
       // закрывается сессия, а отмечать готовой нечего.
       taskTitle = task?.title ?? null
