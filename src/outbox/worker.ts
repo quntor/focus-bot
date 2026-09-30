@@ -179,7 +179,7 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
       : await renderReminder(ctx, user, T.meetingPlain, reminderKeyboard(), true)
     return withEvent(r, async (tx) => {
       await tx.user.updateMany({
-        where: { id: user.id, pendingInput: 'meeting_time' },
+        where: { id: user.id, pendingInput: { in: ['meeting_time', 'meeting_time_soft'] } },
         data: { pendingInput: 'none' },
       })
       await logEvent(tx, user.id, 'meeting_sent', {}, { at: now })

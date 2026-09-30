@@ -333,7 +333,7 @@ export async function closeDay(
     await cancelPending(tx, { userId: user.id, kind: { in: ['summary', 'rest_over', 'meeting'] } })
     await tx.user.update({
       where: { id: user.id },
-      data: { pendingInput: options.meetingAt ? 'none' : 'meeting_time', declinesInRow: 0 },
+      data: { pendingInput: options.meetingAt ? 'none' : 'meeting_time_soft', declinesInRow: 0 },
     })
     await logEvent(tx, user.id, 'day_closed', { day_key: day, via }, { at: now })
     if (options.meetingAt) {
@@ -369,7 +369,7 @@ export async function onSummaryConfirm(ctx: Ctx, user: User, arg: string): Promi
     })
     if (res.count !== 1) return false
     const s = await buildSummary(tx, user, day)
-    await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'meeting_time' } })
+    await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'meeting_time_soft' } })
     await logEvent(tx, user.id, 'daily_summary_confirmed', { day_key: day, sessions: s.sessions }, { at: now })
     return true
   })
@@ -420,11 +420,30 @@ export async function onMeet(ctx: Ctx, user: User, arg: string): Promise<void> {
   return reply(ctx, user, T.stale)
 }
 
-export async function onMeetingTimeText(ctx: Ctx, user: User, text: string): Promise<void> {
+// meeting_time — человек сам нажал «Своё время», ждём время строго.
+// meeting_time_soft — вопрос «когда встретимся» после итога дня: принимаем
+// только явное время («9:30», «в 9», «завтра в 10»). Любой другой текст
+// снимает ожидание и разбирается как обычно — иначе «созвон в 9» стал бы
+// встречей, а «застрял» получал бы «Напиши время». false — не наш ответ.
+export async function onMeetingTimeText(ctx: Ctx, user: User, text: string, opts: { soft?: boolean } = {}): Promise<boolean> {
   const now = ctx.now()
-  const at = meetingAtFromText(text, user, now)
-  if (!at) return reply(ctx, user, T.askCustomTime)
-  await scheduleMeeting(ctx, user, at, 'custom')
+  const at = opts.soft ? softMeetingAt(text, user, now) : meetingAtFromText(text, user, now)
+  if (at) {
+    await scheduleMeeting(ctx, user, at, 'custom')
+    return true
+  }
+  if (!opts.soft) {
+    await reply(ctx, user, T.askCustomTime)
+    return true
+  }
+  await ctx.db.user.updateMany({ where: { id: user.id, pendingInput: 'meeting_time_soft' }, data: { pendingInput: 'none' } })
+  return false
+}
+
+function softMeetingAt(text: string, user: User, now: Date): Date | null {
+  const normalized = text.toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/\s+/g, ' ').replace(/[.!]+$/, '').trim()
+  const onlyTime = parseClock(normalized) !== null || /^(?:(?:сегодня|завтра)\s+)?(?:в|к)\s*\d{1,2}(?:[:.]\d{2})?$/u.test(normalized)
+  return onlyTime ? meetingAtFromText(normalized, user, now) : explicitMeetingAt(text, user, now)
 }
 
 function meetingAtFromText(text: string, user: User, now: Date): Date | null {

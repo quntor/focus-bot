@@ -125,24 +125,7 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
         const text = await tasks.transcribeVoice(ctx, user, msg.voice)
         if (!text) return
         const voiceContextEventId = rememberConversationContext(user.id, 'user', text, ctx.now())
-        // Шаги знакомства ждут ответа и голосом: иначе voice ушёл бы в разбор задач.
-        if (user.pendingInput === 'timezone') return account.onTimezoneText(ctx, user, text)
-        if (user.pendingInput === 'start_time') return account.onStartTimeText(ctx, user, text)
-        if (user.pendingInput === 'ritual') return account.onRitualText(ctx, user, text)
-        if (user.pendingInput === 'meeting_time') return day.onMeetingTimeText(ctx, user, text)
-        if (user.pendingInput === 'report_text' && await onPendingReport(ctx, user, text, 'voice')) return
-        const runningEdit = /^running_(work|duration):([0-9a-f-]{36})$/.exec(user.pendingInput)
-        if (runningEdit?.[1] === 'work' && runningEdit[2]) return session.onRunningWorkText(ctx, user, runningEdit[2], text)
-        if (runningEdit?.[1] === 'duration' && runningEdit[2]) return session.onRunningDurationText(ctx, user, runningEdit[2], text)
-        const taskEdit = /^task_edit:([0-9a-f-]{36})$/.exec(user.pendingInput)
-        if (taskEdit?.[1]) return tasks.onTaskEditText(ctx, user, taskEdit[1], text)
-        const taskSplit = TASK_SPLIT.exec(user.pendingInput)
-        if (taskSplit?.[1]) return tasks.onTaskBreakdownAnswer(ctx, user, taskSplit[1], text, 'voice', voiceContextEventId)
-        if (user.pendingInput === 'task_add') return tasks.onTaskAddText(ctx, user, text, 'voice')
-        if (await session.onRunningFreeText(ctx, user, text, voiceContextEventId)) return
-        const outcome = await tasks.onTaskMessage(ctx, user, text, 'voice', voiceContextEventId)
-        if (outcome === 'session_intent') await session.onIntentText(ctx, user, text)
-        else if (outcome === 'close_day') await day.closeDay(ctx, user, 'voice')
+        await routeInput(ctx, user, text, 'voice', voiceContextEventId)
       }
     }
     else if (msg?.text) await onText(ctx, user, msg.text, created, contextEventId)
@@ -155,6 +138,7 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
 
 async function onCommand(ctx: Ctx, user: User, command: string, args: string, created: boolean): Promise<void> {
   const now = ctx.now()
+  if (!(command === 'start' && ONBOARDING_INPUTS.includes(user.pendingInput))) user = await releasePending(ctx, user)
   if (command === 'start') {
     await logEvent(ctx.db, user.id, 'bot_started', { source: user.source, returning: !created }, { at: now })
     if (created) return account.beginOnboarding(ctx, user)
@@ -193,40 +177,71 @@ async function onCommand(ctx: Ctx, user: User, command: string, args: string, cr
 
 async function onText(ctx: Ctx, user: User, text: string, created: boolean, contextEventId: number | null): Promise<void> {
   if (created) return account.beginOnboarding(ctx, user)
-  if (text === T.sessionStartButton) return tasks.onSessionStart(ctx, user)
-  if (text === T.tasksButton) return tasks.showTasks(ctx, user)
-  if (text === T.sessionBreakButton) return session.onBreak(ctx, user)
-  if (text === T.sessionResumeButton) return session.onResume(ctx, user)
-  if (text === T.sessionNewButton) return session.onNewAfterBreak(ctx, user, () => tasks.onSessionStart(ctx, user))
-  const runningEdit = /^running_(work|duration):([0-9a-f-]{36})$/.exec(user.pendingInput)
+  const button = KEYBOARD_ACTIONS[text]
+  if (button) return button(ctx, await releasePending(ctx, user))
+  await routeInput(ctx, user, text, 'text', contextEventId)
+}
+
+// Кнопки постоянной клавиатуры — это новое действие, а не ответ на вопрос бота.
+const KEYBOARD_ACTIONS: Record<string, (ctx: Ctx, user: User) => Promise<void>> = {
+  [T.sessionStartButton]: (ctx, user) => tasks.onSessionStart(ctx, user),
+  [T.tasksButton]: (ctx, user) => tasks.showTasks(ctx, user),
+  [T.sessionBreakButton]: (ctx, user) => session.onBreak(ctx, user),
+  [T.sessionResumeButton]: (ctx, user) => session.onResume(ctx, user),
+  [T.sessionNewButton]: (ctx, user) => session.onNewAfterBreak(ctx, user, () => tasks.onSessionStart(ctx, user)),
+}
+
+// Бот ждёт не больше одного ответа (pendingInput). Команда или кнопка
+// клавиатуры — другое действие: ожидание снимается, иначе следующая фраза
+// человека ушла бы в старый вопрос (профиль, отчёт, время встречи). Знакомство
+// не снимается: /help посреди него не должен его обрывать. Ожидание выбора на
+// «Время вышло» привязано к сессии и живёт вместе с ней.
+const ONBOARDING_INPUTS = ['timezone', 'start_time', 'ritual']
+
+export async function releasePending(ctx: Ctx, user: User): Promise<User> {
+  if (user.pendingInput === 'none' || ONBOARDING_INPUTS.includes(user.pendingInput) || user.pendingInput.startsWith('session_end:')) return user
+  await ctx.db.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput: 'none' } })
+  return { ...user, pendingInput: 'none' }
+}
+
+// Одна маршрутизация для текста и голоса: что бот ждёт, туда и ответ.
+async function routeInput(ctx: Ctx, user: User, text: string, via: 'text' | 'voice', contextEventId: number | null): Promise<void> {
+  const pending = user.pendingInput
+  const runningEdit = /^running_(work|duration):([0-9a-f-]{36})$/.exec(pending)
   if (runningEdit?.[1] === 'work' && runningEdit[2]) return session.onRunningWorkText(ctx, user, runningEdit[2], text)
   if (runningEdit?.[1] === 'duration' && runningEdit[2]) return session.onRunningDurationText(ctx, user, runningEdit[2], text)
-  const taskEdit = /^task_edit:([0-9a-f-]{36})$/.exec(user.pendingInput)
+  const taskEdit = /^task_edit:([0-9a-f-]{36})$/.exec(pending)
   if (taskEdit?.[1]) return tasks.onTaskEditText(ctx, user, taskEdit[1], text)
-  const taskSplit = TASK_SPLIT.exec(user.pendingInput)
-  if (taskSplit?.[1]) return tasks.onTaskBreakdownAnswer(ctx, user, taskSplit[1], text, 'text', contextEventId)
-  if (user.pendingInput === 'task_add') return tasks.onTaskAddText(ctx, user, text, 'text')
-  switch (user.pendingInput) {
+  const taskSplit = TASK_SPLIT.exec(pending)
+  if (taskSplit?.[1]) return tasks.onTaskBreakdownAnswer(ctx, user, taskSplit[1], text, via, contextEventId)
+  switch (pending) {
+    case 'task_add':
+      return tasks.onTaskAddText(ctx, user, text, via)
     case 'timezone':
+    case 'settings_timezone':
       return account.onTimezoneText(ctx, user, text)
     case 'start_time':
       return account.onStartTimeText(ctx, user, text)
     case 'ritual':
+    case 'profile_ritual':
       return account.onRitualText(ctx, user, text)
     case 'meeting_time':
-      return day.onMeetingTimeText(ctx, user, text)
+    case 'meeting_time_soft':
+      if (await day.onMeetingTimeText(ctx, user, text, { soft: pending === 'meeting_time_soft' })) return
+      user = { ...user, pendingInput: 'none' }
+      break
     case 'morning_time':
       return account.onMorningText(ctx, user, text)
     case 'profile':
       return account.onProfileText(ctx, user, text)
     case 'report_text':
-      if (await onPendingReport(ctx, user, text, 'text')) return
+      if (await onPendingReport(ctx, user, text, via)) return
       break
   }
   if (await session.onRunningFreeText(ctx, user, text, contextEventId)) return
-  const outcome = await tasks.onTaskMessage(ctx, user, text, 'text', contextEventId)
+  const outcome = await tasks.onTaskMessage(ctx, user, text, via, contextEventId)
   if (outcome === 'session_intent') return session.onIntentText(ctx, user, text)
-  if (outcome === 'close_day') return day.closeDay(ctx, user, 'text')
+  if (outcome === 'close_day') return day.closeDay(ctx, user, via)
 }
 
 async function onPendingReport(ctx: Ctx, user: User, text: string, via: 'text' | 'voice'): Promise<boolean> {
@@ -318,7 +333,8 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
         if (arg) return await account.onProfileAction(ctx, user, arg)
         break
       case 'skip':
-        if (arg === 'ritual') return await account.onRitualText(ctx, user, null)
+        // Старая кнопка знакомства срабатывает только на шаге ритуала.
+        if (arg === 'ritual' && user.pendingInput === 'ritual') return await account.onRitualText(ctx, user, null)
         break
       case 'onb':
         if (arg) return await account.onOnboardingButton(ctx, user, arg)

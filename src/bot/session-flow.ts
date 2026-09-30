@@ -383,6 +383,11 @@ export async function startTaskSession(ctx: Ctx, user: User, taskId: string): Pr
           data: { intentText: task.title, taskId: task.id, scope: 'step' },
         })
         if (changed.count !== 1) throw new StaleTransition()
+        // Выбор задачи в идущей сессии — тоже новое действие (кроме выбора на «Время вышло»).
+        await tx.user.updateMany({
+          where: { id: user.id, pendingInput: { not: 'none' }, NOT: { pendingInput: { startsWith: 'session_end:' } } },
+          data: { pendingInput: 'none' },
+        })
         if (active.taskId !== task.id) {
           if (active.taskId) {
             await tx.task.updateMany({
@@ -673,7 +678,9 @@ export async function startRunning(ctx: Ctx, user: User, sessionId: string): Pro
       // Человек начал сам — ждущие напоминания на ближайшие часы уже не нужны.
       await cancelPending(tx, { userId: user.id, kind: 'rest_over' })
       await cancelPending(tx, { userId: user.id, kind: 'meeting', sendAfter: { lte: new Date(now.getTime() + 3 * 60 * MIN) } })
-      await tx.user.update({ where: { id: user.id }, data: { declinesInRow: 0 } })
+      // Старт — новое действие: отложенный отчёт прошлой сессии, время встречи,
+      // правка профиля или задачи больше не ждут ответа.
+      await tx.user.update({ where: { id: user.id }, data: { declinesInRow: 0, pendingInput: 'none' } })
       await scheduleSummary(tx, user, now)
       await logEvent(
         tx,

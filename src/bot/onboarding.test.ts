@@ -12,6 +12,7 @@ describe.skipIf(!hasDb)('онбординг нового пользовател�
 
     await bot.text(A, '/start')
     await bot.text(A, '10:00')
+    await bot.press(A, 'onb::st_skip')
     await bot.press(A, 'skip::ritual')
 
     const text = bot.lastText(A)

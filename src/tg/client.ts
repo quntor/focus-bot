@@ -77,7 +77,8 @@ export async function call(method: string, body: Record<string, unknown>): Promi
 
 export type Button = { text: string; data: string }
 export type Keyboard = Button[][]
-export type ReplyKeyboard = string[][]
+// 'remove' — убрать постоянную клавиатуру (на шагах знакомства).
+export type ReplyKeyboard = string[][] | 'remove'
 
 // То, чем бот пользуется из Telegram. Интерфейс, а не прямые вызовы: тесты
 // подменяют его и видят каждое отправленное сообщение.
@@ -96,15 +97,17 @@ export const telegram: Telegram = {
       link_preview_options: { is_disabled: true },
       ...(keyboard
         ? { reply_markup: { inline_keyboard: keyboard.map((row) => row.map((b) => ({ text: b.text, callback_data: b.data }))) } }
-        : replyKeyboard
-          ? {
-              reply_markup: {
-                keyboard: replyKeyboard.map((row) => row.map((text) => ({ text }))),
-                resize_keyboard: true,
-                is_persistent: true,
-              },
-            }
-        : {}),
+        : replyKeyboard === 'remove'
+          ? { reply_markup: { remove_keyboard: true } }
+          : replyKeyboard
+            ? {
+                reply_markup: {
+                  keyboard: replyKeyboard.map((row) => row.map((text) => ({ text }))),
+                  resize_keyboard: true,
+                  is_persistent: true,
+                },
+              }
+            : {}),
     })
   },
   async answerCallback(callbackId, text) {

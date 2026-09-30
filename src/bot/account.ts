@@ -58,6 +58,8 @@ async function isOnboarding(ctx: Ctx, userId: string): Promise<boolean> {
 // После пояса в знакомстве — время старта; вне знакомства пояс меняется из
 // настроек и больше ничего не спрашиваем.
 async function afterTimezone(ctx: Ctx, user: User): Promise<'start_time' | 'none'> {
+  // Пояс из настроек (settings_timezone) знакомство не перезапускает.
+  if (user.pendingInput !== 'timezone') return 'none'
   return (await isOnboarding(ctx, user.id)) && user.ritualText === null ? 'start_time' : 'none'
 }
 
@@ -173,7 +175,7 @@ export async function onSetting(ctx: Ctx, user: User, arg: string): Promise<void
     ])
   }
   if (arg === 'morning' || arg === 'timezone') {
-    await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: arg === 'morning' ? 'morning_time' : 'timezone' } })
+    await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: arg === 'morning' ? 'morning_time' : 'settings_timezone' } })
     return reply(ctx, user, arg === 'morning' ? T.askMorning : T.askTimezone)
   }
   if (arg === 'pings' || arg === 'proactive') {
@@ -238,7 +240,7 @@ export async function onProfileAction(ctx: Ctx, user: User, arg: string): Promis
     return reply(ctx, user, T.askProfile)
   }
   if (arg === 'ritual') {
-    await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: 'ritual' } })
+    await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: 'profile_ritual' } })
     return reply(ctx, user, T.askRitual)
   }
   if (arg === 'clear') {
@@ -278,7 +280,7 @@ export async function onDeleteConfirm(ctx: Ctx, user: User): Promise<void> {
   })
   resetConversationContext(user.id)
   try {
-    await ctx.tg.send(tgId, T.deleted)
+    await ctx.tg.send(tgId, T.deleted, undefined, 'remove')
   } catch {
     // Пользователя уже нет — ни помечать блокировку, ни логировать нечего.
   }

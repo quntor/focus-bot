@@ -48,7 +48,10 @@ export async function reply(ctx: Ctx, user: Pick<User, 'id' | 'tgId'>, text: str
 
 async function sessionKeyboard(ctx: Ctx, userId: string): Promise<ReplyKeyboard | undefined> {
   const user = await ctx.db.user.findUnique({ where: { id: userId }, select: { pendingInput: true } })
-  if (!user || user.pendingInput === 'timezone' || user.pendingInput === 'ritual') return undefined
+  if (!user) return undefined
+  // Во время знакомства постоянная клавиатура мешает: «Начать сессию» посреди
+  // шагов оборвала бы знакомство. Убираем её явно — например, после /delete_me.
+  if (['timezone', 'start_time', 'ritual'].includes(user.pendingInput)) return 'remove'
   const paused = await ctx.db.focusSession.count({ where: { userId, state: 'paused' } })
   return paused > 0
     ? [[T.sessionResumeButton, T.sessionNewButton], [T.tasksButton]]
