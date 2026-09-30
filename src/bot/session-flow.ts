@@ -264,12 +264,17 @@ async function completeTaskAndRest(
       // закрывается сессия, а отмечать готовой нечего.
       taskTitle = task?.title ?? null
 
-      if (task) {
+      // Сессия без задачи получает названную с начала периода — как при выборе
+      // из списка. Сессия с другой задачей остаётся при своей: время по задачам
+      // считается по фактическим переключениям, а не отдаётся последней.
+      const attach = task !== null && current.taskId === null
+      if (task && attach) {
         const associated = await tx.focusSession.updateMany({
-          where: { id: current.id, userId: user.id, state: 'running', taskId: current.taskId },
+          where: { id: current.id, userId: user.id, state: 'running', taskId: null },
           data: { taskId: task.id, intentText: task.title },
         })
         if (associated.count !== 1) throw new StaleTransition()
+        await logEvent(tx, user.id, 'task_selected', { task_id: task.id, from_period_start: true }, { at: now, sessionId: current.id })
       }
       await transition(tx, { sessionId: current.id, userId: user.id }, 'running', 'finished', {
         outcome: 'done',
@@ -282,12 +287,6 @@ async function completeTaskAndRest(
       await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `session_end:${current.id}` } })
 
       if (task) {
-        if (current.taskId && current.taskId !== task.id) {
-          await tx.task.updateMany({
-            where: { id: current.taskId, userId: user.id, sessionsCount: { gt: 0 } },
-            data: { sessionsCount: { decrement: 1 } },
-          })
-        }
         const marked = await tx.task.updateMany({
           where: { id: task.id, userId: user.id, status: 'active' },
           data: {
@@ -295,15 +294,10 @@ async function completeTaskAndRest(
             lastProgressAt: now,
             lastSessionAt: now,
             sessionsSinceProgress: 0,
-            ...(current.taskId === task.id ? {} : { sessionsCount: { increment: 1 } }),
+            ...(attach ? { sessionsCount: { increment: 1 } } : {}),
           },
         })
         if (marked.count !== 1) throw new StaleTransition()
-
-        await tx.taskTimeAllocation.deleteMany({ where: { userId: user.id, sessionId: current.id } })
-        await tx.taskTimeAllocation.create({
-          data: { userId: user.id, sessionId: current.id, taskId: task.id, seconds: elapsedSeconds, source: 'report', createdAt: now, updatedAt: now },
-        })
       }
       await enqueue(tx, {
         userId: user.id,
@@ -320,16 +314,7 @@ async function completeTaskAndRest(
         early: current.plannedEndAt !== null && now < current.plannedEndAt,
         counted,
       }, { at: now, sessionId: current.id })
-      if (task) {
-        await logEvent(tx, user.id, 'task_completed', { task_id: task.id, source: 'text' }, { at: now, sessionId: current.id })
-        await logEvent(tx, user.id, 'task_time_allocated', {
-          session_id: current.id,
-          task_count: 1,
-          allocated_seconds: elapsedSeconds,
-          unassigned_seconds: 0,
-          source: 'report',
-        }, { at: now, sessionId: current.id })
-      }
+      if (task) await logEvent(tx, user.id, 'task_completed', { task_id: task.id, source: 'text' }, { at: now, sessionId: current.id })
       await logEvent(tx, user.id, 'rest_chosen', { session_id: current.id, choice: 'rest', rest_minutes: rest }, { at: now, sessionId: current.id })
       if (counted) await creditCountedSession(tx, { userId: user.id, sessionId: current.id, dayKey: workDayKey(now, user.timezone), at: now })
     })

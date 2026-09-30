@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest'
+import { workDayKey } from '../lib/day.js'
 import type { LlmProvider } from '../llm/provider.js'
 import { runOutboxOnce } from '../outbox/worker.js'
 import { makeBot } from '../test/bot.js'
 import { hasDb, prisma, resetDb } from '../test/db.js'
+import { buildSummary } from './day-flow.js'
 
 // Сессию заканчивают таймер, /done, «Пора отдыхать», «иду отдыхать» и /stop.
 // Бросает только /stop; остальное засчитывается по отработанному времени.
@@ -88,6 +90,48 @@ describe.skipIf(!hasDb)('конец сессии', () => {
     await bot.text(A, 'закончил отчёт и иду отдыхать')
 
     expect(await prisma.task.findMany({ select: { title: true, status: true } })).toEqual([{ title: 'Написать отчёт по продажам', status: 'done' }])
+  })
+
+  it('закрытая посреди сессии задача перестаёт копить время', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    const u = await user()
+    const first = await prisma.task.create({ data: { userId: u.id, title: 'Написать отчёт', createdAt: bot.now() } })
+    const second = await prisma.task.create({ data: { userId: u.id, title: 'Слайды для клиента', createdAt: bot.now() } })
+    await bot.press(A, `task:${first.id}:start`)
+    bot.advance(20)
+    await bot.press(A, `task:${first.id}:done`)
+    bot.advance(10)
+    await bot.press(A, `task:${second.id}:start`)
+    bot.advance(10)
+    const s = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+    await bot.press(A, `out:${s.id}:done`)
+
+    const summary = await buildSummary(prisma, u, workDayKey(bot.now(), u.timezone))
+    expect(summary.taskTimes).toEqual([
+      { title: 'Написать отчёт', minutes: 20, completed: true },
+      { title: 'Слайды для клиента', minutes: 20, completed: false },
+    ])
+  })
+
+  it('«закончил …, иду отдыхать» не отдаёт всю сессию последней задаче', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    const u = await user()
+    const first = await prisma.task.create({ data: { userId: u.id, title: 'Написать отчёт', createdAt: bot.now() } })
+    const second = await prisma.task.create({ data: { userId: u.id, title: 'Слайды для клиента', createdAt: bot.now() } })
+    await bot.press(A, `task:${first.id}:start`)
+    bot.advance(20)
+    await bot.press(A, `task:${second.id}:start`)
+    bot.advance(15)
+
+    await bot.text(A, 'закончил слайды и иду отдыхать')
+
+    const summary = await buildSummary(prisma, u, workDayKey(bot.now(), u.timezone))
+    expect(summary.taskTimes).toEqual([
+      { title: 'Написать отчёт', minutes: 20, completed: false },
+      { title: 'Слайды для клиента', minutes: 15, completed: true },
+    ])
   })
 
   it('свободный режим: пропущенные проверки засчитывают время до первой пропущенной', async () => {

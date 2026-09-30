@@ -59,7 +59,7 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
         where: {
           subjectId: user.subjectId,
           sessionId: { in: sessionIds },
-          type: { in: ['session_started', 'intent_parsed', 'task_selected', 'task_switched', 'session_paused', 'session_resumed'] },
+          type: { in: ['session_started', 'intent_parsed', 'task_selected', 'task_switched', 'task_completed', 'session_paused', 'session_resumed'] },
         },
         select: { id: true, sessionId: true, type: true, payload: true, createdAt: true },
         orderBy: { id: 'asc' },
@@ -110,6 +110,13 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
       } else if (event.type === 'task_switched') {
         taskId = payloadId(event.payload, 'to_task_id')
         if (taskId) hasTaskTimeline = true
+      } else if (event.type === 'task_completed') {
+        // Закрытая посреди сессии задача перестаёт копить время; следующая
+        // выбранная получает его с момента закрытия, а не с начала периода.
+        if (taskId && payloadId(event.payload, 'task_id') === taskId) {
+          taskId = null
+          periodStart = at
+        }
       } else if (event.type === 'session_paused') {
         paused = true
       } else if (event.type === 'session_resumed') {

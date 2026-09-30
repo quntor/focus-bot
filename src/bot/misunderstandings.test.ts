@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import type { LlmProvider } from '../llm/provider.js'
 import { prisma, hasDb, resetDb } from '../test/db.js'
 import { makeBot } from '../test/bot.js'
+import { workDayKey } from '../lib/day.js'
+import { buildSummary } from './day-flow.js'
 import { T } from './texts.js'
 
 const A = 6101
@@ -152,10 +154,9 @@ describe.skipIf(!hasDb)('границы недопониманий', () => {
     expect(finished).toMatchObject({ state: 'finished', outcome: 'done', restChoice: 'rest', finishedAt: bot.now() })
     const task = await prisma.task.findFirstOrThrow({ where: { userId: running.userId } })
     expect(task).toMatchObject({ title: 'починить пилот в миловице в меге', status: 'done' })
-    expect(await prisma.taskTimeAllocation.findUniqueOrThrow({ where: { sessionId_taskId: { sessionId: running.id, taskId: task.id } } })).toMatchObject({
-      seconds: 25 * 60,
-      source: 'report',
-    })
+    const owner = await prisma.user.findUniqueOrThrow({ where: { id: running.userId } })
+    const summary = await buildSummary(prisma, owner, workDayKey(bot.now(), owner.timezone))
+    expect(summary.taskTimes).toEqual([{ title: task.title, minutes: 25, completed: true }])
     expect(await prisma.user.findUniqueOrThrow({ where: { id: running.userId } })).toMatchObject({ pendingInput: 'report_text' })
     expect(bot.lastText(A)).toContain('Как прошло?')
 
