@@ -138,6 +138,7 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
         if (taskEdit?.[1]) return tasks.onTaskEditText(ctx, user, taskEdit[1], text)
         const taskSplit = TASK_SPLIT.exec(user.pendingInput)
         if (taskSplit?.[1]) return tasks.onTaskBreakdownAnswer(ctx, user, taskSplit[1], text, 'voice', voiceContextEventId)
+        if (user.pendingInput === 'task_add') return tasks.onTaskAddText(ctx, user, text, 'voice')
         if (await session.onRunningFreeText(ctx, user, text, voiceContextEventId)) return
         const outcome = await tasks.onTaskMessage(ctx, user, text, 'voice', voiceContextEventId)
         if (outcome === 'session_intent') await session.onIntentText(ctx, user, text)
@@ -204,6 +205,7 @@ async function onText(ctx: Ctx, user: User, text: string, created: boolean, cont
   if (taskEdit?.[1]) return tasks.onTaskEditText(ctx, user, taskEdit[1], text)
   const taskSplit = TASK_SPLIT.exec(user.pendingInput)
   if (taskSplit?.[1]) return tasks.onTaskBreakdownAnswer(ctx, user, taskSplit[1], text, 'text', contextEventId)
+  if (user.pendingInput === 'task_add') return tasks.onTaskAddText(ctx, user, text, 'text')
   switch (user.pendingInput) {
     case 'timezone':
       return account.onTimezoneText(ctx, user, text)
@@ -338,6 +340,7 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
         if (id && arg === 'splitauto') return await tasks.onTaskBreakdownAnswer(ctx, user, id, null, 'text')
         break
       case 'tasks':
+        if (arg === 'add') return await tasks.onTaskAddRequested(ctx, user)
         if (arg) return await tasks.onTasksPage(ctx, user, arg)
         break
     }

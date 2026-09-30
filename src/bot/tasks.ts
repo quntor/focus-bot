@@ -90,6 +90,7 @@ function taskKeyboard(
   if (page > 0) keyboard.push([{ text: '← Назад', data: cb('tasks', null, `${pageMode}${page - 1}`) }])
   if (page + 1 < pages) keyboard.push([{ text: 'Дальше →', data: cb('tasks', null, `${pageMode}${page + 1}`) }])
   if (restore) keyboard.push([{ text: T.taskRestoreButton, data: cb('task', restore.id, 'restore') }])
+  if (mode === 'actions') keyboard.push([{ text: T.taskAddButton, data: cb('tasks', null, 'add') }])
   return keyboard
 }
 
@@ -131,7 +132,11 @@ async function showTaskStartPrompt(ctx: Ctx, user: User, page: number): Promise<
 export async function showTasks(ctx: Ctx, user: User, page = 0, notice?: string, restore?: { id: string }): Promise<void> {
   const list = await activeTaskPage(ctx, user, page)
   if (!list) {
-    await reply(ctx, user, notice ? `${notice}\n${T.tasksEmpty}` : T.tasksEmpty, restore ? [[{ text: T.taskRestoreButton, data: cb('task', restore.id, 'restore') }]] : undefined)
+    const keyboard = [
+      ...(restore ? [[{ text: T.taskRestoreButton, data: cb('task', restore.id, 'restore') }]] : []),
+      [{ text: T.taskAddButton, data: cb('tasks', null, 'add') }],
+    ]
+    await reply(ctx, user, notice ? `${notice}\n${T.tasksEmpty}` : T.tasksEmpty, keyboard)
     return
   }
   await reply(
@@ -158,13 +163,13 @@ export async function onTasksPage(ctx: Ctx, user: User, arg: string): Promise<vo
   await showTasks(ctx, user, page)
 }
 
-export async function onTaskOpened(ctx: Ctx, user: User, taskId: string, page: number): Promise<void> {
+export async function onTaskOpened(ctx: Ctx, user: User, taskId: string, page: number, notice?: string): Promise<void> {
   const task = await ctx.db.task.findFirst({
     where: { id: taskId, userId: user.id, status: 'active' },
     select: { id: true, title: true },
   })
   if (!task) return reply(ctx, user, T.stale)
-  await reply(ctx, user, T.taskActions(task.title), [
+  await reply(ctx, user, notice ? `${notice}\n\n${T.taskActions(task.title)}` : T.taskActions(task.title), [
     [
       { text: T.taskStartButton, data: cb('task', task.id, 'start') },
       { text: T.taskCompleteButton, data: cb('task', task.id, 'done') },
@@ -267,6 +272,24 @@ export async function onTaskRestored(ctx: Ctx, user: User, taskId: string): Prom
   })
   if (restored.count !== 1) return reply(ctx, user, T.stale)
   await showTasks(ctx, user, 0, T.taskRestored(task.title))
+}
+
+// --- Добавить задачу без старта. Ожидание — pendingInput task_add.
+export async function onTaskAddRequested(ctx: Ctx, user: User): Promise<void> {
+  await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: 'task_add' } })
+  await reply(ctx, user, T.taskAddAsk)
+}
+
+export async function onTaskAddText(ctx: Ctx, user: User, text: string, source: TaskInputSource): Promise<void> {
+  const titles = splitManualSteps(text)
+  if (!titles.length) return reply(ctx, user, T.taskAddAsk)
+  const claimed = await ctx.db.user.updateMany({ where: { id: user.id, pendingInput: 'task_add' }, data: { pendingInput: 'none' } })
+  if (claimed.count !== 1) return reply(ctx, user, T.stale)
+  const saved = await captureTasks(ctx, user, titles, source)
+  if (!saved.length) return reply(ctx, user, T.tasksParseFailed)
+  // Одна задача — сразу её карточка: «Начать» или «Разобрать» в одно нажатие.
+  if (saved.length === 1) return onTaskOpened(ctx, user, saved[0]!.id, 0, T.taskAdded(saved[0]!.title))
+  await showTasks(ctx, user, 0, T.tasksCaptured(saved.map((task) => task.title)))
 }
 
 // --- Разбор задачи на шаги. Ожидание ответа — pendingInput task_split:<id>;
@@ -723,7 +746,8 @@ export async function onTaskMessage(
       await reply(ctx, user, T.tasksParseFailed)
       return 'handled'
     }
-    await showTasks(ctx, user, 0, T.tasksCaptured(tasks.map((task) => task.title)))
+    if (tasks.length === 1) await onTaskOpened(ctx, user, tasks[0]!.id, 0, T.taskAdded(tasks[0]!.title))
+    else await showTasks(ctx, user, 0, T.tasksCaptured(tasks.map((task) => task.title)))
     return 'handled'
   }
 

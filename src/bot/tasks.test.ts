@@ -471,6 +471,58 @@ describe.skipIf(!hasDb)('список задач из текста и голос
   })
 })
 
+describe.skipIf(!hasDb)('добавить задачу без старта', () => {
+  beforeEach(resetDb)
+
+  it('кнопка в «Мои задачи» сохраняет задачу без сессии и открывает её карточку с «Разобрать»', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+
+    await bot.text(A, 'Мои задачи')
+    expect(bot.lastButton(A, 'tasks::add')).toBe('tasks::add')
+    await bot.press(A, 'tasks::add')
+    expect(bot.lastText(A)).toContain('Как назвать задачу?')
+    await bot.text(A, 'коллекция')
+
+    const task = await prisma.task.findFirstOrThrow({ where: { userId: user.id } })
+    expect(task).toMatchObject({ title: 'коллекция', status: 'active' })
+    expect(await prisma.focusSession.count({ where: { userId: user.id, state: { in: ['running', 'paused'] } } })).toBe(0)
+    expect(bot.lastText(A)).toContain('Добавил «коллекция».')
+    expect(bot.lastText(A)).toContain('Задача: «коллекция»')
+    expect(bot.lastButton(A, `task:${task.id}:split`)).toBe(`task:${task.id}:split`)
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ pendingInput: 'none' })
+  })
+
+  it('несколько строк — несколько задач; кнопка есть и в пустом списке', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+
+    await bot.text(A, '/tasks')
+    expect(bot.lastText(A)).toContain('Активных задач пока нет')
+    await bot.press(A, bot.lastButton(A, 'tasks::add'))
+    await bot.text(A, 'локалка\nколлекция')
+
+    expect((await prisma.task.findMany({ where: { userId: user.id }, orderBy: { createdAt: 'asc' } })).map((t) => t.title)).toEqual(['локалка', 'коллекция'])
+    expect(bot.lastText(A)).toContain('В списке 2 задачи')
+    expect(await prisma.focusSession.count({ where: { userId: user.id, state: { in: ['running', 'paused'] } } })).toBe(0)
+  })
+
+  it('«задача коллекция» в свободном тексте — добавление, а не старт', async () => {
+    const bot = makeBot({ llm: llm('{"kind":"capture","new_tasks":["Коллекция"],"start_title":null}') })
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+
+    await bot.text(A, 'задача коллекция')
+
+    const task = await prisma.task.findFirstOrThrow({ where: { userId: user.id } })
+    expect(await prisma.focusSession.count({ where: { userId: user.id, state: { in: ['running', 'paused'] } } })).toBe(0)
+    expect(bot.lastText(A)).toContain('Добавил «Коллекция».')
+    expect(bot.lastButton(A, `task:${task.id}:split`)).toBe(`task:${task.id}:split`)
+  })
+})
+
 // Модель разбора: отвечает только на свой промт и запоминает, что получила.
 const breakdown = (steps: string[] | null) => {
   const inputs: { task: string; answer: string | null; recent_context: unknown[] }[] = []
