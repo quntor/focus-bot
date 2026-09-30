@@ -289,16 +289,23 @@ export async function onTaskBreakdownRequested(ctx: Ctx, user: User, taskId: str
 }
 
 // answer === null — «Предложи сам».
+//
+// Раунды: task_split — первый ответ, модель может задать уточняющий вопрос;
+// task_split_clarify — ответ на него, второго вопроса нет: если задача всё ещё
+// размыта, просим одно действие на 10 минут и записываем его как есть
+// (task_split_manual). Шаги из общих слов хуже, чем честный вопрос.
 export async function onTaskBreakdownAnswer(
   ctx: Ctx,
   user: User,
   taskId: string,
   answer: string | null,
   source: TaskInputSource,
+  contextEventId: number | null = null,
 ): Promise<void> {
-  const waiting = user.pendingInput === `task_split:${taskId}`
+  const firstRound = user.pendingInput === `task_split:${taskId}`
+  const clarifying = user.pendingInput === `task_split_clarify:${taskId}`
   const manual = user.pendingInput === `task_split_manual:${taskId}`
-  if (!waiting && !manual) return reply(ctx, user, T.stale)
+  if (!firstRound && !clarifying && !manual) return reply(ctx, user, T.stale)
   const task = await ctx.db.task.findFirst({
     where: { id: taskId, userId: user.id, status: 'active' },
     select: { id: true, title: true },
@@ -308,6 +315,8 @@ export async function onTaskBreakdownAnswer(
     return reply(ctx, user, T.stale)
   }
   const text = answer?.trim().slice(0, SPLIT_ANSWER_MAX) ?? null
+  const moveTo = async (pendingInput: string) =>
+    (await ctx.db.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput } })).count === 1
 
   let steps: string[]
   let mode: 'answered' | 'auto' | 'manual'
@@ -317,21 +326,34 @@ export async function onTaskBreakdownAnswer(
     steps = splitManualSteps(text)
     mode = 'manual'
   } else {
-    const out = await breakDownTask(ctx.llm, { title: task.title, answer: text }, llmMeter(ctx, user.id, 'task_breakdown', null))
-    if (out.ok) {
-      steps = out.value
+    // Во втором раунде модели нужен первый ответ и её же вопрос — они в
+    // коротком окне диалога. Текущая реплика передаётся отдельно, как answer.
+    const recentContext = clarifying ? recentConversationContext(user.id, ctx.now(), { beforeEventId: contextEventId }) : []
+    const out = await breakDownTask(
+      ctx.llm,
+      { title: task.title, answer: text, recentContext },
+      llmMeter(ctx, user.id, 'task_breakdown', null),
+    )
+    if (out.ok && out.value.kind === 'question') {
+      await logEvent(ctx.db, user.id, 'task_breakdown_vague', { task_id: task.id, round: clarifying ? 2 : 1 }, { at: ctx.now() })
+      if (firstRound) {
+        if (!(await moveTo(`task_split_clarify:${task.id}`))) return reply(ctx, user, T.stale)
+        return reply(ctx, user, out.value.question)
+      }
+      if (!(await moveTo(`task_split_manual:${task.id}`))) return reply(ctx, user, T.stale)
+      return reply(ctx, user, T.breakdownFirstAction)
+    }
+    if (out.ok && out.value.kind === 'steps') {
+      steps = out.value.steps
       mode = text === null ? 'auto' : 'answered'
       llmUsed = true
     } else {
-      await logEvent(ctx.db, user.id, 'llm_fallback', { stage: 'breakdown', reason: out.reason }, { at: ctx.now() })
+      await logEvent(ctx.db, user.id, 'llm_fallback', { stage: 'breakdown', reason: out.ok ? 'invalid' : out.reason }, { at: ctx.now() })
       // Человек уже перечислил шаги — записываем их и без модели.
       const listed = text === null ? [] : splitManualSteps(text)
       if (listed.length < 2) {
-        const moved = await ctx.db.user.updateMany({
-          where: { id: user.id, pendingInput: `task_split:${task.id}` },
-          data: { pendingInput: `task_split_manual:${task.id}` },
-        })
-        return reply(ctx, user, moved.count === 1 ? T.breakdownManual : T.stale)
+        if (!(await moveTo(`task_split_manual:${task.id}`))) return reply(ctx, user, T.stale)
+        return reply(ctx, user, T.breakdownManual)
       }
       steps = listed
       mode = 'manual'

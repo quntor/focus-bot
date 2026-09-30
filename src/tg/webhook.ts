@@ -47,8 +47,8 @@ const updateSchema = z.object({
 
 export type Update = z.infer<typeof updateSchema>
 
-// Ждём ответа на «Разобрать»: task_split:<taskId> или task_split_manual:<taskId>.
-const TASK_SPLIT = /^task_split(?:_manual)?:([0-9a-f-]{36})$/
+// Ждём ответа на «Разобрать»: task_split | task_split_clarify | task_split_manual, :<taskId>.
+const TASK_SPLIT = /^task_split(?:_clarify|_manual)?:([0-9a-f-]{36})$/
 
 // Лимит апдейтов на пользователя в минуту. Человеку столько не нужно, а скрипт
 // с чужого аккаунта не должен размножать сессии и события.
@@ -137,7 +137,7 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
         const taskEdit = /^task_edit:([0-9a-f-]{36})$/.exec(user.pendingInput)
         if (taskEdit?.[1]) return tasks.onTaskEditText(ctx, user, taskEdit[1], text)
         const taskSplit = TASK_SPLIT.exec(user.pendingInput)
-        if (taskSplit?.[1]) return tasks.onTaskBreakdownAnswer(ctx, user, taskSplit[1], text, 'voice')
+        if (taskSplit?.[1]) return tasks.onTaskBreakdownAnswer(ctx, user, taskSplit[1], text, 'voice', voiceContextEventId)
         if (await session.onRunningFreeText(ctx, user, text, voiceContextEventId)) return
         const outcome = await tasks.onTaskMessage(ctx, user, text, 'voice', voiceContextEventId)
         if (outcome === 'session_intent') await session.onIntentText(ctx, user, text)
@@ -203,7 +203,7 @@ async function onText(ctx: Ctx, user: User, text: string, created: boolean, cont
   const taskEdit = /^task_edit:([0-9a-f-]{36})$/.exec(user.pendingInput)
   if (taskEdit?.[1]) return tasks.onTaskEditText(ctx, user, taskEdit[1], text)
   const taskSplit = TASK_SPLIT.exec(user.pendingInput)
-  if (taskSplit?.[1]) return tasks.onTaskBreakdownAnswer(ctx, user, taskSplit[1], text, 'text')
+  if (taskSplit?.[1]) return tasks.onTaskBreakdownAnswer(ctx, user, taskSplit[1], text, 'text', contextEventId)
   switch (user.pendingInput) {
     case 'timezone':
       return account.onTimezoneText(ctx, user, text)

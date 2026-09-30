@@ -107,6 +107,9 @@ export const PAYLOADS = {
     steps: z.int().min(1).max(6),
     llm_used: z.boolean(),
   }),
+  // Модель сочла задачу размытой: round 1 — задан уточняющий вопрос, round 2 —
+  // и после ответа неясно, бот просит одно действие на 10 минут.
+  task_breakdown_vague: z.strictObject({ task_id: id, round: z.union([z.literal(1), z.literal(2)]) }),
   llm_fallback: z.strictObject({ stage: z.enum(LLM_STAGES), reason: z.enum(LLM_FALLBACK_REASONS) }),
   task_stuck_detected: z.strictObject({ task_id: id, sessions_without_progress: z.int().min(0) }),
   rest_chosen: z.strictObject({ session_id: id, choice: z.enum(REST_CHOICES), rest_minutes: minutes }),

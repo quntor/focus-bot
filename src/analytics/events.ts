@@ -20,6 +20,7 @@ export const EVENT_TYPES = [
   'task_switched',
   'task_breakdown_requested',
   'task_breakdown_done',
+  'task_breakdown_vague',
   'session_length_adjusted',
   'session_help_requested',
   'session_started',
@@ -117,6 +118,7 @@ export const USER_ACTIONS = [
 // meeting_defaulted) — тоже «мы»: человек в этот момент ничего не делал.
 export const BOT_EVENTS = [
   'intent_parsed',
+  'task_breakdown_vague',
   'tasks_parsed',
   'route_suggested',
   'route_stale',

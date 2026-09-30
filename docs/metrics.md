@@ -119,6 +119,7 @@ UPDATE и DELETE запрещены триггером.
 | `task_switched` | завершил одну задачу и начал другую | да | `from_task_id`, `to_task_id`, `source` |
 | `task_breakdown_requested` | нажал «Разобрать» в карточке задачи | да | `task_id` |
 | `task_breakdown_done` | шаги задачи записаны | да | `task_id`, `mode` (answered \| auto \| manual), `steps`, `llm_used` |
+| `task_breakdown_vague` | модель сочла задачу размытой: 1 — задала вопрос, 2 — бот просит одно действие | нет | `task_id`, `round` |
 | `session_length_adjusted` | человек сдвинул предложенную длину | да | `direction`, `planned_minutes` |
 | `session_help_requested` | попросил помощи во время активной сессии | да | `kind`, `action`, `llm_used` |
 | `session_started` | подтвердил, таймер пошёл | да | `task_id`, `is_new_task`, `planned_minutes`, `planned_rest_minutes`, `minutes_source`, `technique`, `scope` |
