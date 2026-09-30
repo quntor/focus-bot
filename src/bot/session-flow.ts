@@ -1037,20 +1037,25 @@ export async function onDeadlineChoice(
   choice: 'continue' | 'break',
 ): Promise<void> {
   const session = await ownedSession(ctx, user.id, sessionId)
-  if (!session || session.state !== 'running') return reply(ctx, user, T.stale)
-  const cleared = await ctx.db.user.updateMany({
+  const now = ctx.now()
+  // Кнопки действуют, пока плановый конец позади. Проверяем сессию, а не
+  // ожидание ответа: ожидание могло смениться («Добавить задачу» и т. п.), и
+  // кнопки под «Время вышло» отвечали бы «неактуально».
+  if (!session || session.state !== 'running' || !session.plannedEndAt || now < session.plannedEndAt) return reply(ctx, user, T.stale)
+  await ctx.db.user.updateMany({
     where: { id: user.id, pendingInput: `session_end:${sessionId}` },
     data: { pendingInput: 'none' },
   })
-  if (cleared.count !== 1) return reply(ctx, user, T.stale)
   // «Пора отдыхать» после отработанного периода — конец сессии, а не перерыв:
   // исход, отчёт и отдых, как у /done. Перерыв посреди работы — кнопка «Перерыв».
   if (choice === 'break') return reply(ctx, user, T.deadlineBreak, outcomeKeyboard(sessionId))
   // «Ещё поработаю» сдвигает конец: иначе через час сессия считалась бы брошенной.
-  const now = ctx.now()
   const end = new Date(now.getTime() + DEADLINE_EXTEND_MINUTES * MIN)
   await ctx.db.$transaction(async (tx) => {
-    const moved = await tx.focusSession.updateMany({ where: { id: sessionId, userId: user.id, state: 'running' }, data: { plannedEndAt: end } })
+    const moved = await tx.focusSession.updateMany({
+      where: { id: sessionId, userId: user.id, state: 'running', plannedEndAt: session.plannedEndAt },
+      data: { plannedEndAt: end },
+    })
     if (moved.count !== 1) throw new StaleTransition()
     await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `session_end:${sessionId}` } })
     await enqueue(tx, { userId: user.id, kind: 'session_end', key: `session_end:${sessionId}:${end.getTime()}`, sendAfter: end, payload: { sessionId } })

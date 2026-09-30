@@ -134,6 +134,25 @@ describe.skipIf(!hasDb)('конец сессии', () => {
     ])
   })
 
+  it('кнопки «Время вышло» работают, даже если бот ждал другого ответа', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    await bot.text(A, 'Начать сессию')
+    const s = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+    await bot.press(A, 'tasks::add')
+    bot.advance(41)
+    await runOutboxOnce(bot.ctx)
+
+    expect(await user()).toMatchObject({ pendingInput: `session_end:${s.id}` })
+    await bot.text(A, 'ещё поработаю')
+    expect(await prisma.task.count()).toBe(0)
+
+    await bot.press(A, `end:${s.id}:continue`)
+    expect(bot.lastText(A)).toContain('ещё 15 минут')
+    await bot.press(A, `end:${s.id}:continue`)
+    expect(bot.lastText(A)).toBe('Это уже неактуально.')
+  })
+
   it('свободный режим: пропущенные проверки засчитывают время до первой пропущенной', async () => {
     const bot = makeBot()
     await bot.onboard(A)

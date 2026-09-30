@@ -106,8 +106,11 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
         text: T.sessionEnd,
         keyboard: deadlineKeyboard(sessionId),
         after: async (tx) => {
+          // «Время вышло» — самый свежий вопрос: старое ожидание («Как назвать
+          // задачу?» и т. п.) снимается, и ответ текстом идёт сюда. Знакомство
+          // не прерываем.
           await tx.user.updateMany({
-            where: { id: user.id, pendingInput: { in: ['none', `running_work:${sessionId}`, `running_duration:${sessionId}`] } },
+            where: { id: user.id, pendingInput: { notIn: ['timezone', 'start_time', 'ritual'] } },
             data: { pendingInput: `session_end:${sessionId}` },
           })
           await logEvent(tx, user.id, 'session_end_sent', { session_id: sessionId }, { at: now, sessionId })
