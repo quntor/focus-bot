@@ -14,6 +14,9 @@ const MIN = 60_000
 export const ABANDON_AFTER_MS = 60 * MIN
 // Вопрос «с чего начнёшь» без ответа через час — отменён (не брошен).
 export const EXPIRE_COLLECTING_MS = 60 * MIN
+// Перерыв дольше трёх часов — забытый: сессия закрывается. Иначе «на
+// перерыве» висело бы вечно, а встречи при идущей сессии не приходят.
+export const EXPIRE_BREAK_MS = 3 * 60 * MIN
 
 export async function sweepOnce(ctx: Ctx): Promise<void> {
   const now = ctx.now()
@@ -40,6 +43,32 @@ export async function sweepOnce(ctx: Ctx): Promise<void> {
       throw error
     }
     if (result && !s.user.blockedAt) await reply(ctx, s.user, T.autoFinished(result.elapsed, result.counted))
+  }
+
+  // Засчитывается работа до перерыва, дальше — следующая встреча, чтобы бот
+  // не замолчал.
+  const forgotten = await ctx.db.focusSession.findMany({
+    where: { state: 'paused', pausedAt: { lt: new Date(now.getTime() - EXPIRE_BREAK_MS) } },
+    include: { user: true },
+    take: 200,
+  })
+  for (const s of forgotten) {
+    let result: { elapsed: number; counted: boolean } | null = null
+    try {
+      result = await ctx.db.$transaction(async (tx) => {
+        const r = await autoFinish(tx, s.user, s, s.pausedAt!, now, 'break_timeout')
+        await tx.user.updateMany({
+          where: { id: s.userId, pendingInput: { in: [`session_end:${s.id}`, `running_work:${s.id}`, `running_duration:${s.id}`] } },
+          data: { pendingInput: 'none' },
+        })
+        await ensureNextMeeting(tx, s.user, now)
+        return r
+      })
+    } catch (error) {
+      if (error instanceof StaleTransition) continue
+      throw error
+    }
+    if (result && !s.user.blockedAt) await reply(ctx, s.user, T.breakExpired(result.elapsed, result.counted))
   }
 
   const stale = await ctx.db.focusSession.findMany({

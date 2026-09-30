@@ -173,6 +173,19 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
     })
   }
 
+  if (m.kind === 'break_over') {
+    const sessionId = String(p.sessionId ?? '')
+    const session = await ctx.db.focusSession.findFirst({ where: { id: sessionId, userId: user.id } })
+    // Человек уже вернулся, начал новую или ушёл на другой перерыв — молчим.
+    if (!session || session.state !== 'paused' || session.pausedAt?.getTime() !== Number(p.pausedAt)) return { skip: true }
+    return {
+      text: T.breakOver,
+      after: async (tx) => {
+        await logEvent(tx, user.id, 'break_over_sent', { session_id: sessionId }, { at: now, sessionId })
+      },
+    }
+  }
+
   if (m.kind === 'meeting') {
     if (p.defaulted === true && !user.proactive) return { skip: true }
     const active = await ctx.db.focusSession.count({ where: { userId: user.id, state: { in: ['running', 'paused'] } } })

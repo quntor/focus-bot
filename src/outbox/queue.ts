@@ -1,7 +1,7 @@
 import type { Prisma } from '@prisma/client'
 import type { Db } from '../lib/db.js'
 
-export type OutboxKind = 'ping' | 'session_end' | 'rest_over' | 'meeting' | 'summary'
+export type OutboxKind = 'ping' | 'session_end' | 'rest_over' | 'break_over' | 'meeting' | 'summary'
 
 // Постановка в очередь внутри транзакции вызывающего. Дубль по ключу молча
 // отбрасывается (ON CONFLICT DO NOTHING): повторный вызов — не ошибка, а

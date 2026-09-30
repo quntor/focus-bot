@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest'
+import { sweepOnce } from '../jobs/sweeper.js'
 import { runOutboxOnce } from '../outbox/worker.js'
 import { makeBot } from '../test/bot.js'
+import { T } from './texts.js'
 import { hasDb, prisma, resetDb } from '../test/db.js'
 
 const A = 1085
@@ -306,5 +308,51 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
 
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).toMatchObject({ state: 'running', pingAt: null })
     expect(await prisma.outboxMessage.findMany({ where: { userId: session.userId, kind: 'ping', status: 'pending' } })).toEqual([])
+  })
+
+  it('по истечении отдыха зовёт обратно, а после возврата — молчит', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    await bot.text(A, 'Начать сессию')
+    bot.advance(15)
+    await bot.text(A, 'Перерыв')
+    expect(bot.lastText(A)).toContain('напишу в')
+
+    bot.advance(10)
+    await runOutboxOnce(bot.ctx)
+    expect(bot.lastText(A)).toBe(T.breakOver)
+
+    await bot.text(A, 'Вернуться к работе')
+    bot.advance(5)
+    await bot.text(A, 'Перерыв')
+    await bot.text(A, 'Вернуться к работе')
+    bot.advance(10)
+    await runOutboxOnce(bot.ctx)
+    expect(bot.textsTo(A).filter((text) => text === T.breakOver)).toHaveLength(1)
+  })
+
+  it('забытый перерыв закрывает сессию через 3 часа, и бот не замолкает', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+    await bot.text(A, 'Начать сессию')
+    const session = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+    bot.advance(15)
+    await bot.text(A, 'Перерыв')
+
+    bot.advance(3 * 60 + 1)
+    await sweepOnce(bot.ctx)
+
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).toMatchObject({ state: 'finished', outcome: null, counted: true })
+    expect(bot.lastText(A)).toContain('Перерыв затянулся')
+    expect(bot.lastText(A)).toContain('15 минут')
+    expect(await prisma.outboxMessage.count({ where: { userId: session.userId, kind: 'meeting', status: 'pending' } })).toBe(1)
+
+    const before = bot.tg.sent.length
+    for (let h = 0; h < 48; h++) {
+      bot.advance(60)
+      await runOutboxOnce(bot.ctx)
+      await sweepOnce(bot.ctx)
+    }
+    expect(bot.tg.sent.slice(before).filter((m) => m.text.includes('Пора работать')).length).toBeGreaterThanOrEqual(2)
   })
 })

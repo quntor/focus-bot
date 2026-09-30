@@ -97,7 +97,7 @@ export function activeElapsedMinutes(session: FocusSession, now: Date): number {
   return Math.floor(activeElapsedMs(session, now) / MIN)
 }
 
-export type AutoFinishReason = 'timeout' | 'no_ping' | 'new_session'
+export type AutoFinishReason = 'timeout' | 'no_ping' | 'new_session' | 'break_timeout'
 
 // Засчитать сессию без исхода: человек не ответил на «Время вышло», пропустил
 // проверки в свободном режиме или из перерыва начал новую. Отработанное
@@ -1541,9 +1541,19 @@ export async function onBreak(ctx: Ctx, user: User): Promise<void> {
     return reply(ctx, user, T.restingIdle)
   }
   if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
+  // Перерыв без конца забывается: по истечении отдыха бот зовёт обратно.
+  const breakEnd = new Date(now.getTime() + (session.plannedRestMinutes ?? restFor(session.plannedMinutes)) * MIN)
   try {
     await ctx.db.$transaction(async (tx) => {
       await transition(tx, { sessionId: session.id, userId: user.id }, 'running', 'paused', { pausedAt: now })
+      // Ключ — на этот перерыв: устаревшее напоминание воркер отбросит сам.
+      await enqueue(tx, {
+        userId: user.id,
+        kind: 'break_over',
+        key: `break_over:${session.id}:${now.getTime()}`,
+        sendAfter: breakEnd,
+        payload: { sessionId: session.id, pausedAt: now.getTime() },
+      })
       await tx.outboxMessage.updateMany({
         where: {
           userId: user.id,
@@ -1562,7 +1572,7 @@ export async function onBreak(ctx: Ctx, user: User): Promise<void> {
     if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
     throw error
   }
-  await reply(ctx, user, `${T.breakStarted}\n${T.breakChoice}`)
+  await reply(ctx, user, `${T.breakStarted(hhmm(breakEnd, user.timezone))}\n${T.breakChoice}`)
 }
 
 export async function onResume(ctx: Ctx, user: User): Promise<void> {

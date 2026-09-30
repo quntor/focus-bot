@@ -22,7 +22,7 @@ export const SCOPES = ['step', 'multi_session'] as const
 export const POINT_REASONS = ['session_completed', 'daily_goal', 'comeback'] as const
 export const LLM_STAGES = ['intent', 'report', 'tasks', 'session_help', 'breakdown'] as const
 export const LLM_FALLBACK_REASONS = ['disabled', 'error', 'timeout', 'invalid'] as const
-export const OUTBOX_KINDS = ['ping', 'session_end', 'rest_over', 'meeting', 'summary'] as const
+export const OUTBOX_KINDS = ['ping', 'session_end', 'rest_over', 'break_over', 'meeting', 'summary'] as const
 export const SETTINGS_KEYS = [
   'technique',
   'pings_enabled',
@@ -90,12 +90,13 @@ export const PAYLOADS = {
   session_stopped: z.strictObject({ session_id: id, elapsed_minutes: minutes }),
   session_abandoned: z.strictObject({ session_id: id, reason: z.enum(['timeout', 'no_ping']) }),
   // Сессия засчитана без исхода: нет ответа на «Время вышло», пропущены
-  // проверки или из перерыва начата новая. Бросает сессию только /stop.
+  // проверки, из перерыва начата новая или перерыв затянулся на часы. Бросает
+  // сессию только /stop.
   session_auto_finished: z.strictObject({
     session_id: id,
     elapsed_minutes: minutes,
     counted: z.boolean(),
-    reason: z.enum(['timeout', 'no_ping', 'new_session']),
+    reason: z.enum(['timeout', 'no_ping', 'new_session', 'break_timeout']),
   }),
   report_submitted: z.strictObject({ session_id: id, length_chars: z.int().min(0) }),
   report_parsed: z.strictObject({ session_id: id, llm_used: z.boolean(), progress: z.enum(['moved', 'stuck']).nullable() }),
@@ -122,6 +123,7 @@ export const PAYLOADS = {
   task_stuck_detected: z.strictObject({ task_id: id, sessions_without_progress: z.int().min(0) }),
   rest_chosen: z.strictObject({ session_id: id, choice: z.enum(REST_CHOICES), rest_minutes: minutes }),
   rest_over_sent: z.strictObject({ session_id: id }),
+  break_over_sent: z.strictObject({ session_id: id }),
   meeting_scheduled: z.strictObject({
     kind: z.enum(['morning', 'in_hours', 'evening', 'custom', 'postpone']),
     minutes_ahead: z.int().min(0),
