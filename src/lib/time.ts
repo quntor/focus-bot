@@ -35,11 +35,21 @@ export function nextLocalTime(timezone: string, clock: { h: number; m: number },
       .format(base)
       .split('-')
       .map(Number)
-    const naive = Date.UTC(parts[0]!, parts[1]! - 1, parts[2]!, clock.h, clock.m)
-    const candidate = new Date(naive - offsetMinutes(timezone, new Date(naive)) * 60_000)
+    const candidate = atLocal(timezone, parts[0]!, parts[1]!, parts[2]!, clock)
     if (candidate.getTime() > after.getTime()) return candidate
   }
   return new Date(after.getTime() + 86_400_000)
+}
+
+function atLocal(timezone: string, year: number, month: number, day: number, clock: { h: number; m: number }): Date {
+  const naive = Date.UTC(year, month - 1, day, clock.h, clock.m)
+  return new Date(naive - offsetMinutes(timezone, new Date(naive)) * 60_000)
+}
+
+// Момент HH:MM календарной даты YYYY-MM-DD в поясе пользователя.
+export function localDateTime(timezone: string, day: string, clock: { h: number; m: number }): Date {
+  const [year, month, date] = day.split('-').map(Number)
+  return atLocal(timezone, year!, month!, date!, clock)
 }
 
 // Российские пояса — по именам, чтобы в настройках стояло понятное название.

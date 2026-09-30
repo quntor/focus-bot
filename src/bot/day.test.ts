@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { hasDb, prisma, resetDb } from '../test/db.js'
 import { makeBot } from '../test/bot.js'
+import { explicitMeetingAt } from './day-flow.js'
 
 const A = 6001
 
@@ -102,5 +103,26 @@ describe.skipIf(!hasDb)('/delete_me', () => {
     await bot.text(A, '10:00')
     expect(await prisma.focusSession.count()).toBe(0)
     expect(await prisma.task.count()).toBe(0)
+  })
+
+  it('ночью до 4:00 «завтра» — следующие рабочие сутки, после сна', async () => {
+    const moscow = { timezone: 'Europe/Moscow' } as Parameters<typeof explicitMeetingAt>[1]
+    // 02.10 01:00 МСК: рабочие сутки ещё 01.10.
+    expect(explicitMeetingAt('завтра в 10', moscow, new Date('2026-10-01T22:00:00Z'))?.toISOString()).toBe('2026-10-02T07:00:00.000Z')
+    // Днём — как раньше: календарное завтра.
+    expect(explicitMeetingAt('завтра в 10', moscow, new Date('2026-10-01T12:00:00Z'))?.toISOString()).toBe('2026-10-02T07:00:00.000Z')
+  })
+
+  it('выходной, взятый в 01:00, не съедает рабочий день после него', async () => {
+    const bot = makeBot({ now: new Date('2026-10-01T07:00:00Z') })
+    await bot.onboard(A)
+    bot.setNow(new Date('2026-10-01T22:00:00Z'))
+
+    await bot.text(A, '/dayoff')
+
+    expect(await prisma.dayOff.findMany({ select: { dayKey: true } })).toEqual([{ dayKey: '2026-10-02' }])
+    const meeting = await prisma.outboxMessage.findFirstOrThrow({ where: { kind: 'meeting', status: 'pending' } })
+    expect(meeting.sendAfter.toISOString()).toBe('2026-10-03T07:00:00.000Z')
+    expect(bot.lastText(A)).toContain('послезавтра в 10:00')
   })
 })

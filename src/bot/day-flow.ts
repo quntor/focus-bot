@@ -1,7 +1,7 @@
 import type { Prisma, User } from '@prisma/client'
 import { logEvent } from '../analytics/log.js'
-import { addDays, dayKey, daysBetween, weekStart, workDayKey } from '../lib/day.js'
-import { nextLocalTime, parseClock } from '../lib/time.js'
+import { addDays, dayKey, daysBetween, weekStart, WORK_DAY_START_HOUR, workDayKey } from '../lib/day.js'
+import { localDateTime, nextLocalTime, parseClock } from '../lib/time.js'
 import { cancelPending, enqueue } from '../outbox/queue.js'
 import { creditCountedSession } from '../retention/credit.js'
 import { DAYS_OFF_PER_WEEK, isCounted } from '../retention/rules.js'
@@ -19,6 +19,13 @@ export const DECLINES_BEFORE_ASK = 3
 const EVENING_CLOCK = { h: 19, m: 0 }
 
 const morningClock = (user: User) => parseClock(user.morningTime) ?? { h: 10, m: 0 }
+
+// Утро рабочих суток: они идут с 4:00 до 4:00, и утро «в 2:00» — уже
+// следующая календарная дата.
+function morningOfWorkDay(user: User, day: string): Date {
+  const clock = morningClock(user)
+  return localDateTime(user.timezone, clock.h < WORK_DAY_START_HOUR ? addDays(day, 1) : day, clock)
+}
 
 export async function buildSummary(db: Prisma.TransactionClient, user: User, day: string): Promise<DaySummary> {
   // Сессии дня — по дню пользователя. Берём с запасом по времени и фильтруем
@@ -217,10 +224,9 @@ export async function planDayOff(ctx: Ctx, user: User): Promise<void> {
   const now = ctx.now()
   const tomorrow = addDays(workDayKey(now, user.timezone), 1)
   const week = weekStart(tomorrow)
-  // Послезавтра утром: начало завтрашних суток, затем начало следующих.
-  const startTomorrow = nextLocalTime(user.timezone, { h: 0, m: 0 }, now)
-  const startAfter = nextLocalTime(user.timezone, { h: 0, m: 0 }, startTomorrow)
-  const at = nextLocalTime(user.timezone, morningClock(user), new Date(startAfter.getTime() - 60_000))
+  // Послезавтра утром — по рабочим суткам: в 01:00 «завтра» уже началось по
+  // календарю, и встреча — утром следующего за выходным дня, а не через день.
+  const at = morningOfWorkDay(user, addDays(tomorrow, 1))
   const ok = await ctx.db.$transaction(async (tx) => {
     // Блокировка пользователя: два одновременных нажатия не должны дать два
     // выходных на одной неделе.
@@ -505,8 +511,10 @@ function meetingAtFromText(text: string, user: User, now: Date): Date | null {
 
   let at: Date
   if (hasTomorrow) {
-    const tomorrow = nextLocalTime(user.timezone, { h: 0, m: 0 }, now)
-    at = nextLocalTime(user.timezone, clock, new Date(tomorrow.getTime() - MIN))
+    // «Завтра» — следующие рабочие сутки: в 01:00 «завтра в 10» значит через
+    // девять часов, после сна, а не через 33.
+    at = localDateTime(user.timezone, addDays(workDayKey(now, user.timezone), 1), clock)
+    if (at <= now) at = nextLocalTime(user.timezone, clock, at)
   } else {
     at = nextLocalTime(user.timezone, clock, now)
     if (hasToday && dayKey(at, user.timezone) !== dayKey(now, user.timezone)) {
