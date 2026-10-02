@@ -162,4 +162,113 @@ describe.skipIf(!hasDb)('свободный текст во время акти�
     expect(await prisma.task.findFirst({ where: { title: 'Позвонить поставщику' } })).not.toBeNull()
     expect(bot.lastText(A)).toContain('Позвонить поставщику')
   })
+
+  it('сохраняет название новой задачи до подтверждения и привязывает её без перезапуска таймера', async () => {
+    const bot = makeBot({
+      llm: helperProvider('{"kind":"question","reply":"Уточни, это новая задача или выбираешь из списка?","action":"continue"}'),
+    })
+    await bot.onboard(A)
+    await bot.text(A, 'Начать сессию')
+    const before = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+
+    await bot.text(A, 'Интервью с Денисом')
+
+    expect(bot.lastText(A)).toContain('«Интервью с Денисом»')
+    expect(bot.lastText(A)).toContain('новая задача')
+    expect(bot.lastButton(A, 'rtask:', ':new')).toBe(`rtask:${before.id}:new`)
+
+    await bot.text(A, 'Новая')
+
+    const task = await prisma.task.findFirstOrThrow({ where: { title: 'Интервью с Денисом' } })
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: before.id } })).toMatchObject({
+      state: 'running',
+      taskId: task.id,
+      intentText: task.title,
+      startedAt: before.startedAt,
+      plannedEndAt: before.plannedEndAt,
+    })
+    expect(await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })).toMatchObject({ pendingInput: 'none' })
+  })
+
+  it('не теряет сохранённое название после непонятного ответа', async () => {
+    const bot = makeBot({
+      llm: helperProvider('{"kind":"question","reply":"Уточни, это новая задача или выбираешь из списка?","action":"continue"}'),
+    })
+    await bot.onboard(A)
+    await bot.text(A, 'Начать сессию')
+
+    await bot.text(A, 'Интервью с Денисом')
+    await bot.text(A, 'Идиот!')
+
+    expect(bot.lastText(A)).toContain('«Интервью с Денисом»')
+    expect(bot.lastText(A)).toContain('новая задача')
+    await bot.text(A, 'Новая')
+    expect(await prisma.task.findFirst({ where: { title: 'Интервью с Денисом', status: 'active' } })).not.toBeNull()
+    expect(await prisma.task.findFirst({ where: { title: 'Идиот!', status: 'active' } })).toBeNull()
+  })
+
+  it('отменяет подтверждение кнопкой и не создаёт задачу', async () => {
+    const bot = makeBot({ llm: helperProvider('{"kind":"other","reply":null,"action":null}') })
+    await bot.onboard(A)
+    await bot.text(A, 'Начать сессию')
+    const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+
+    await bot.text(A, 'Интервью с Денисом')
+    await bot.press(A, `rtask:${running.id}:cancel`)
+
+    expect(await prisma.task.findFirst({ where: { title: 'Интервью с Денисом' } })).toBeNull()
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })).toMatchObject({
+      state: 'running',
+      taskId: null,
+      pendingTaskTitle: null,
+    })
+    expect(await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })).toMatchObject({ pendingInput: 'none' })
+  })
+
+  it('по кнопке «Из списка» очищает кандидата и показывает существующие задачи', async () => {
+    const bot = makeBot({ llm: helperProvider('{"kind":"other","reply":null,"action":null}') })
+    await bot.onboard(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    const task = await prisma.task.create({ data: { userId: user.id, title: 'Существующая задача' } })
+    await bot.text(A, 'Начать сессию')
+    const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+
+    await bot.text(A, 'Интервью с Денисом')
+    await bot.press(A, `rtask:${running.id}:existing`)
+
+    expect(bot.lastText(A)).toContain('Существующая задача')
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })).toMatchObject({
+      state: 'running',
+      taskId: null,
+      pendingTaskTitle: null,
+    })
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ pendingInput: 'none' })
+
+    await bot.press(A, `task:${task.id}:start`)
+
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })).toMatchObject({
+      state: 'running',
+      taskId: task.id,
+      intentText: task.title,
+      startedAt: running.startedAt,
+      plannedEndAt: running.plannedEndAt,
+    })
+  })
+
+  it('другая команда снимает ожидание и удаляет сохранённый кандидат', async () => {
+    const bot = makeBot({ llm: helperProvider('{"kind":"other","reply":null,"action":null}') })
+    await bot.onboard(A)
+    await bot.text(A, 'Начать сессию')
+    const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+
+    await bot.text(A, 'Интервью с Денисом')
+    await bot.text(A, 'Мои задачи')
+
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })).toMatchObject({
+      state: 'running',
+      taskId: null,
+      pendingTaskTitle: null,
+    })
+    expect(await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })).toMatchObject({ pendingInput: 'none' })
+  })
 })

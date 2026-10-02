@@ -38,6 +38,7 @@ model User {
   // | meeting_time_soft | morning_time | profile | report_text | session_end:<sessionId>
   // | running_work:<sessionId> | running_duration:<sessionId> | task_edit:<taskId>
   // | task_split:<taskId> | task_split_clarify:<taskId> | task_split_manual:<taskId> | task_add
+  // | running_task_choice:<sessionId>
   pendingInput String @default("none") @map("pending_input")
 
   // Роль на текущий момент: new | active | observer | dormant. История переходов
@@ -151,6 +152,10 @@ model FocusSession {
   // Намерение — самое чувствительное поле наравне с отчётом. Не попадает ни в
   // события, ни в логи, ни третьим лицам.
   intentText String? @map("intent_text")
+  // Название задачи, которое человек назвал во время незакреплённой рабочей
+  // сессии. Храним до ответа «новая / из списка / отмена», чтобы подтверждение
+  // переживало перезапуск процесса и не зависело от истории сообщений.
+  pendingTaskTitle String? @map("pending_task_title")
   // step | multi_session — намерение на один заход или больше. Большое
   // намерение уточняется вопросом «с чего начнёшь в эти N минут».
   scope      String?

@@ -217,13 +217,34 @@ const ONBOARDING_INPUTS = ['timezone', 'start_time', 'ritual']
 
 export async function releasePending(ctx: Ctx, user: User): Promise<User> {
   if (user.pendingInput === 'none' || ONBOARDING_INPUTS.includes(user.pendingInput) || user.pendingInput.startsWith('session_end:')) return user
-  await ctx.db.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput: 'none' } })
+  const runningTaskChoice = /^running_task_choice:([0-9a-f-]{36})$/.exec(user.pendingInput)
+  if (runningTaskChoice?.[1]) {
+    await ctx.db.$transaction(async (tx) => {
+      const released = await tx.user.updateMany({
+        where: { id: user.id, pendingInput: user.pendingInput },
+        data: { pendingInput: 'none' },
+      })
+      if (released.count !== 1) return
+      await tx.focusSession.updateMany({
+        where: { id: runningTaskChoice[1], userId: user.id, state: 'running', taskId: null },
+        data: { pendingTaskTitle: null },
+      })
+    })
+  } else {
+    await ctx.db.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput: 'none' } })
+  }
   return { ...user, pendingInput: 'none' }
 }
 
 // Одна маршрутизация для текста и голоса: что бот ждёт, туда и ответ.
 async function routeInput(ctx: Ctx, user: User, text: string, via: 'text' | 'voice', contextEventId: number | null): Promise<void> {
   const pending = user.pendingInput
+  const runningTaskChoice = /^running_task_choice:([0-9a-f-]{36})$/.exec(pending)
+  if (runningTaskChoice?.[1]) {
+    return session.onRunningTaskChoiceText(ctx, user, runningTaskChoice[1], text, {
+      existing: () => tasks.showTaskPicker(ctx, user, T.tasksPick),
+    })
+  }
   const runningEdit = /^running_(work|duration):([0-9a-f-]{36})$/.exec(pending)
   if (runningEdit?.[1] === 'work' && runningEdit[2]) return session.onRunningWorkText(ctx, user, runningEdit[2], text)
   if (runningEdit?.[1] === 'duration' && runningEdit[2]) return session.onRunningDurationText(ctx, user, runningEdit[2], text)
@@ -257,7 +278,11 @@ async function routeInput(ctx: Ctx, user: User, text: string, via: 'text' | 'voi
   }
   if (await session.onRunningFreeText(ctx, user, text, contextEventId)) return
   const outcome = await tasks.onTaskMessage(ctx, user, text, via, contextEventId)
-  if (outcome === 'session_intent') return session.onIntentText(ctx, user, text)
+  if (outcome === 'session_intent') {
+    const current = await session.activeSession(ctx, user.id)
+    if (current?.state === 'running' && current.taskId === null) return session.onRunningTaskCandidate(ctx, user, text)
+    return session.onIntentText(ctx, user, text)
+  }
   if (outcome === 'close_day') return day.closeDay(ctx, user, via)
 }
 
@@ -298,6 +323,13 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
         break
       case 'help':
         if (id && (arg === 'continue' || arg === 'step' || arg === 'finish')) return await session.onSessionHelpAction(ctx, user, id, arg)
+        break
+      case 'rtask':
+        if (id && (arg === 'new' || arg === 'existing' || arg === 'cancel')) {
+          return await session.onRunningTaskChoice(ctx, user, id, arg, {
+            existing: () => tasks.showTaskPicker(ctx, user, T.tasksPick),
+          })
+        }
         break
       case 'ping':
         if (id && arg) return await session.onPing(ctx, user, id, arg)

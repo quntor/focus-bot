@@ -16,7 +16,7 @@ import { cb } from './callbacks.js'
 import { reply, type Ctx } from './context.js'
 import { recentConversationContext, resetConversationContext } from './conversation-context.js'
 import { DEADLINE_EXTEND_MINUTES, T, hhmm } from './texts.js'
-import { findOrCreateTask, matchTaskByTitle } from './task-store.js'
+import { cleanTaskTitle, findOrCreateTask, matchTaskByTitle } from './task-store.js'
 import type { Keyboard } from '../tg/client.js'
 
 const MIN = 60_000
@@ -157,6 +157,130 @@ function runningEditKeyboard(sessionId: string): Keyboard {
 function sessionHelpKeyboard(sessionId: string, action: SessionHelpAction): Keyboard {
   const arg = action === 'change_step' ? 'step' : action
   return [[{ text: T.sessionHelpAction[action], data: cb('help', sessionId, arg) }]]
+}
+
+type RunningTaskChoice = 'new' | 'existing' | 'cancel'
+
+function runningTaskChoiceKeyboard(sessionId: string): Keyboard {
+  return [
+    [{ text: T.runningTaskNewButton, data: cb('rtask', sessionId, 'new') }],
+    [{ text: T.runningTaskExistingButton, data: cb('rtask', sessionId, 'existing') }],
+    [{ text: T.cancel, data: cb('rtask', sessionId, 'cancel') }],
+  ]
+}
+
+function parseRunningTaskChoice(text: string): RunningTaskChoice | null {
+  const value = text.toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+  if (['новая', 'новая задача', 'это новая'].includes(value)) return 'new'
+  if (['из списка', 'список', 'существующая', 'существующая задача'].includes(value)) return 'existing'
+  if (['отмена', 'отменить', 'не надо'].includes(value)) return 'cancel'
+  return null
+}
+
+async function repeatRunningTaskChoice(ctx: Ctx, user: User, session: FocusSession): Promise<void> {
+  if (!session.pendingTaskTitle) return reply(ctx, user, T.stale)
+  await reply(ctx, user, T.runningTaskChoice(session.pendingTaskTitle), runningTaskChoiceKeyboard(session.id))
+}
+
+export async function onRunningTaskCandidate(ctx: Ctx, user: User, rawTitle: string): Promise<void> {
+  const title = cleanTaskTitle(rawTitle)
+  if (!title) return reply(ctx, user, T.stale)
+  let savedSessionId: string | null = null
+  try {
+    await ctx.db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
+      const session = await tx.focusSession.findFirst({ where: { userId: user.id, state: 'running', taskId: null } })
+      if (!session) throw new StaleTransition()
+      const changed = await tx.focusSession.updateMany({
+        where: { id: session.id, userId: user.id, state: 'running', taskId: null },
+        data: { pendingTaskTitle: title },
+      })
+      if (changed.count !== 1) throw new StaleTransition()
+      await tx.user.update({ where: { id: user.id }, data: { pendingInput: `running_task_choice:${session.id}` } })
+      savedSessionId = session.id
+    })
+  } catch (error) {
+    if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
+    throw error
+  }
+  if (!savedSessionId) return reply(ctx, user, T.stale)
+  await reply(ctx, user, T.runningTaskChoice(title), runningTaskChoiceKeyboard(savedSessionId))
+}
+
+export async function onRunningTaskChoiceText(
+  ctx: Ctx,
+  user: User,
+  sessionId: string,
+  text: string,
+  deps: { existing: () => Promise<void> },
+): Promise<void> {
+  const choice = parseRunningTaskChoice(text)
+  if (choice) return onRunningTaskChoice(ctx, user, sessionId, choice, deps)
+  const session = await ownedSession(ctx, user.id, sessionId)
+  if (!session || session.state !== 'running' || session.taskId !== null || user.pendingInput !== `running_task_choice:${sessionId}`) {
+    return reply(ctx, user, T.stale)
+  }
+  await repeatRunningTaskChoice(ctx, user, session)
+}
+
+export async function onRunningTaskChoice(
+  ctx: Ctx,
+  user: User,
+  sessionId: string,
+  choice: RunningTaskChoice,
+  deps: { existing: () => Promise<void> },
+): Promise<void> {
+  let title = ''
+  let taskTitle = ''
+  try {
+    await ctx.db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
+      const freshUser = await tx.user.findUnique({ where: { id: user.id }, select: { pendingInput: true } })
+      const session = await tx.focusSession.findFirst({ where: { id: sessionId, userId: user.id, state: 'running', taskId: null } })
+      if (!session?.pendingTaskTitle || freshUser?.pendingInput !== `running_task_choice:${sessionId}`) throw new StaleTransition()
+      title = session.pendingTaskTitle
+
+      if (choice === 'new') {
+        const task = await findOrCreateTask(tx, { userId: user.id, title, now: ctx.now() })
+        taskTitle = task.title
+        const changed = await tx.focusSession.updateMany({
+          where: { id: session.id, userId: user.id, state: 'running', taskId: null, pendingTaskTitle: title },
+          data: { taskId: task.id, intentText: task.title, scope: 'step', pendingTaskTitle: null },
+        })
+        if (changed.count !== 1) throw new StaleTransition()
+        await tx.task.updateMany({
+          where: { id: task.id, userId: user.id, status: 'active' },
+          data: { sessionsCount: { increment: 1 }, lastSessionAt: ctx.now() },
+        })
+        await logEvent(tx, user.id, 'intent_submitted', { length_chars: title.length, named_minutes: false }, { at: ctx.now(), sessionId })
+        await logEvent(
+          tx,
+          user.id,
+          'intent_parsed',
+          { llm_used: false, task_id: task.id, is_new_task: task.created, scope: 'step', from_period_start: true },
+          { at: ctx.now(), sessionId },
+        )
+      } else {
+        const changed = await tx.focusSession.updateMany({
+          where: { id: session.id, userId: user.id, state: 'running', taskId: null, pendingTaskTitle: title },
+          data: { pendingTaskTitle: null },
+        })
+        if (changed.count !== 1) throw new StaleTransition()
+      }
+      const released = await tx.user.updateMany({
+        where: { id: user.id, pendingInput: `running_task_choice:${sessionId}` },
+        data: { pendingInput: 'none' },
+      })
+      if (released.count !== 1) throw new StaleTransition()
+    })
+  } catch (error) {
+    if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
+    throw error
+  }
+
+  if (choice === 'new') return reply(ctx, user, T.runningTaskAdded(taskTitle), runningEditKeyboard(sessionId))
+  if (choice === 'existing') return deps.existing()
+  await reply(ctx, user, T.runningTaskChoiceCancelled)
 }
 
 export async function onRunningFreeText(

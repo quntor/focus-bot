@@ -197,6 +197,11 @@ export const T = {
   runningDurationTooShort: (elapsed: number) =>
     `В этом периоде уже прошло ${elapsed} ${plural(elapsed, 'минута', 'минуты', 'минут')}. Укажи длительность больше.`,
   runningWorkUpdated: (intent: string) => `Работу изменил на «${intent.replace(/\s+/g, ' ').trim().slice(0, 80)}». Таймер продолжается.`,
+  runningTaskChoice: (title: string) => `«${title.replace(/\s+/g, ' ').trim().slice(0, 80)}» — это новая задача или выбрать существующую из списка?`,
+  runningTaskNewButton: 'Новая задача',
+  runningTaskExistingButton: 'Из списка',
+  runningTaskChoiceCancelled: 'Хорошо, задачу не добавляю. Таймер продолжается.',
+  runningTaskAdded: (title: string) => `Задачу «${title.replace(/\s+/g, ' ').trim().slice(0, 80)}» добавил к текущей сессии. Таймер продолжается.`,
   runningDurationUpdated: (minutes: number, end: string) =>
     `Длительность изменил: ${minutesText(minutes)}. Новое время окончания — ${end}.`,
   cancelled: 'Старт отменил. Новую задачу не сохранял.',

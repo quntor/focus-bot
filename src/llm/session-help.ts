@@ -152,6 +152,10 @@ export async function parseSessionHelp(
 ): Promise<{ result: SessionHelpResult; failure: LlmOutcome<never> | null }> {
   const fallback = templateSessionHelp(input.text)
   if (isExistingFlowCommand(input.text)) return { result: fallback, failure: null }
+  // У незакреплённого таймера обычная фраза — прежде всего кандидат задачи.
+  // Модель-помощник не должна превращать название в свой уточняющий вопрос:
+  // дальше его разберёт штатный маршрутизатор задач и запросит подтверждение.
+  if (input.currentWork === null && fallback.kind === 'other') return { result: fallback, failure: null }
   // Явный уход на отдых — команда, а не совет модели: модель не может
   // отменить паузу. Если название готовой задачи уже извлечено однозначно,
   // дополнительный LLM-вызов тоже не нужен.

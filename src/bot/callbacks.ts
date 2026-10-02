@@ -11,6 +11,7 @@ export const ACTIONS = [
   'len', // предложение длины: ok | up | down | cancel
   'run', // правка уже запущенной сессии: work | duration
   'help', // безопасное действие помощника: continue | step | finish
+  'rtask', // задача для незакреплённого таймера: new | existing | cancel
   'ping', // here | back
   'out', // исход: done | not_done | other
   'end', // мягкий дедлайн: continue | break
