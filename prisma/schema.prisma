@@ -184,15 +184,18 @@ model FocusSession {
   // stop | new_session | timeout | no_ping — почему сессия брошена.
   abandonReason  String?   @map("abandon_reason")
 
-  reportText String? @map("report_text")
+  reportText        String? @map("report_text")
   // Модель увидела явное «продолжаю сейчас», но таймер запускает только кнопка.
   // Флаг нужен для проверки callback и обезличенной confirm/reject аналитики.
   continueSuggested Boolean @default(false) @map("continue_suggested")
+  // Явно названная длительность предложенного следующего захода. Хранится в
+  // завершённой сессии, чтобы кнопка переживала перезапуск процесса.
+  continueMinutes   Int?    @map("continue_minutes")
   // moved | stuck — разбор отчёта. Влияет на lastProgressAt задачи.
-  progress   String? @map("progress")
+  progress          String? @map("progress")
   // Засчитана ли сессия: finished и не короче порога, см. src/retention/rules.ts.
   // Хранится, чтобы серия, цель и очки опирались на одно и то же решение.
-  counted    Boolean @default(false)
+  counted           Boolean @default(false)
 
   // Выбор после отчёта: rest | continue | later | day_end.
   restChoice  String?   @map("rest_choice")

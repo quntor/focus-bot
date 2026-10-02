@@ -124,6 +124,36 @@ describe.skipIf(!hasDb)('границы недопониманий', () => {
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: first.id } })).toMatchObject({ restChoice: 'continue' })
   })
 
+  it('«ещё 15 минут» в отчёте задаёт новый заход, а не перераспределяет прошлое время', async () => {
+    const bot = makeBot({
+      llm: provider({
+        intent: '{"task":null,"title":"Раздельное сканирование марок в Милавице","scope":"step"}',
+        report: '{"progress":"stuck","next_step":"поправить косяки","continue_now":true,"continue_minutes":15,"allocations":[]}',
+      }),
+    })
+    await bot.onboard(A)
+    await bot.text(A, 'Раздельное сканирование марок в Милавице')
+    await bot.press(A, bot.lastButton(A, 'len:', ':ok'))
+    const first = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+    bot.advance(55)
+    await bot.press(A, `out:${first.id}:not_done`)
+
+    await bot.text(A, 'Мне ещё нужно 15 минут поправить косяки')
+
+    expect(await prisma.taskTimeAllocation.count({ where: { sessionId: first.id } })).toBe(0)
+    expect(bot.textsTo(A).some((text) => text.includes('Распределил 15 минут'))).toBe(false)
+    expect(bot.lastText(A)).toContain('Можно сделать ещё 15 минут')
+    expect(await prisma.task.findFirstOrThrow({ where: { id: first.taskId! } })).toMatchObject({ nextStep: 'поправить косяки' })
+
+    await bot.press(A, `again:${first.id}:same`)
+
+    expect(await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })).toMatchObject({
+      taskId: first.taskId,
+      plannedMinutes: 15,
+      minutesSource: 'user',
+    })
+  })
+
   it('жалоба о состоянии не становится задачей и не меняет ожидаемый ввод', async () => {
     const bot = makeBot({
       llm: provider({ tasks: '{"kind":"feedback","new_tasks":[],"start_title":null,"complete_title":null}' }),

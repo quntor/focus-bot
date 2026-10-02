@@ -26,4 +26,22 @@ describe('разбор продолжения в отчёте', () => {
     )
     expect(parsed.result.continueNow).toBe(false)
   })
+
+  it('отделяет длительность будущего захода от распределения уже отработанного времени', async () => {
+    const parsed = await parseReport(
+      provider('{"progress":"stuck","next_step":"поправить косяки","continue_now":true,"continue_minutes":15,"allocations":[]}'),
+      {
+        intent: 'Раздельное сканирование марок в Милавице',
+        outcome: 'not_done',
+        report: 'Мне ещё нужно 15 минут поправить косяки',
+      },
+    )
+
+    expect(parsed.result).toMatchObject({
+      nextStep: 'поправить косяки',
+      continueNow: true,
+      continueMinutes: 15,
+      allocations: [],
+    })
+  })
 })

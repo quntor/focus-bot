@@ -1202,6 +1202,7 @@ async function finalizeReport(
   )
   const failure = parsed.failure && !parsed.failure.ok ? parsed.failure.reason : null
   const continuationRelevant = session.restChoice === null && !options.endDay && parsed.result.continueNow && (await activeSession(ctx, user.id)) === null
+  const continuationMinutes = continuationRelevant ? parsed.result.continueMinutes : null
   let stuckTask: { id: string; title: string } | null = null
   let allocatedMinutes: number | null = null
   let allocationInvalid = false
@@ -1225,6 +1226,7 @@ async function finalizeReport(
       data: {
         progress: parsed.result.progress,
         continueSuggested: continuationRelevant,
+        continueMinutes: continuationMinutes,
         ...(options.endDay ? { restChoice: 'day_end' } : {}),
       },
     })
@@ -1232,7 +1234,7 @@ async function finalizeReport(
     if (text === null) await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
     await logEvent(tx, user.id, 'report_parsed', { session_id: session.id, llm_used: parsed.result.llmUsed, progress: parsed.result.progress }, { at: now, sessionId: session.id })
     if (continuationRelevant) {
-      await logEvent(tx, user.id, 'route_suggested', { kind: 'continue' }, { at: now, sessionId: session.id })
+      await logEvent(tx, user.id, 'route_suggested', { kind: 'continue', requested_minutes: continuationMinutes }, { at: now, sessionId: session.id })
     }
     if (options.endDay) {
       await logEvent(tx, user.id, 'rest_chosen', { session_id: session.id, choice: 'day_end', rest_minutes: 0 }, { at: now, sessionId: session.id })
@@ -1299,7 +1301,10 @@ async function finalizeReport(
           })
         } else {
           const n = task.sessionsSinceProgress + 1
-          await tx.task.update({ where: { id: task.id }, data: { sessionsSinceProgress: n } })
+          await tx.task.update({
+            where: { id: task.id },
+            data: { sessionsSinceProgress: n, ...(parsed.result.nextStep ? { nextStep: parsed.result.nextStep } : {}) },
+          })
           // Застревание называется вслух на третьей сессии и каждой третьей после.
           if (n % STUCK_AFTER === 0) {
             stuckTask = { id: task.id, title: task.title }
@@ -1322,7 +1327,7 @@ async function finalizeReport(
     if (continuationRelevant) {
       await ctx.db.focusSession.updateMany({
         where: { id: session.id, userId: user.id, continueSuggested: true, restChoice: null },
-        data: { continueSuggested: false },
+        data: { continueSuggested: false, continueMinutes: null },
       })
     }
     await logEvent(ctx.db, user.id, 'route_stale', { stage: 'report' }, { at: ctx.now(), sessionId: session.id })
@@ -1334,7 +1339,13 @@ async function finalizeReport(
   if (stuck) await reply(ctx, user, T.stuck(stuck.title), [[{ text: T.taskBreakdownButton, data: cb('task', stuck.id, 'split') }]])
   if (allocationInvalid) await reply(ctx, user, T.timeAllocationInvalid)
   else if (allocatedMinutes !== null) await reply(ctx, user, T.timeAllocated(allocatedMinutes))
-  if (!options.endDay && session.restChoice === null) await askRest(ctx, user, session, { continueSuggested: continuationRelevant, skipped: text === null })
+  if (!options.endDay && session.restChoice === null) {
+    await askRest(ctx, user, session, {
+      continueSuggested: continuationRelevant,
+      continueMinutes: continuationMinutes,
+      skipped: text === null,
+    })
+  }
 }
 
 // После нескольких сессий бот сам замечает рисунок и предлагает технику одной
@@ -1365,7 +1376,7 @@ async function askRest(
   ctx: Ctx,
   user: User,
   session: FocusSession,
-  options: { continueSuggested?: boolean; skipped?: boolean } = {},
+  options: { continueSuggested?: boolean; continueMinutes?: number | null; skipped?: boolean } = {},
 ): Promise<void> {
   const now = ctx.now()
   const rest = session.plannedRestMinutes ?? restFor(session.plannedMinutes)
@@ -1385,9 +1396,10 @@ async function askRest(
   if (options.continueSuggested && session.taskId) {
     const task = await ctx.db.task.findFirst({ where: { id: session.taskId, userId: user.id, status: 'active' }, select: { title: true } })
     if (task) {
+      const minutes = options.continueMinutes ?? session.plannedMinutes
       const label = Array.from(task.title).length > 32 ? `${Array.from(task.title).slice(0, 31).join('')}…` : task.title
-      await reply(ctx, user, T.continuePrompt(task.title, session.plannedMinutes), [
-        [{ text: T.continueSame(label, session.plannedMinutes), data: cb('again', session.id, 'same') }],
+      await reply(ctx, user, T.continuePrompt(task.title, minutes), [
+        [{ text: T.continueSame(label, minutes), data: cb('again', session.id, 'same') }],
         [
           { text: T.continueClarify, data: cb('again', session.id, 'step') },
           { text: T.continueChange, data: cb('again', session.id, 'change') },
@@ -1433,6 +1445,8 @@ export async function onContinueChoice(
   if (await activeSession(ctx, user.id)) return reply(ctx, user, T.stale)
 
   const now = ctx.now()
+  const continuationMinutes = session.continueMinutes ?? session.plannedMinutes
+  const hasExplicitContinuationMinutes = session.continueMinutes !== null
   let collectingId: string | null = null
   try {
     const claimed = await ctx.db.$transaction(async (tx) => {
@@ -1449,9 +1463,9 @@ export async function onContinueChoice(
             taskId: task!.id,
             intentText: choice === 'same' ? task!.title : null,
             scope: 'step',
-            plannedMinutes: session.plannedMinutes,
-            minutesSource: session.minutesSource,
-            plannedRestMinutes: session.plannedRestMinutes,
+            plannedMinutes: continuationMinutes,
+            minutesSource: hasExplicitContinuationMinutes ? 'user' : session.minutesSource,
+            plannedRestMinutes: hasExplicitContinuationMinutes ? restFor(continuationMinutes) : session.plannedRestMinutes,
             technique: session.technique,
             createdAt: now,
           },

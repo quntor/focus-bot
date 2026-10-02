@@ -51,7 +51,10 @@ export const PAYLOADS = {
     count: z.int().min(0).max(10),
   }),
   tasks_captured: z.strictObject({ count: z.int().min(1).max(10), source: z.enum(['text', 'voice']) }),
-  route_suggested: z.strictObject({ kind: z.literal('continue') }),
+  route_suggested: z.strictObject({
+    kind: z.literal('continue'),
+    requested_minutes: z.number().int().min(1).max(24 * 60).nullable().optional(),
+  }),
   route_confirmed: z.strictObject({ kind: z.literal('continue'), choice: z.enum(['same_task', 'clarify_step', 'change_task']) }),
   route_rejected: z.strictObject({ kind: z.literal('continue'), choice: z.enum(['rest', 'later', 'day_end']) }),
   route_stale: z.strictObject({ stage: z.enum(['tasks', 'intent', 'report']) }),
