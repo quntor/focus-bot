@@ -127,14 +127,28 @@ describe.skipIf(!hasDb)('онбординг нового пользовател�
   it('/guide открывает подробную инструкцию и остаётся в /help', async () => {
     const bot = makeBot()
     await bot.onboard(A)
+    await prisma.user.update({ where: { tgId: BigInt(A) }, data: { pendingInput: 'profile' } })
 
     await bot.text(A, '/guide')
 
     expect(bot.lastText(A)).toContain('Подробная инструкция')
     expect(bot.lastText(A)).toContain('https://agent07.ru/guide')
+    expect(await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })).toMatchObject({ pendingInput: 'profile' })
 
     await bot.text(A, '/help')
     expect(bot.lastText(A)).toContain('/guide — подробная инструкция')
+  })
+
+  it('/guide до /start не создаёт пользователя и не заменяет первое знакомство', async () => {
+    const bot = makeBot()
+
+    await bot.text(A, '/guide')
+
+    expect(bot.lastText(A)).toContain('https://agent07.ru/guide')
+    expect(await prisma.user.findUnique({ where: { tgId: BigInt(A) } })).toBeNull()
+
+    await bot.text(A, '/start')
+    expect(bot.lastText(A)).toContain('У тебя сейчас 10:00, как в Москве?')
   })
 
   it('старая кнопка согласия не перезапускает пройденное знакомство', async () => {

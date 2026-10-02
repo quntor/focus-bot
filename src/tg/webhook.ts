@@ -113,6 +113,13 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
   }
 
   const command = parseCommand(msg?.text)
+  // Инструкция доступна даже до /start и не должна сбрасывать ожидаемый ввод:
+  // это справка, а не новое действие внутри пользовательского сценария.
+  if (command?.command === 'guide') {
+    await ctx.db.user.updateMany({ where: { tgId, blockedAt: { not: null } }, data: { blockedAt: null } })
+    await ctx.tg.send(tgId, T.guide)
+    return
+  }
   const { user, created } = await loadUser(ctx, tgId, command?.command === 'start' ? command.args : null)
   const callback = cq ? parseCallback(cq.data) : null
   const contextEventId = msg?.text
@@ -180,8 +187,6 @@ async function onCommand(ctx: Ctx, user: User, command: string, args: string, cr
       return account.sendSettings(ctx, user)
     case 'profile':
       return account.sendProfile(ctx, user)
-    case 'guide':
-      return reply(ctx, user, T.guide)
     default:
       return reply(ctx, user, T.help)
   }
