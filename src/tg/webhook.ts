@@ -180,6 +180,8 @@ async function onCommand(ctx: Ctx, user: User, command: string, args: string, cr
       return account.sendSettings(ctx, user)
     case 'profile':
       return account.sendProfile(ctx, user)
+    case 'guide':
+      return reply(ctx, user, T.guide)
     default:
       return reply(ctx, user, T.help)
   }

@@ -10,6 +10,7 @@ export const BOT_COMMANDS = [
   { command: 'dayoff', description: 'Запланировать выходной на завтра' },
   { command: 'settings', description: 'Посмотреть и изменить настройки' },
   { command: 'profile', description: 'Посмотреть и изменить профиль' },
+  { command: 'guide', description: 'Открыть подробную инструкцию' },
   { command: 'help', description: 'Показать справку' },
   { command: 'delete_me', description: 'Удалить все мои данные' },
 ] as const

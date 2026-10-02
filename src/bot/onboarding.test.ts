@@ -124,6 +124,19 @@ describe.skipIf(!hasDb)('онбординг нового пользовател�
     expect(bot.lastText(A)).toContain('/delete_me')
   })
 
+  it('/guide открывает подробную инструкцию и остаётся в /help', async () => {
+    const bot = makeBot()
+    await bot.onboard(A)
+
+    await bot.text(A, '/guide')
+
+    expect(bot.lastText(A)).toContain('Подробная инструкция')
+    expect(bot.lastText(A)).toContain('https://agent07.ru/guide')
+
+    await bot.text(A, '/help')
+    expect(bot.lastText(A)).toContain('/guide — подробная инструкция')
+  })
+
   it('старая кнопка согласия не перезапускает пройденное знакомство', async () => {
     const bot = makeBot()
     await bot.onboard(A)
