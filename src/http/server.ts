@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { log } from '../lib/log.js'
+import { guideResource, securityHeaders } from './guide.js'
 
 // Апдейт Telegram — килобайты. Мегабайт с запасом покрывает любое сообщение и
 // не даёт забить память тем, кто нашёл адрес.
@@ -40,9 +41,31 @@ export function createWebhookServer(opts: Options): Server {
   const webhookPath = `/tg/${opts.path}`
 
   const server = createServer((req, res) => {
+    const pathname = req.url?.split('?', 1)[0] ?? '/'
+
     if (req.method === 'GET' && req.url === '/healthz') {
       res.writeHead(200, { 'Content-Type': 'text/plain' }).end('ok')
       return
+    }
+
+    if (req.method === 'GET') {
+      const resource = guideResource(pathname)
+      if (resource) {
+        void resource
+          .load()
+          .then((body) => {
+            res.writeHead(200, {
+              ...securityHeaders,
+              'Cache-Control': resource.cacheControl,
+              'Content-Type': resource.contentType,
+            }).end(body)
+          })
+          .catch((error: unknown) => {
+            log.error('guide_read_failed', error)
+            if (!res.headersSent) res.writeHead(500).end()
+          })
+        return
+      }
     }
 
     if (req.url !== webhookPath) {

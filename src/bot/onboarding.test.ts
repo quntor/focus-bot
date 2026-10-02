@@ -22,6 +22,7 @@ describe.skipIf(!hasDb)('онбординг нового пользовател�
     expect(text).toContain('После каждого захода')
     expect(text).toContain('/settings')
     expect(text).toContain('/profile')
+    expect(text).toContain('https://agent07.ru/guide')
     expect(text).toContain('С чего начнёшь?')
     expect((bot.tg.sent.at(-1) as { replyKeyboard?: string[][] } | undefined)?.replyKeyboard).toEqual([
       ['Начать сессию', 'Перерыв'],
@@ -119,6 +120,7 @@ describe.skipIf(!hasDb)('онбординг нового пользовател�
 
     expect(bot.lastText(A)).toContain('Быстрый старт')
     expect(bot.lastText(A)).toContain('Как быстрее подстроить меня')
+    expect(bot.lastText(A)).toContain('https://agent07.ru/guide')
     expect(bot.lastText(A)).toContain('/delete_me')
   })
 

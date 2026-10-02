@@ -19,6 +19,29 @@ afterEach(async () => {
 })
 
 describe('вебхук', () => {
+  it('публикует руководство и его инфографику без доступа к webhook', async () => {
+    current = await start()
+
+    const page = await fetch(`${current.base}/guide?source=onboarding`)
+    expect(page.status).toBe(200)
+    expect(page.headers.get('content-type')).toContain('text/html')
+    expect(page.headers.get('content-security-policy')).toContain("default-src 'none'")
+    const html = await page.text()
+    expect(html).toContain('Как Фокус помогает доводить дела до результата')
+    expect(html).toContain('https://agent07.ru/guide/session-cycle-v1.webp')
+
+    const image = await fetch(`${current.base}/guide/session-cycle-v1.webp`)
+    expect(image.status).toBe(200)
+    expect(image.headers.get('content-type')).toBe('image/webp')
+    expect(new TextDecoder().decode(new Uint8Array(await image.arrayBuffer()).slice(0, 4))).toBe('RIFF')
+  })
+
+  it('не превращает /guide в произвольную раздачу файлов', async () => {
+    current = await start()
+    expect((await fetch(`${current.base}/guide/not-found.png`)).status).toBe(404)
+    expect((await fetch(`${current.base}/guide/../package.json`)).status).toBe(404)
+  })
+
   it('без правильного секрета — 401, тело не разобрано', async () => {
     current = await start()
     for (const headers of [{}, { 'x-telegram-bot-api-secret-token': 'wrong' }]) {

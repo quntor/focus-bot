@@ -89,6 +89,8 @@ npm run dev
 зачёт конкурса — `--segment zachet`, пометка команды — `npm run team`, выгрузка
 для организаторов — `npm run export` (подробно в [docs/metrics.md](docs/metrics.md)).
 
+Публичное руководство для новых пользователей доступно на `GET /guide`; две
+инфографики лежат в `public/guide` и отдаются только по явному списку путей.
 Вебхук слушает `POST /tg/<TELEGRAM_WEBHOOK_PATH>` и принимает только запросы с
 заголовком `X-Telegram-Bot-Api-Secret-Token`, равным `TELEGRAM_WEBHOOK_SECRET`;
 проверка живости — `GET /healthz`. Для локальной разработки адрес пробрасывается
