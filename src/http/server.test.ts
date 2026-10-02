@@ -28,6 +28,8 @@ describe('вебхук', () => {
     expect(page.headers.get('content-security-policy')).toContain("default-src 'none'")
     const html = await page.text()
     expect(html).toContain('Как Фокус помогает доводить дела до результата')
+    expect(html).toContain('Чтобы бот не потерялся в ленте')
+    expect(html).toContain('Поставь отдельный звук')
     expect(html).toContain('https://agent07.ru/guide/session-cycle-v1.webp')
 
     const image = await fetch(`${current.base}/guide/session-cycle-v1.webp`)
