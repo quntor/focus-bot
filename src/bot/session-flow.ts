@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto'
 import { Prisma, type FocusSession, type User } from '@prisma/client'
 import { logEvent } from '../analytics/log.js'
 import { workDayKey } from '../lib/day.js'
@@ -161,11 +162,11 @@ function sessionHelpKeyboard(sessionId: string, action: SessionHelpAction): Keyb
 
 type RunningTaskChoice = 'new' | 'existing' | 'cancel'
 
-function runningTaskChoiceKeyboard(sessionId: string): Keyboard {
+function runningTaskChoiceKeyboard(sessionId: string, nonce: string): Keyboard {
   return [
-    [{ text: T.runningTaskNewButton, data: cb('rtask', sessionId, 'new') }],
-    [{ text: T.runningTaskExistingButton, data: cb('rtask', sessionId, 'existing') }],
-    [{ text: T.cancel, data: cb('rtask', sessionId, 'cancel') }],
+    [{ text: T.runningTaskNewButton, data: cb('rtask', sessionId, `new_${nonce}`) }],
+    [{ text: T.runningTaskExistingButton, data: cb('rtask', sessionId, `list_${nonce}`) }],
+    [{ text: T.cancel, data: cb('rtask', sessionId, `cancel_${nonce}`) }],
   ]
 }
 
@@ -179,12 +180,13 @@ function parseRunningTaskChoice(text: string): RunningTaskChoice | null {
 
 async function repeatRunningTaskChoice(ctx: Ctx, user: User, session: FocusSession): Promise<void> {
   if (!session.pendingTaskTitle) return reply(ctx, user, T.stale)
-  await reply(ctx, user, T.runningTaskChoice(session.pendingTaskTitle), runningTaskChoiceKeyboard(session.id))
+  await reply(ctx, user, T.runningTaskChoice(session.pendingTaskTitle), runningTaskChoiceKeyboard(session.id, user.pendingInput.split(':')[2]!))
 }
 
 export async function onRunningTaskCandidate(ctx: Ctx, user: User, rawTitle: string): Promise<void> {
   const title = cleanTaskTitle(rawTitle)
   if (!title) return reply(ctx, user, T.stale)
+  const nonce = randomBytes(4).toString('hex')
   let savedSessionId: string | null = null
   try {
     await ctx.db.$transaction(async (tx) => {
@@ -196,7 +198,7 @@ export async function onRunningTaskCandidate(ctx: Ctx, user: User, rawTitle: str
         data: { pendingTaskTitle: title },
       })
       if (changed.count !== 1) throw new StaleTransition()
-      await tx.user.update({ where: { id: user.id }, data: { pendingInput: `running_task_choice:${session.id}` } })
+      await tx.user.update({ where: { id: user.id }, data: { pendingInput: `running_task_choice:${session.id}:${nonce}` } })
       savedSessionId = session.id
     })
   } catch (error) {
@@ -204,7 +206,7 @@ export async function onRunningTaskCandidate(ctx: Ctx, user: User, rawTitle: str
     throw error
   }
   if (!savedSessionId) return reply(ctx, user, T.stale)
-  await reply(ctx, user, T.runningTaskChoice(title), runningTaskChoiceKeyboard(savedSessionId))
+  await reply(ctx, user, T.runningTaskChoice(title), runningTaskChoiceKeyboard(savedSessionId, nonce))
 }
 
 export async function onRunningTaskChoiceText(
@@ -215,9 +217,9 @@ export async function onRunningTaskChoiceText(
   deps: { existing: () => Promise<void> },
 ): Promise<void> {
   const choice = parseRunningTaskChoice(text)
-  if (choice) return onRunningTaskChoice(ctx, user, sessionId, choice, deps)
+  if (choice) return onRunningTaskChoice(ctx, user, sessionId, choice, deps, user.pendingInput.split(':')[2]!)
   const session = await ownedSession(ctx, user.id, sessionId)
-  if (!session || session.state !== 'running' || session.taskId !== null || user.pendingInput !== `running_task_choice:${sessionId}`) {
+  if (!session || session.state !== 'running' || session.taskId !== null || !user.pendingInput.startsWith(`running_task_choice:${sessionId}:`)) {
     return reply(ctx, user, T.stale)
   }
   await repeatRunningTaskChoice(ctx, user, session)
@@ -229,6 +231,7 @@ export async function onRunningTaskChoice(
   sessionId: string,
   choice: RunningTaskChoice,
   deps: { existing: () => Promise<void> },
+  nonce: string,
 ): Promise<void> {
   let title = ''
   let taskTitle = ''
@@ -237,7 +240,7 @@ export async function onRunningTaskChoice(
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
       const freshUser = await tx.user.findUnique({ where: { id: user.id }, select: { pendingInput: true } })
       const session = await tx.focusSession.findFirst({ where: { id: sessionId, userId: user.id, state: 'running', taskId: null } })
-      if (!session?.pendingTaskTitle || freshUser?.pendingInput !== `running_task_choice:${sessionId}`) throw new StaleTransition()
+      if (!session?.pendingTaskTitle || freshUser?.pendingInput !== `running_task_choice:${sessionId}:${nonce}`) throw new StaleTransition()
       title = session.pendingTaskTitle
 
       if (choice === 'new') {
@@ -268,7 +271,7 @@ export async function onRunningTaskChoice(
         if (changed.count !== 1) throw new StaleTransition()
       }
       const released = await tx.user.updateMany({
-        where: { id: user.id, pendingInput: `running_task_choice:${sessionId}` },
+        where: { id: user.id, pendingInput: `running_task_choice:${sessionId}:${nonce}` },
         data: { pendingInput: 'none' },
       })
       if (released.count !== 1) throw new StaleTransition()

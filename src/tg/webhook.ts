@@ -217,9 +217,10 @@ const ONBOARDING_INPUTS = ['timezone', 'start_time', 'ritual']
 
 export async function releasePending(ctx: Ctx, user: User): Promise<User> {
   if (user.pendingInput === 'none' || ONBOARDING_INPUTS.includes(user.pendingInput) || user.pendingInput.startsWith('session_end:')) return user
-  const runningTaskChoice = /^running_task_choice:([0-9a-f-]{36})$/.exec(user.pendingInput)
+  const runningTaskChoice = /^running_task_choice:([0-9a-f-]{36}):([0-9a-f]{8})$/.exec(user.pendingInput)
   if (runningTaskChoice?.[1]) {
     await ctx.db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
       const released = await tx.user.updateMany({
         where: { id: user.id, pendingInput: user.pendingInput },
         data: { pendingInput: 'none' },
@@ -239,7 +240,7 @@ export async function releasePending(ctx: Ctx, user: User): Promise<User> {
 // Одна маршрутизация для текста и голоса: что бот ждёт, туда и ответ.
 async function routeInput(ctx: Ctx, user: User, text: string, via: 'text' | 'voice', contextEventId: number | null): Promise<void> {
   const pending = user.pendingInput
-  const runningTaskChoice = /^running_task_choice:([0-9a-f-]{36})$/.exec(pending)
+  const runningTaskChoice = /^running_task_choice:([0-9a-f-]{36}):([0-9a-f]{8})$/.exec(pending)
   if (runningTaskChoice?.[1]) {
     return session.onRunningTaskChoiceText(ctx, user, runningTaskChoice[1], text, {
       existing: () => tasks.showTaskPicker(ctx, user, T.tasksPick),
@@ -324,13 +325,15 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
       case 'help':
         if (id && (arg === 'continue' || arg === 'step' || arg === 'finish')) return await session.onSessionHelpAction(ctx, user, id, arg)
         break
-      case 'rtask':
-        if (id && (arg === 'new' || arg === 'existing' || arg === 'cancel')) {
-          return await session.onRunningTaskChoice(ctx, user, id, arg, {
+      case 'rtask': {
+        const choice = /^(new|list|cancel)_([0-9a-f]{8})$/.exec(arg ?? '')
+        if (id && choice) {
+          return await session.onRunningTaskChoice(ctx, user, id, choice[1] === 'list' ? 'existing' : choice[1] as 'new' | 'cancel', {
             existing: () => tasks.showTaskPicker(ctx, user, T.tasksPick),
-          })
+          }, choice[2]!)
         }
-        break
+        return await reply(ctx, user, T.stale)
+      }
       case 'ping':
         if (id && arg) return await session.onPing(ctx, user, id, arg)
         break

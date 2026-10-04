@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import type { LlmProvider } from '../llm/provider.js'
+import { releasePending } from '../tg/webhook.js'
 import { makeBot } from '../test/bot.js'
 import { hasDb, prisma, resetDb } from '../test/db.js'
 
@@ -175,7 +176,7 @@ describe.skipIf(!hasDb)('свободный текст во время акти�
 
     expect(bot.lastText(A)).toContain('«Интервью с Денисом»')
     expect(bot.lastText(A)).toContain('новая задача')
-    expect(bot.lastButton(A, 'rtask:', ':new')).toBe(`rtask:${before.id}:new`)
+    expect(bot.lastButton(A, `rtask:${before.id}:new_`)).toMatch(/:new_[0-9a-f]{8}$/)
 
     await bot.text(A, 'Новая')
 
@@ -214,7 +215,7 @@ describe.skipIf(!hasDb)('свободный текст во время акти�
     const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
 
     await bot.text(A, 'Интервью с Денисом')
-    await bot.press(A, `rtask:${running.id}:cancel`)
+    await bot.press(A, bot.lastButton(A, `rtask:${running.id}:cancel_`))
 
     expect(await prisma.task.findFirst({ where: { title: 'Интервью с Денисом' } })).toBeNull()
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })).toMatchObject({
@@ -234,7 +235,7 @@ describe.skipIf(!hasDb)('свободный текст во время акти�
     const running = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
 
     await bot.text(A, 'Интервью с Денисом')
-    await bot.press(A, `rtask:${running.id}:existing`)
+    await bot.press(A, bot.lastButton(A, `rtask:${running.id}:list_`))
 
     expect(bot.lastText(A)).toContain('Существующая задача')
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })).toMatchObject({
@@ -271,4 +272,56 @@ describe.skipIf(!hasDb)('свободный текст во время акти�
     })
     expect(await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })).toMatchObject({ pendingInput: 'none' })
   })
+  it('старая кнопка не подтверждает нового кандидата в той же сессии', async () => {
+    const bot = makeBot({ llm: helperProvider('{"kind":"other","reply":null,"action":null}') })
+    await bot.onboard(A)
+    await bot.text(A, 'Начать сессию')
+    await bot.text(A, 'Интервью с Денисом')
+    const oldButton = bot.buttons(A).find(b => b.data.includes(':new_'))!.data
+    await bot.text(A, 'Мои задачи')
+    await bot.text(A, 'Подготовить статью')
+    await bot.press(A, oldButton)
+    expect(await prisma.task.count()).toBe(0)
+    const current = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+    expect(current).toMatchObject({ taskId: null, pendingTaskTitle: 'Подготовить статью' })
+    await bot.text(A, 'Новая')
+    expect(await prisma.task.findFirstOrThrow()).toMatchObject({ title: 'Подготовить статью' })
+  })
+
+  it('снятие ожидания ждёт блокировку подтверждения до изменения user и session', async () => {
+    const bot = makeBot({ llm: helperProvider('{"kind":"other","reply":null,"action":null}') })
+    await bot.onboard(A)
+    await bot.text(A, 'Начать сессию')
+    await bot.text(A, 'Интервью с Денисом')
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    let unlock!: () => void
+    let ready!: () => void
+    const gate = new Promise<void>(resolve => { unlock = resolve })
+    const acquired = new Promise<void>(resolve => { ready = resolve })
+    const holder = prisma.$transaction(async tx => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
+      ready()
+      await gate
+    })
+    await acquired
+    const release = releasePending(bot.ctx, user)
+    try {
+      let waiting = false
+      for (let i = 0; i < 30; i++) {
+        const rows = await prisma.$queryRaw<{ waiting: boolean }[]>`
+          SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted) AS waiting`
+        if (rows[0]?.waiting) { waiting = true; break }
+        await new Promise(resolve => setTimeout(resolve, 20))
+      }
+      expect(waiting).toBe(true)
+      expect((await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).pendingInput).toBe(user.pendingInput)
+    } finally {
+      unlock()
+      await holder
+      await release
+    }
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).pendingInput).toBe('none')
+    expect((await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id } })).pendingTaskTitle).toBeNull()
+  })
+
 })

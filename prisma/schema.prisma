@@ -38,7 +38,7 @@ model User {
   // | meeting_time_soft | morning_time | profile | report_text | session_end:<sessionId>
   // | running_work:<sessionId> | running_duration:<sessionId> | task_edit:<taskId>
   // | task_split:<taskId> | task_split_clarify:<taskId> | task_split_manual:<taskId> | task_add
-  // | running_task_choice:<sessionId>
+  // | running_task_choice:<sessionId>:<nonce>
   pendingInput String @default("none") @map("pending_input")
 
   // Роль на текущий момент: new | active | observer | dormant. История переходов
