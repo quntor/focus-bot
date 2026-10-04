@@ -1,3 +1,4 @@
+import { inputTransaction } from './input-lock.js'
 import type { User } from '@prisma/client'
 import { logEvent } from '../analytics/log.js'
 import { parseClock, zoneFromLocalClock, offsetMinutes } from '../lib/time.js'
@@ -37,7 +38,7 @@ function startTimeKeyboard() {
 }
 
 export async function beginOnboarding(ctx: Ctx, user: User): Promise<void> {
-  await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: 'timezone' } })
+  await inputTransaction(ctx, (tx) => tx.user.update({ where: { id: user.id }, data: { pendingInput: 'timezone' } }))
   await reply(ctx, user, T.welcome(hhmm(ctx.now(), MOSCOW)), [
     [
       { text: T.timezoneYes, data: cb('onb', null, 'tz_yes') },
@@ -70,7 +71,7 @@ export async function onTimezoneText(ctx: Ctx, user: User, text: string): Promis
   const now = ctx.now()
   const zone = zoneFromLocalClock(clock, now)
   const next = await afterTimezone(ctx, user)
-  await ctx.db.$transaction(async (tx) => {
+  await inputTransaction(ctx, async (tx) => {
     await tx.user.update({ where: { id: user.id }, data: { timezone: zone.timezone, pendingInput: next } })
     await logEvent(tx, user.id, 'timezone_set', { offset_minutes: offsetMinutes(zone.timezone, now), via: 'typed' }, { at: now })
     await rescheduleMorning(tx, { ...user, timezone: zone.timezone }, now)
@@ -86,7 +87,7 @@ export async function onOnboardingButton(ctx: Ctx, user: User, arg: string): Pro
   const now = ctx.now()
   if (arg === 'tz_yes') {
     const next = await afterTimezone(ctx, user)
-    const done = await ctx.db.$transaction(async (tx) => {
+    const done = await inputTransaction(ctx, async (tx) => {
       const r = await tx.user.updateMany({ where: { id: user.id, pendingInput: 'timezone' }, data: { timezone: MOSCOW, pendingInput: next } })
       if (r.count !== 1) return false
       await logEvent(tx, user.id, 'timezone_set', { offset_minutes: offsetMinutes(MOSCOW, now), via: 'confirmed' }, { at: now })
@@ -120,7 +121,7 @@ export async function onStartTimeText(ctx: Ctx, user: User, text: string): Promi
 // «По-разному» — null: morningTime остаётся по умолчанию.
 async function saveStartTime(ctx: Ctx, user: User, value: string | null): Promise<void> {
   const now = ctx.now()
-  const done = await ctx.db.$transaction(async (tx) => {
+  const done = await inputTransaction(ctx, async (tx) => {
     const r = await tx.user.updateMany({
       where: { id: user.id, pendingInput: 'start_time' },
       data: { pendingInput: 'ritual', ...(value ? { morningTime: value } : {}) },
@@ -139,7 +140,7 @@ async function saveStartTime(ctx: Ctx, user: User, value: string | null): Promis
 export async function onRitualText(ctx: Ctx, user: User, text: string | null): Promise<void> {
   const now = ctx.now()
   const ritual = text === null ? null : text.trim().slice(0, RITUAL_MAX)
-  await ctx.db.$transaction(async (tx) => {
+  await inputTransaction(ctx, async (tx) => {
     await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none', ...(ritual ? { ritualText: ritual } : {}) } })
     await logEvent(tx, user.id, 'ritual_set', { action: ritual ? 'set' : 'skip' }, { at: now })
   })
@@ -183,11 +184,11 @@ export async function onSetting(ctx: Ctx, user: User, arg: string): Promise<void
     ])
   }
   if (arg === 'morning' || arg === 'timezone') {
-    await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: arg === 'morning' ? 'morning_time' : 'settings_timezone' } })
+    await inputTransaction(ctx, (tx) => tx.user.update({ where: { id: user.id }, data: { pendingInput: arg === 'morning' ? 'morning_time' : 'settings_timezone' } }))
     return reply(ctx, user, arg === 'morning' ? T.askMorning : T.askTimezone)
   }
   if (arg === 'pings' || arg === 'proactive') {
-    await ctx.db.$transaction(async (tx) => {
+    await inputTransaction(ctx, async (tx) => {
       if (arg === 'pings') {
         await tx.user.update({ where: { id: user.id }, data: { pingsEnabled: !user.pingsEnabled } })
         if (user.pingsEnabled) {
@@ -215,7 +216,7 @@ export async function onSetting(ctx: Ctx, user: User, arg: string): Promise<void
 export async function onTechnique(ctx: Ctx, user: User, arg: string): Promise<void> {
   if (!isTechnique(arg)) return reply(ctx, user, T.stale)
   const now = ctx.now()
-  await ctx.db.$transaction(async (tx) => {
+  await inputTransaction(ctx, async (tx) => {
     await tx.user.update({ where: { id: user.id }, data: { technique: arg } })
     await logEvent(tx, user.id, 'settings_changed', { key: 'technique' }, { at: now })
   })
@@ -227,7 +228,7 @@ export async function onMorningText(ctx: Ctx, user: User, text: string): Promise
   if (!clock) return reply(ctx, user, T.askMorning)
   const value = `${String(clock.h).padStart(2, '0')}:${String(clock.m).padStart(2, '0')}`
   const now = ctx.now()
-  await ctx.db.$transaction(async (tx) => {
+  await inputTransaction(ctx, async (tx) => {
     await tx.user.update({ where: { id: user.id }, data: { morningTime: value, pendingInput: 'none' } })
     await logEvent(tx, user.id, 'settings_changed', { key: 'morning_time' }, { at: now })
     await rescheduleMorning(tx, { ...user, morningTime: value }, now)
@@ -247,15 +248,15 @@ export async function sendProfile(ctx: Ctx, user: User): Promise<void> {
 export async function onProfileAction(ctx: Ctx, user: User, arg: string): Promise<void> {
   const now = ctx.now()
   if (arg === 'edit') {
-    await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: 'profile' } })
+    await inputTransaction(ctx, (tx) => tx.user.update({ where: { id: user.id }, data: { pendingInput: 'profile' } }))
     return reply(ctx, user, T.askProfile)
   }
   if (arg === 'ritual') {
-    await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: 'profile_ritual' } })
+    await inputTransaction(ctx, (tx) => tx.user.update({ where: { id: user.id }, data: { pendingInput: 'profile_ritual' } }))
     return reply(ctx, user, T.askRitual)
   }
   if (arg === 'clear') {
-    await ctx.db.$transaction(async (tx) => {
+    await inputTransaction(ctx, async (tx) => {
       await tx.user.update({ where: { id: user.id }, data: { profileText: null } })
       await logEvent(tx, user.id, 'profile_edited', { action: 'clear' }, { at: now })
     })
@@ -266,7 +267,7 @@ export async function onProfileAction(ctx: Ctx, user: User, arg: string): Promis
 
 export async function onProfileText(ctx: Ctx, user: User, text: string): Promise<void> {
   const now = ctx.now()
-  await ctx.db.$transaction(async (tx) => {
+  await inputTransaction(ctx, async (tx) => {
     await tx.user.update({ where: { id: user.id }, data: { profileText: text.trim().slice(0, PROFILE_MAX), pendingInput: 'none' } })
     await logEvent(tx, user.id, 'profile_edited', { action: 'set' }, { at: now })
   })
@@ -285,7 +286,7 @@ export async function askDelete(ctx: Ctx, user: User): Promise<void> {
 export async function onDeleteConfirm(ctx: Ctx, user: User): Promise<void> {
   const now = ctx.now()
   const tgId = user.tgId
-  await ctx.db.$transaction(async (tx) => {
+  await inputTransaction(ctx, async (tx) => {
     await logEvent(tx, user.id, 'user_deleted', {}, { at: now })
     await tx.user.delete({ where: { id: user.id } })
   })

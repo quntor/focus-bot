@@ -1,3 +1,4 @@
+import { inputTransaction } from './input-lock.js'
 import type { Prisma, User } from '@prisma/client'
 import { llmMeter } from '../analytics/calls.js'
 import { logEvent } from '../analytics/log.js'
@@ -225,7 +226,7 @@ export async function onTaskEditRequested(ctx: Ctx, user: User, taskId: string):
     select: { id: true, title: true },
   })
   if (!task) return reply(ctx, user, T.stale)
-  await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: `task_edit:${task.id}` } })
+  await inputTransaction(ctx, (tx) => tx.user.update({ where: { id: user.id }, data: { pendingInput: `task_edit:${task.id}` } }))
   await reply(ctx, user, T.taskEditAsk(task.title))
 }
 
@@ -233,7 +234,7 @@ export async function onTaskEditText(ctx: Ctx, user: User, taskId: string, rawTi
   const title = rawTitle.replace(/\s+/g, ' ').trim().slice(0, 80)
   if (!title) return reply(ctx, user, T.taskEditInvalid)
 
-  const result = await ctx.db.$transaction(async (tx) => {
+  const result = await inputTransaction(ctx, async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
     const waiting = await tx.user.findFirst({
       where: { id: user.id, pendingInput: `task_edit:${taskId}` },
@@ -271,7 +272,7 @@ export async function onTaskEditText(ctx: Ctx, user: User, taskId: string, rawTi
 export async function onTaskDropped(ctx: Ctx, user: User, taskId: string): Promise<void> {
   let title: string | null = null
   let isCurrent = false
-  await ctx.db.$transaction(async (tx) => {
+  await inputTransaction(ctx, async (tx) => {
     const locked = await tx.task.updateMany({
       where: { id: taskId, userId: user.id, status: 'active' },
       data: { status: 'active' },
@@ -298,17 +299,17 @@ export async function onTaskDropped(ctx: Ctx, user: User, taskId: string): Promi
 export async function onTaskRestored(ctx: Ctx, user: User, taskId: string): Promise<void> {
   const task = await ctx.db.task.findFirst({ where: { id: taskId, userId: user.id, status: 'dropped' } })
   if (!task) return reply(ctx, user, T.stale)
-  const restored = await ctx.db.task.updateMany({
+  const restored = await inputTransaction(ctx, (tx) => tx.task.updateMany({
     where: { id: task.id, userId: user.id, status: 'dropped' },
     data: { status: 'active' },
-  })
+  }))
   if (restored.count !== 1) return reply(ctx, user, T.stale)
   await showTasks(ctx, user, 0, T.taskRestored(task.title))
 }
 
 // --- Добавить задачу без старта. Ожидание — pendingInput task_add.
 export async function onTaskAddRequested(ctx: Ctx, user: User): Promise<void> {
-  await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: 'task_add' } })
+  await inputTransaction(ctx, (tx) => tx.user.update({ where: { id: user.id }, data: { pendingInput: 'task_add' } }))
   await reply(ctx, user, T.taskAddAsk)
 }
 
@@ -317,7 +318,7 @@ const ADD_MAX = 10
 export async function onTaskAddText(ctx: Ctx, user: User, text: string, source: TaskInputSource): Promise<void> {
   const lines = splitLines(text)
   if (!lines.length) return reply(ctx, user, T.taskAddAsk)
-  const claimed = await ctx.db.user.updateMany({ where: { id: user.id, pendingInput: 'task_add' }, data: { pendingInput: 'none' } })
+  const claimed = await inputTransaction(ctx, (tx) => tx.user.updateMany({ where: { id: user.id, pendingInput: 'task_add' }, data: { pendingInput: 'none' } }))
   if (claimed.count !== 1) return reply(ctx, user, T.stale)
   const saved = await captureTasks(ctx, user, lines.slice(0, ADD_MAX), source)
   if (!saved.length) return reply(ctx, user, T.tasksParseFailed)
@@ -343,7 +344,7 @@ export async function onTaskBreakdownRequested(ctx: Ctx, user: User, taskId: str
     select: { id: true, title: true },
   })
   if (!task) return reply(ctx, user, T.stale)
-  await ctx.db.$transaction(async (tx) => {
+  await inputTransaction(ctx, async (tx) => {
     await tx.user.update({ where: { id: user.id }, data: { pendingInput: `task_split:${task.id}` } })
     await logEvent(tx, user.id, 'task_breakdown_requested', { task_id: task.id }, { at: ctx.now() })
   })
@@ -373,12 +374,12 @@ export async function onTaskBreakdownAnswer(
     select: { id: true, title: true },
   })
   if (!task) {
-    await ctx.db.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput: 'none' } })
+    await inputTransaction(ctx, (tx) => tx.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput: 'none' } }))
     return reply(ctx, user, T.stale)
   }
   const text = answer?.trim().slice(0, SPLIT_ANSWER_MAX) ?? null
   const moveTo = async (pendingInput: string) =>
-    (await ctx.db.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput } })).count === 1
+    (await inputTransaction(ctx, (tx) => tx.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput } }))).count === 1
 
   let steps: string[]
   let mode: 'answered' | 'auto' | 'manual'
@@ -424,18 +425,18 @@ export async function onTaskBreakdownAnswer(
   steps = steps.filter((step) => normalize(step) !== normalize(task.title))
   if (!steps.length) {
     // Писать шаги самому — значит следующий ответ не уходит снова к модели.
-    await ctx.db.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput: `task_split_manual:${task.id}` } })
+    await inputTransaction(ctx, (tx) => tx.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput: `task_split_manual:${task.id}` } }))
     return reply(ctx, user, T.breakdownManual)
   }
 
   // Ожидание снимается до записи: пока шла модель, человек мог нажать другое.
-  const claimed = await ctx.db.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput: 'none' } })
+  const claimed = await inputTransaction(ctx, (tx) => tx.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput: 'none' } }))
   if (claimed.count !== 1) return reply(ctx, user, T.stale)
   // Повторный разбор заменяет незакрытые и ещё не начатые шаги, а не копит их.
-  await ctx.db.task.updateMany({
+  await inputTransaction(ctx, (tx) => tx.task.updateMany({
     where: { userId: user.id, parentId: task.id, status: 'active', sessionsCount: 0 },
     data: { status: 'dropped' },
-  })
+  }))
   const saved = await captureTasks(ctx, user, steps, source, { parentId: task.id })
   if (!saved.length) return reply(ctx, user, T.tasksParseFailed)
   await logEvent(ctx.db, user.id, 'task_breakdown_done', { task_id: task.id, mode, steps: saved.length, llm_used: llmUsed }, { at: ctx.now() })
@@ -457,7 +458,7 @@ export async function onCapturedTasks(ctx: Ctx, user: User, titles: string[], so
 }
 
 async function captureTasks(ctx: Ctx, user: User, titles: string[], source: TaskInputSource, opts: { parentId?: string; guard?: (tx: Prisma.TransactionClient) => Promise<boolean> } = {}) {
-  return ctx.db.$transaction(async (tx) => {
+  return inputTransaction(ctx, async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
     if (opts.guard && !await opts.guard(tx)) throw new StaleTransition()
     const selected: { id: string; title: string; created: boolean }[] = []
@@ -492,7 +493,7 @@ async function resolveOrCreateTask(
   }
 
   const candidate = parsed.result.title.replace(/\s+/g, ' ').trim().slice(0, 80) || title.replace(/\s+/g, ' ').trim().slice(0, 80)
-  return ctx.db.$transaction(async (tx) => {
+  return inputTransaction(ctx, async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
     if (parsed.result.taskId) {
       const matched = await tx.task.findFirst({
@@ -557,7 +558,7 @@ async function completeTask(
   let runningUntil: Date | null | undefined
   let onBreak = false
   try {
-    await ctx.db.$transaction(async (tx) => {
+    await inputTransaction(ctx, async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
       const completed = await tx.task.findFirst({
         where: { id: task.id, userId: user.id, status: 'active' },
@@ -682,7 +683,7 @@ async function completeAndStart(
   let doneTitle = ''
   let keptRunning = false
   try {
-    await ctx.db.$transaction(async (tx) => {
+    await inputTransaction(ctx, async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
       const completed = await tx.task.findFirst({ where: { id: input.completeTaskId, userId: user.id, status: 'active' } })
       if (!completed) throw new StaleTransition()

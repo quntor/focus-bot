@@ -1,3 +1,4 @@
+import { inputTransaction } from './input-lock.js'
 import type { Prisma, User } from '@prisma/client'
 import { logEvent } from '../analytics/log.js'
 import { addDays, dayKey, daysBetween, weekStart, WORK_DAY_START_HOUR, workDayKey } from '../lib/day.js'
@@ -229,7 +230,7 @@ export async function planDayOff(ctx: Ctx, user: User): Promise<void> {
   // Послезавтра утром — по рабочим суткам: в 01:00 «завтра» уже началось по
   // календарю, и встреча — утром следующего за выходным дня, а не через день.
   const at = morningOfWorkDay(user, addDays(tomorrow, 1))
-  const ok = await ctx.db.$transaction(async (tx) => {
+  const ok = await inputTransaction(ctx, async (tx) => {
     // Блокировка пользователя: два одновременных нажатия не должны дать два
     // выходных на одной неделе.
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'dayoff:' + user.id}))`
@@ -333,7 +334,7 @@ export async function closeDay(
 ): Promise<void> {
   const now = ctx.now()
   const day = workDayKey(now, user.timezone)
-  const summary = await ctx.db.$transaction(async (tx) => {
+  const summary = await inputTransaction(ctx, async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'day:' + user.id}))`
     if (options.guard && !await options.guard(tx)) return null
     const active = await tx.focusSession.findFirst({
@@ -387,7 +388,7 @@ export async function onSummaryConfirm(ctx: Ctx, user: User, arg: string): Promi
   const now = ctx.now()
   const day = `${arg.slice(0, 4)}-${arg.slice(4, 6)}-${arg.slice(6, 8)}`
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return reply(ctx, user, T.stale)
-  const ok = await ctx.db.$transaction(async (tx) => {
+  const ok = await inputTransaction(ctx, async (tx) => {
     const res = await tx.dailyGoal.updateMany({
       where: { userId: user.id, dayKey: day, confirmedAt: null },
       data: { confirmedAt: now },
@@ -423,7 +424,7 @@ type MeetingKind = 'morning' | 'in_hours' | 'evening' | 'custom' | 'postpone'
 
 export async function scheduleMeeting(ctx: Ctx, user: User, at: Date, kind: MeetingKind): Promise<void> {
   const now = ctx.now()
-  await ctx.db.$transaction(async (tx) => {
+  await inputTransaction(ctx, async (tx) => {
     await putMeeting(tx, user, at, { defaulted: false, morning: kind === 'morning' })
     await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
     await logEvent(tx, user.id, 'meeting_scheduled', { kind, minutes_ahead: Math.max(0, Math.round((at.getTime() - now.getTime()) / MIN)) }, { at: now })
@@ -435,7 +436,7 @@ export async function scheduleMeeting(ctx: Ctx, user: User, at: Date, kind: Meet
 export async function onMeet(ctx: Ctx, user: User, arg: string): Promise<void> {
   const now = ctx.now()
   if (arg === 'custom') {
-    await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: 'meeting_time' } })
+    await inputTransaction(ctx, (tx) => tx.user.update({ where: { id: user.id }, data: { pendingInput: 'meeting_time' } }))
     return reply(ctx, user, T.askCustomTime)
   }
   if (arg === 'h1') return scheduleMeeting(ctx, user, new Date(now.getTime() + 60 * MIN), 'in_hours')
@@ -461,7 +462,7 @@ export async function onMeetingTimeText(ctx: Ctx, user: User, text: string, opts
     await reply(ctx, user, T.askCustomTime)
     return true
   }
-  await ctx.db.user.updateMany({ where: { id: user.id, pendingInput: 'meeting_time_soft' }, data: { pendingInput: 'none' } })
+  await inputTransaction(ctx, (tx) => tx.user.updateMany({ where: { id: user.id, pendingInput: 'meeting_time_soft' }, data: { pendingInput: 'none' } }))
   return false
 }
 
@@ -523,7 +524,7 @@ export function declineKeyboard(): Keyboard {
 export async function onPostpone(ctx: Ctx, user: User): Promise<void> {
   const now = ctx.now()
   const at = new Date(now.getTime() + POSTPONE_MINUTES * MIN)
-  const declines = await ctx.db.$transaction(async (tx) => {
+  const declines = await inputTransaction(ctx, async (tx) => {
     const updated = await tx.user.update({ where: { id: user.id }, data: { declinesInRow: { increment: 1 } } })
     // Отказ закрывает открытый вопрос «с чего начнёшь».
     await tx.focusSession.updateMany({
@@ -551,7 +552,7 @@ export async function onDecline(ctx: Ctx, user: User, arg: string): Promise<void
   const now = ctx.now()
   if (arg === 'pause') {
     const at = nextLocalTime(user.timezone, morningClock(user), now)
-    await ctx.db.$transaction(async (tx) => {
+    await inputTransaction(ctx, async (tx) => {
       await cancelPending(tx, { userId: user.id, kind: { in: ['meeting', 'rest_over'] } })
       await putMeeting(tx, user, at, { defaulted: false, morning: true })
       await logEvent(tx, user.id, 'meeting_scheduled', { kind: 'morning', minutes_ahead: Math.round((at.getTime() - now.getTime()) / MIN) }, { at: now })
@@ -581,7 +582,7 @@ export async function onGoal(ctx: Ctx, user: User, arg: string): Promise<void> {
   // Очки за цель — только когда её выполнила засчитанная сессия
   // (src/retention/credit.ts). Цель, поставленная задним числом, когда сессий уже
   // хватает, — не цель, а подпись к сделанному: очков за неё нет.
-  await ctx.db.$transaction(async (tx) => {
+  await inputTransaction(ctx, async (tx) => {
     await tx.dailyGoal.upsert({
       where: { userId_dayKey: { userId: user.id, dayKey: day } },
       create: { userId: user.id, dayKey: day, targetSessions: target },

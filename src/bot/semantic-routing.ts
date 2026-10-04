@@ -1,3 +1,4 @@
+import { inputTransaction } from './input-lock.js'
 import { randomUUID } from 'node:crypto'
 import type { Prisma, User } from '@prisma/client'
 import { logEvent } from '../analytics/log.js'
@@ -5,6 +6,7 @@ import { llmMeter } from '../analytics/calls.js'
 import { parseSemanticRoute, type SemanticRoute, type SemanticRouteName } from '../llm/router.js'
 import { decodeReportAnswer } from '../llm/report.js'
 import { fallbackIntent } from '../llm/intent.js'
+import { StaleTransition } from '../session/fsm.js'
 import { cb } from './callbacks.js'
 import { latestInputId, questionContext, recentConversationContext } from './conversation-context.js'
 import { reply, type Ctx } from './context.js'
@@ -133,7 +135,7 @@ async function releaseForRoute(ctx: Ctx, s: Snapshot): Promise<User | null> {
   if (user.pendingInput === 'report_text') {
     if (!await session.releaseReportPending(ctx, user, s.report?.id ?? null)) return null
   } else {
-    const changed = await ctx.db.$transaction(async (tx) => {
+    const changed = await inputTransaction(ctx, async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
       const res = await tx.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput: 'none' } })
       if (res.count !== 1) return false
@@ -144,14 +146,21 @@ async function releaseForRoute(ctx: Ctx, s: Snapshot): Promise<User | null> {
   }
   return { ...user, pendingInput: 'none' }
 }
-async function dispatch(ctx: Ctx, s: Snapshot, route: SemanticRoute, via: 'text' | 'voice', contextEventId: number | null, legacy: Legacy, handlePending?: Legacy) {
+async function dispatch(...args: Parameters<typeof dispatchRoute>): Promise<void> {
+  try { await dispatchRoute(...args) }
+  catch (error) {
+    if (error instanceof StaleTransition) return reply(args[0], args[1].user!, T.stale)
+    throw error
+  }
+}
+async function dispatchRoute(ctx: Ctx, s: Snapshot, route: SemanticRoute, via: 'text' | 'voice', contextEventId: number | null, legacy: Legacy, handlePending?: Legacy) {
   if (route.route === 'answer_pending') return handlePending ? handlePending(ctx, s.user!, route.text, via, contextEventId) : reply(ctx, s.user!, T.stale)
   if (route.route === 'unclear') return askChoice(ctx, s, route.text, via)
   let user = s.user!
   if (route.route === 'report') {
     if (!s.report || s.active) return reply(ctx, user, T.stale)
     if (user.pendingInput !== 'report_text') {
-      const changed = await ctx.db.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput: 'report_text' } })
+      const changed = await inputTransaction(ctx, (tx) => tx.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput: 'report_text' } }))
       if (changed.count !== 1) return reply(ctx, user, T.stale)
       user = { ...user, pendingInput: 'report_text' }
     }
@@ -166,7 +175,11 @@ async function dispatch(ctx: Ctx, s: Snapshot, route: SemanticRoute, via: 'text'
   const expected = JSON.parse(s.fingerprint)
   expected.user.pendingInput = user.pendingInput
   if (expected.active && s.user!.pendingInput.startsWith('running_task_choice:')) expected.active.pendingTaskTitle = null
-  const guard = async (tx: Prisma.TransactionClient) => currentInput(ctx, user.id, inputId) && (await snapshot(ctx, user.id, tx)).fingerprint === JSON.stringify(expected)
+  const guard = async (tx: Prisma.TransactionClient) => {
+    if (!currentInput(ctx, user.id, inputId)) return false
+    const fresh = await snapshot(ctx, user.id, tx)
+    return currentInput(ctx, user.id, inputId) && fresh.fingerprint === JSON.stringify(expected)
+  }
   if (route.route === 'new_task') {
     const ref = s.labelledTasks.find((task) => task.label === route.intent.task && task.status === 'active')
     const parsed = { taskId: ref?.id ?? null, title: route.intent.title, scope: route.intent.scope, llmUsed: true }
@@ -221,7 +234,7 @@ export async function onSemanticChoice(ctx: Ctx, user: User, id: string, arg: st
   return reply(ctx, user, T.stale)
 }
 export async function onRestoreReport(ctx: Ctx, user: User, sessionId: string): Promise<void> {
-  const ok = await ctx.db.$transaction(async (tx) => {
+  const ok = await inputTransaction(ctx, async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
     if ((await session.pendingReportSession(tx, user.id, ctx.now()))?.id !== sessionId || await tx.focusSession.findFirst({ where: { userId: user.id, state: { in: ['running', 'paused', 'collecting_intent'] } } })) return false
     return (await tx.user.updateMany({ where: { id: user.id, pendingInput: { in: ['none', 'report_text'] } }, data: { pendingInput: 'report_text' } })).count === 1

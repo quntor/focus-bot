@@ -1,3 +1,7 @@
+import type { Prisma } from '@prisma/client'
+import { StaleTransition } from '../session/fsm.js'
+import type { Ctx } from './context.js'
+
 // Serialize mutation turns for one owner, not model/provider calls across users.
 // The incoming context event is recorded before waiting, so older LLM replies
 // still see that a newer input arrived and fail their latest-input fence.
@@ -20,4 +24,18 @@ export function beginInput(key: string): () => boolean {
   if (generations.size >= 10_000) generations.delete(generations.keys().next().value!)
   generations.set(key, generation)
   return () => generations.get(key) === generation
+}
+
+// The arrival check at transaction exit rolls back writes made during a DB await.
+// With the flag off no fence is applied; existing legacy concurrency is retained.
+export function assertCurrentInput(ctx: Ctx): void {
+  if (ctx.semanticRouterEnabled && ctx.isCurrentInput && !ctx.isCurrentInput()) throw new StaleTransition()
+}
+export async function inputTransaction<T>(ctx: Ctx, work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+  return ctx.db.$transaction(async (tx) => {
+    assertCurrentInput(ctx)
+    const result = await work(tx)
+    assertCurrentInput(ctx)
+    return result
+  })
 }

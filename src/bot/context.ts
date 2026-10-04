@@ -37,6 +37,7 @@ export async function markBlocked(ctx: Ctx, userId: string): Promise<void> {
 export async function reply(ctx: Ctx, user: Pick<User, 'id' | 'tgId'>, text: string, keyboard?: Keyboard): Promise<void> {
   try {
     const replyKeyboard = keyboard ? undefined : await sessionKeyboard(ctx, user.id)
+    if (ctx.semanticRouterEnabled && ctx.isCurrentInput && !ctx.isCurrentInput()) return
     await ctx.tg.send(user.tgId, text, keyboard, replyKeyboard)
     rememberConversationContext(user.id, 'assistant', text, ctx.now())
     if (ctx.semanticRouterEnabled) {

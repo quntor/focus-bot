@@ -86,7 +86,8 @@ describe.skipIf(!hasDb)('IDOR: чужие идентификаторы во вс
     const aButtons = bot.buttons(A).map((b) => b.data).join('\n')
     for (const id of ids) expect(aButtons).not.toContain(id)
   // Corpus grows with closed callback actions; keep all foreign-id checks.
-  }, 120_000)
+  // Full 2196-input traversal passed in 96s; allow headroom on shared runners.
+  }, 180_000)
   it('del с чужим id удаляет только нажавшего, а не владельца id', async () => {
     const bot = makeBot()
     await bot.onboard(A)

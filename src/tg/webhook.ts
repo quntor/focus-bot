@@ -160,6 +160,7 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
         else await reply(ctx, user, T.unsupported)
       }
     } catch (error) {
+      if (ctx.semanticRouterEnabled && error instanceof StaleTransition) return
       // Наружу — общая фраза, подробности — во внутренний лог без текста.
       log.error('handle_failed', error)
       await reply(ctx, user, T.error)
