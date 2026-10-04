@@ -4,7 +4,7 @@ import { logEvent } from '../analytics/log.js'
 import { workDayKey } from '../lib/day.js'
 import { nextLocalTime, parseClock } from '../lib/time.js'
 import { parseIntent } from '../llm/intent.js'
-import { parseReport } from '../llm/report.js'
+import { explicitNewWork, parseReport } from '../llm/report.js'
 import { parseSessionHelp, type SessionHelpAction } from '../llm/session-help.js'
 import { llmMeter } from '../analytics/calls.js'
 import { cancelPending, enqueue } from '../outbox/queue.js'
@@ -1242,34 +1242,53 @@ function creditLines(credit: Credit | null): string[] {
 
 // Отчёт — пара слов после исхода. Привязывается к последней закрытой сессии
 // этого же пользователя, у которой отчёта ещё нет.
+function pendingReportSession(db: Ctx['db'] | Prisma.TransactionClient, userId: string, now: Date, includeId?: string) {
+  return db.focusSession.findFirst({
+    where: { userId, state: 'finished', AND: [{ OR: [{ reportText: null }, ...(includeId ? [{ id: includeId }] : [])] }], OR: [{ restChoice: null }, { restChoice: 'rest' }], finishedAt: { gte: new Date(now.getTime() - REPORT_WINDOW_MS) } },
+    orderBy: { finishedAt: 'desc' },
+  })
+}
+
+export async function releaseReportPending(ctx: Ctx, user: User, sessionId: string | null): Promise<boolean> {
+  return ctx.db.$transaction(async (tx) => {
+    const released = await tx.user.updateMany({ where: { id: user.id, pendingInput: 'report_text' }, data: { pendingInput: 'none' } })
+    if (released.count !== 1) return false
+    if (((await pendingReportSession(tx, user.id, ctx.now()))?.id ?? null) !== sessionId) throw new StaleTransition()
+    return true
+  }).catch((error: unknown) => {
+    if (error instanceof StaleTransition) return false
+    throw error
+  })
+}
+
 export async function onReportText(
   ctx: Ctx,
   user: User,
   text: string,
   options: { endDay?: boolean } = {},
-): Promise<boolean> {
-  const since = new Date(ctx.now().getTime() - REPORT_WINDOW_MS)
-  const session = await ctx.db.focusSession.findFirst({
-    where: {
-      userId: user.id,
-      state: 'finished',
-      reportText: null,
-      OR: [{ restChoice: null }, { restChoice: 'rest' }],
-      finishedAt: { gte: since },
-    },
-    orderBy: { finishedAt: 'desc' },
-  })
-  if (!session) {
-    await ctx.db.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
-    return false
+): Promise<{ kind: 'saved' | 'handled' | 'new_action'; sessionId: string | null }> {
+  const session = await pendingReportSession(ctx.db, user.id, ctx.now())
+  if (!session) return { kind: 'new_action', sessionId: null }
+  if (explicitNewWork(text)) return { kind: 'new_action', sessionId: session.id }
+  const report = text.trim().slice(0, REPORT_MAX)
+  const prepared = await prepareReport(ctx, user, session, report)
+  const fresh = await ctx.db.user.findUniqueOrThrow({ where: { id: user.id } })
+  if (fresh.pendingInput !== 'report_text' || await activeSession(ctx, user.id) || (await pendingReportSession(ctx.db, user.id, ctx.now()))?.id !== session.id) {
+    await reply(ctx, user, T.stale)
+    return { kind: 'handled', sessionId: session.id }
   }
-  await finalizeReport(ctx, user, session, text.trim().slice(0, REPORT_MAX), options)
-  return true
+  if (prepared.parsed.result.route === 'new_action') return { kind: 'new_action', sessionId: session.id }
+  if (prepared.parsed.result.route === 'unclear') {
+    await reply(ctx, user, 'Это про результат прошлой сессии или хочешь начать новую работу? Отчёт необязателен — можно просто назвать, что начинаешь.')
+    return { kind: 'handled', sessionId: session.id }
+  }
+  const saved = await finalizeReport(ctx, user, session, report, { ...options, prepared })
+  return { kind: saved ? 'saved' : 'handled', sessionId: session.id }
 }
 
 export async function onSkipReport(ctx: Ctx, user: User, sessionId: string): Promise<void> {
   const session = await ownedSession(ctx, user.id, sessionId)
-  if (!session || session.state !== 'finished' || (session.restChoice !== null && session.restChoice !== 'rest') || session.progress !== null) {
+  if (!session || session.state !== 'finished' || (session.restChoice !== null && session.restChoice !== 'rest') || session.progress !== null || session.reportText !== null) {
     return reply(ctx, user, T.stale)
   }
   await finalizeReport(ctx, user, session, null)
@@ -1284,29 +1303,7 @@ const normalizeTaskTitle = (value: string) =>
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim()
 
-async function finalizeReport(
-  ctx: Ctx,
-  user: User,
-  session: FocusSession,
-  text: string | null,
-  options: { endDay?: boolean } = {},
-): Promise<void> {
-  const now = ctx.now()
-  const outcome = (session.outcome ?? 'other') as Outcome
-  if (text !== null) {
-    const saved = await ctx.db.$transaction(async (tx) => {
-      const res = await tx.focusSession.updateMany({
-        where: { id: session.id, userId: user.id, reportText: null },
-        data: { reportText: text },
-      })
-      if (res.count !== 1) return false
-      await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
-      await logEvent(tx, user.id, 'report_submitted', { session_id: session.id, length_chars: text.length }, { at: now, sessionId: session.id })
-      return true
-    })
-    if (!saved) return reply(ctx, user, T.stale)
-  }
-
+async function prepareReport(ctx: Ctx, user: User, session: FocusSession, text: string | null) {
   // Модель зовётся вне транзакции: медленный ответ не должен держать блокировки.
   const reportTasks = text === null
     ? []
@@ -1321,12 +1318,43 @@ async function finalizeReport(
     ctx.llm,
     {
       intent: session.intentText,
-      outcome,
+      outcome: (session.outcome ?? 'other') as Outcome,
       report: text,
       tasks: labelledTasks.map(({ label, title }) => ({ label, title })),
     },
     llmMeter(ctx, user.id, 'report', session.id),
   )
+  return { labelledTasks, parsed }
+}
+
+async function finalizeReport(
+  ctx: Ctx,
+  user: User,
+  session: FocusSession,
+  text: string | null,
+  options: { endDay?: boolean; prepared?: Awaited<ReturnType<typeof prepareReport>> } = {},
+): Promise<boolean> {
+  const now = ctx.now()
+  if (text !== null) {
+    const saved = await ctx.db.$transaction(async (tx) => {
+      if ((await pendingReportSession(tx, user.id, now))?.id !== session.id) return false
+      const res = await tx.focusSession.updateMany({
+        where: { id: session.id, userId: user.id, state: 'finished', reportText: null, progress: null },
+        data: { reportText: text },
+      })
+      if (res.count !== 1) return false
+      const released = await tx.user.updateMany({ where: { id: user.id, pendingInput: 'report_text' }, data: { pendingInput: 'none' } })
+      if (released.count !== 1 || (await pendingReportSession(tx, user.id, now, session.id))?.id !== session.id || await tx.focusSession.findFirst({ where: { userId: user.id, state: { in: [...ACTIVE_STATES] } } })) throw new StaleTransition()
+      await logEvent(tx, user.id, 'report_submitted', { session_id: session.id, length_chars: text.length }, { at: now, sessionId: session.id })
+      return true
+    }).catch((error: unknown) => {
+      if (error instanceof StaleTransition) return false
+      throw error
+    })
+    if (!saved) { await reply(ctx, user, T.stale); return false }
+  }
+
+  const { labelledTasks, parsed } = options.prepared ?? await prepareReport(ctx, user, session, text)
   const failure = parsed.failure && !parsed.failure.ok ? parsed.failure.reason : null
   const continuationRelevant = session.restChoice === null && !options.endDay && parsed.result.continueNow && (await activeSession(ctx, user.id)) === null
   const continuationMinutes = continuationRelevant ? parsed.result.continueMinutes : null
@@ -1446,7 +1474,7 @@ async function finalizeReport(
   if (!reportApplied) {
     await logEvent(ctx.db, user.id, 'route_stale', { stage: 'report' }, { at: ctx.now(), sessionId: session.id })
     await reply(ctx, user, T.stale)
-    return
+    return false
   }
 
   const activeAfterReport = await activeSession(ctx, user.id)
@@ -1458,7 +1486,7 @@ async function finalizeReport(
       })
     }
     await logEvent(ctx.db, user.id, 'route_stale', { stage: 'report' }, { at: ctx.now(), sessionId: session.id })
-    return
+    return false
   }
 
   // Застряла — предлагаем разобрать её на шаги, а не только сказать об этом.
@@ -1473,6 +1501,7 @@ async function finalizeReport(
       skipped: text === null,
     })
   }
+  return true
 }
 
 // После нескольких сессий бот сам замечает рисунок и предлагает технику одной

@@ -274,7 +274,12 @@ async function routeInput(ctx: Ctx, user: User, text: string, via: 'text' | 'voi
     case 'profile':
       return account.onProfileText(ctx, user, text)
     case 'report_text':
-      if (await onPendingReport(ctx, user, text, via)) return
+      const reportRoute = await onPendingReport(ctx, user, text, via)
+      if (reportRoute.kind !== 'new_action') return
+      // Новое действие снимает только ещё актуальное ожидание старого отчёта.
+      const released = await session.releaseReportPending(ctx, user, reportRoute.sessionId)
+      if (!released) return reply(ctx, user, T.stale)
+      user = { ...user, pendingInput: 'none' }
       break
   }
   if (await session.onRunningFreeText(ctx, user, text, contextEventId)) return
@@ -287,12 +292,11 @@ async function routeInput(ctx: Ctx, user: User, text: string, via: 'text' | 'voi
   if (outcome === 'close_day') return day.closeDay(ctx, user, via)
 }
 
-async function onPendingReport(ctx: Ctx, user: User, text: string, via: 'text' | 'voice'): Promise<boolean> {
+async function onPendingReport(ctx: Ctx, user: User, text: string, via: 'text' | 'voice') {
   const meetingAt = day.explicitMeetingAt(text, user, ctx.now())
-  const handled = await session.onReportText(ctx, user, text, { endDay: meetingAt !== null })
-  if (!handled) return false
-  if (meetingAt) await day.closeDay(ctx, user, via, { meetingAt })
-  return true
+  const result = await session.onReportText(ctx, user, text, { endDay: meetingAt !== null })
+  if (result.kind === 'saved' && meetingAt) await day.closeDay(ctx, user, via, { meetingAt })
+  return result
 }
 
 async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string | undefined, messageId: number | undefined): Promise<void> {

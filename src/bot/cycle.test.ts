@@ -341,9 +341,9 @@ describe.skipIf(!hasDb)('полный цикл сессии', () => {
             progress: 'moved',
             next_step: null,
             allocations: [
-              { task: labelFor('Подготовить презентацию'), title: 'Подготовить презентацию', minutes: 15, remainder: false },
-              { task: labelFor('Ответить на письма'), title: 'Ответить на письма', minutes: 5, remainder: false },
-              { task: labelFor('Собрать отчёт'), title: 'Собрать отчёт', minutes: null, remainder: true },
+              { task: labelFor('Подготовить презентацию'), title: 'Подготовить презентацию', minutes: 15, remainder: false, source: '15 минут на презентацию' },
+              { task: labelFor('Ответить на письма'), title: 'Ответить на письма', minutes: 5, remainder: false, source: '5 минут на письма' },
+              { task: labelFor('Собрать отчёт'), title: 'Собрать отчёт', minutes: null, remainder: true, source: 'остальное на отчёт' },
             ],
           }),
           usage: null,
@@ -390,7 +390,7 @@ describe.skipIf(!hasDb)('полный цикл сессии', () => {
           text: JSON.stringify({
             progress: 'moved',
             next_step: null,
-            allocations: [{ task: 't1', title: 'Подготовить презентацию', minutes: 50, remainder: false }],
+            allocations: [{ task: 't1', title: 'Подготовить презентацию', minutes: 50, remainder: false, source: '50 минут на презентацию' }],
           }),
           usage: null,
         }
