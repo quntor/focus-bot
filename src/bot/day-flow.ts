@@ -329,12 +329,13 @@ export async function closeDay(
   ctx: Ctx,
   user: User,
   via: 'button' | 'command' | 'text' | 'voice',
-  options: { meetingAt?: Date } = {},
+  options: { meetingAt?: Date; guard?: (tx: Prisma.TransactionClient) => Promise<boolean> } = {},
 ): Promise<void> {
   const now = ctx.now()
   const day = workDayKey(now, user.timezone)
   const summary = await ctx.db.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'day:' + user.id}))`
+    if (options.guard && !await options.guard(tx)) return null
     const active = await tx.focusSession.findFirst({
       where: { userId: user.id, state: { in: ['collecting_intent', 'running', 'paused'] } },
     })
@@ -373,6 +374,7 @@ export async function closeDay(
     }
     return buildSummary(tx, user, day)
   })
+  if (!summary) return reply(ctx, user, T.stale)
   if (options.meetingAt) {
     const which = workDayKey(options.meetingAt, user.timezone) === day ? 'today' : 'tomorrow'
     await reply(ctx, user, `${T.summary(summary)}\n\n${T.meetingSet(hhmm(options.meetingAt, user.timezone), which)}`)

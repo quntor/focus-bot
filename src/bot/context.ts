@@ -7,7 +7,7 @@ import { log } from '../lib/log.js'
 import { logEvent } from '../analytics/log.js'
 import { cancelPending } from '../outbox/queue.js'
 import { T } from './texts.js'
-import { rememberConversationContext } from './conversation-context.js'
+import { rememberConversationContext, rememberQuestion } from './conversation-context.js'
 
 // Всё, от чего зависит обработка: база, Telegram, модель и часы. Часы — тоже
 // зависимость: источник истины по времени — сервер, а тесты двигают время сами.
@@ -16,6 +16,8 @@ export type Ctx = {
   tg: Telegram
   llm: LlmProvider
   stt: SttProvider
+  semanticRouterEnabled?: boolean
+  isCurrentInput?: () => boolean
   now: () => Date
 }
 
@@ -37,6 +39,12 @@ export async function reply(ctx: Ctx, user: Pick<User, 'id' | 'tgId'>, text: str
     const replyKeyboard = keyboard ? undefined : await sessionKeyboard(ctx, user.id)
     await ctx.tg.send(user.tgId, text, keyboard, replyKeyboard)
     rememberConversationContext(user.id, 'assistant', text, ctx.now())
+    if (ctx.semanticRouterEnabled) {
+      const fresh = await ctx.db.user.findUnique({ where: { id: user.id }, select: { pendingInput: true } })
+      const actions = keyboard?.flat().map((button) => button.data.split(':')[0]) ?? []
+      const type = actions.includes('again') ? 'continue' : actions.includes('out') ? 'outcome' : actions.includes('len') ? 'intent_length' : actions.includes('sroute') ? 'route_choice' : fresh?.pendingInput.split(':')[0]
+      if (fresh && type && (fresh.pendingInput !== 'none' || keyboard)) rememberQuestion(user.id, fresh.pendingInput, ctx.now(), type)
+    }
   } catch (error) {
     if (error instanceof TelegramError && error.code === 403) {
       await markBlocked(ctx, user.id)

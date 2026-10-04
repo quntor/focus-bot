@@ -1,3 +1,5 @@
+import { beginInput, withUserInputLock } from '../bot/input-lock.js'
+import { routeSemanticInput, onSemanticChoice, onRestoreReport, invalidateSemanticChoices } from '../bot/semantic-routing.js'
 import { z } from 'zod'
 import type { User } from '@prisma/client'
 import { logEvent } from '../analytics/log.js'
@@ -102,6 +104,7 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
   if (chatType !== undefined && chatType !== 'private') return
 
   const tgId = BigInt(sender.id)
+  if (ctx.semanticRouterEnabled) ctx = { ...ctx, isCurrentInput: beginInput(String(tgId)) }
   const count = await countInWindow(ctx, tgId)
   if (count > RATE_LIMIT_PER_MINUTE) {
     // Молчание выглядит как сломанный бот. Но отвечать на каждое сообщение
@@ -116,44 +119,58 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
   // Инструкция доступна даже до /start и не должна сбрасывать ожидаемый ввод:
   // это справка, а не новое действие внутри пользовательского сценария.
   if (command?.command === 'guide') {
+    const guideUser = await ctx.db.user.findUnique({ where: { tgId }, select: { id: true } })
+    if (guideUser) invalidateSemanticChoices(guideUser.id)
     await ctx.db.user.updateMany({ where: { tgId, blockedAt: { not: null } }, data: { blockedAt: null } })
     await ctx.tg.send(tgId, T.guide)
     return
   }
-  const { user, created } = await loadUser(ctx, tgId, command?.command === 'start' ? command.args : null)
+  let { user, created } = await loadUser(ctx, tgId, command?.command === 'start' ? command.args : null)
   const callback = cq ? parseCallback(cq.data) : null
-  const contextEventId = msg?.text
+  if (callback?.action !== 'sroute') invalidateSemanticChoices(user.id)
+  const contextEventId = msg?.voice ? rememberConversationContext(user.id, 'user', '[voice]', ctx.now()) : msg?.text
     ? rememberConversationContext(user.id, 'user', msg.text, ctx.now())
     : callback
       ? rememberConversationContext(user.id, 'button', `${callback.action}${callback.arg ? `:${callback.arg}` : ''}`, ctx.now())
       : null
 
-  try {
-    if (cq) await onCallback(ctx, user, cq.id, cq.data, cq.message?.message_id)
-    else if (command) await onCommand(ctx, user, command.command, command.args, created)
-    else if (msg?.voice) {
-      if (created) await account.beginOnboarding(ctx, user)
-      else {
-        const text = await tasks.transcribeVoice(ctx, user, msg.voice)
-        if (!text) return
-        const voiceContextEventId = rememberConversationContext(user.id, 'user', text, ctx.now())
-        await routeInput(ctx, user, text, 'voice', voiceContextEventId)
+  const run = async () => {
+    if (ctx.isCurrentInput && !ctx.isCurrentInput()) return
+    if (ctx.semanticRouterEnabled) {
+      const fresh = await ctx.db.user.findUnique({ where: { id: user.id } })
+      if (!fresh || (ctx.isCurrentInput && !ctx.isCurrentInput())) return
+      user = fresh
+    }
+    try {
+      if (cq) await onCallback(ctx, user, cq.id, cq.data, cq.message?.message_id)
+      else if (command) await onCommand(ctx, user, command.command, command.args, created)
+      else if (msg?.voice) {
+        if (created) await account.beginOnboarding(ctx, user)
+        else {
+          const text = await tasks.transcribeVoice(ctx, user, msg.voice)
+          if (!text) return
+          const voiceContextEventId = rememberConversationContext(user.id, 'user', text, ctx.now())
+          await routeInput(ctx, user, text, 'voice', voiceContextEventId)
+        }
       }
+      else if (msg?.text) await onText(ctx, user, msg.text, created, contextEventId)
+      // Фото, стикер, кружок, файл: разобрать не можем, но и молчать нельзя.
+      else if (msg) {
+        if (created) await account.beginOnboarding(ctx, user)
+        else await reply(ctx, user, T.unsupported)
+      }
+    } catch (error) {
+      // Наружу — общая фраза, подробности — во внутренний лог без текста.
+      log.error('handle_failed', error)
+      await reply(ctx, user, T.error)
     }
-    else if (msg?.text) await onText(ctx, user, msg.text, created, contextEventId)
-    // Фото, стикер, кружок, файл: разобрать не можем, но и молчать нельзя.
-    else if (msg) {
-      if (created) await account.beginOnboarding(ctx, user)
-      else await reply(ctx, user, T.unsupported)
-    }
-  } catch (error) {
-    // Наружу — общая фраза, подробности — во внутренний лог без текста.
-    log.error('handle_failed', error)
-    await reply(ctx, user, T.error)
   }
+  if (ctx.semanticRouterEnabled) await withUserInputLock(user.id, run)
+  else await run()
 }
 
 async function onCommand(ctx: Ctx, user: User, command: string, args: string, created: boolean): Promise<void> {
+  invalidateSemanticChoices(user.id)
   const now = ctx.now()
   if (!(command === 'start' && ONBOARDING_INPUTS.includes(user.pendingInput))) user = await releasePending(ctx, user)
   if (command === 'start') {
@@ -195,7 +212,7 @@ async function onCommand(ctx: Ctx, user: User, command: string, args: string, cr
 async function onText(ctx: Ctx, user: User, text: string, created: boolean, contextEventId: number | null): Promise<void> {
   if (created) return account.beginOnboarding(ctx, user)
   const button = KEYBOARD_ACTIONS[text]
-  if (button) return button(ctx, await releasePending(ctx, user))
+  if (button) { invalidateSemanticChoices(user.id); return button(ctx, await releasePending(ctx, user)) }
   await routeInput(ctx, user, text, 'text', contextEventId)
 }
 
@@ -237,8 +254,49 @@ export async function releasePending(ctx: Ctx, user: User): Promise<User> {
   return { ...user, pendingInput: 'none' }
 }
 
-// Одна маршрутизация для текста и голоса: что бот ждёт, туда и ответ.
+// Commands/buttons are deterministic; free text/voice goes through the same router.
 async function routeInput(ctx: Ctx, user: User, text: string, via: 'text' | 'voice', contextEventId: number | null): Promise<void> {
+  return routeSemanticInput(ctx, user, text, via, contextEventId, routeLegacyInput, routePendingInput)
+}
+async function routePendingInput(ctx: Ctx, user: User, text: string, via: 'text' | 'voice', contextEventId: number | null): Promise<void> {
+  const pending = user.pendingInput
+  const runningTaskChoice = /^running_task_choice:([0-9a-f-]{36}):([0-9a-f]{8})$/.exec(pending)
+  if (runningTaskChoice?.[1]) {
+    return session.onRunningTaskChoiceText(ctx, user, runningTaskChoice[1], text, {
+      existing: () => tasks.showTaskPicker(ctx, user, T.tasksPick),
+    })
+  }
+  const runningEdit = /^running_(work|duration):([0-9a-f-]{36})$/.exec(pending)
+  if (runningEdit?.[1] === 'work' && runningEdit[2]) return session.onRunningWorkText(ctx, user, runningEdit[2], text)
+  if (runningEdit?.[1] === 'duration' && runningEdit[2]) return session.onRunningDurationText(ctx, user, runningEdit[2], text)
+  const taskEdit = /^task_edit:([0-9a-f-]{36})$/.exec(pending)
+  if (taskEdit?.[1]) return tasks.onTaskEditText(ctx, user, taskEdit[1], text)
+  const taskSplit = TASK_SPLIT.exec(pending)
+  if (taskSplit?.[1]) return tasks.onTaskBreakdownAnswer(ctx, user, taskSplit[1], text, via, contextEventId)
+  switch (pending) {
+    case 'task_add':
+      return tasks.onTaskAddText(ctx, user, text, via)
+    case 'timezone':
+    case 'settings_timezone':
+      return account.onTimezoneText(ctx, user, text)
+    case 'start_time':
+      return account.onStartTimeText(ctx, user, text)
+    case 'ritual':
+    case 'profile_ritual':
+      return account.onRitualText(ctx, user, text)
+    case 'meeting_time':
+    case 'meeting_time_soft':
+      if (await day.onMeetingTimeText(ctx, user, text, { soft: pending === 'meeting_time_soft' })) return
+      return reply(ctx, user, T.stale)
+    case 'morning_time':
+      return account.onMorningText(ctx, user, text)
+    case 'profile':
+      return account.onProfileText(ctx, user, text)
+  }
+  return reply(ctx, user, T.stale)
+}
+
+async function routeLegacyInput(ctx: Ctx, user: User, text: string, via: 'text' | 'voice', contextEventId: number | null): Promise<void> {
   const pending = user.pendingInput
   const runningTaskChoice = /^running_task_choice:([0-9a-f-]{36}):([0-9a-f]{8})$/.exec(pending)
   if (runningTaskChoice?.[1]) {
@@ -308,6 +366,10 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
   const parsed = parseCallback(data)
   if (!parsed) return reply(ctx, user, T.stale)
   const { action, id, arg } = parsed
+
+  if (action === 'sroute' && id && arg) return onSemanticChoice(ctx, user, id, arg, routeLegacyInput)
+  invalidateSemanticChoices(user.id)
+  if (action === 'report') return id && !arg ? onRestoreReport(ctx, user, id) : reply(ctx, user, T.stale)
 
   if (action === 'del' && arg === 'confirm') return account.onDeleteConfirm(ctx, user)
   // Старая кнопка согласия продолжает только незаконченное знакомство: у

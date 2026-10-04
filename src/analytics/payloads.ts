@@ -20,7 +20,7 @@ export const TECHNIQUES = ['auto', 'pomodoro', 'medium', 'long', 'free'] as cons
 export const REST_CHOICES = ['rest', 'continue', 'later', 'day_end'] as const
 export const SCOPES = ['step', 'multi_session'] as const
 export const POINT_REASONS = ['session_completed', 'daily_goal', 'comeback'] as const
-export const LLM_STAGES = ['intent', 'report', 'tasks', 'session_help', 'breakdown'] as const
+export const LLM_STAGES = ['semantic_router', 'intent', 'report', 'tasks', 'session_help', 'breakdown'] as const
 export const LLM_FALLBACK_REASONS = ['disabled', 'budget', 'error', 'timeout', 'invalid'] as const
 export const OUTBOX_KINDS = ['ping', 'session_end', 'rest_over', 'break_over', 'meeting', 'summary'] as const
 export const SETTINGS_KEYS = [
@@ -46,6 +46,11 @@ export const PAYLOADS = {
     from_period_start: z.boolean().optional(),
   }),
   voice_transcribed: z.strictObject({ duration_seconds: z.int().min(0).max(180), length_chars: z.int().min(0) }),
+  semantic_routed: z.strictObject({
+    route: z.enum(['report', 'new_task', 'continue_same', 'session_help', 'capture', 'answer_pending', 'close_day', 'unclear']),
+    pending: z.enum(['none', 'report_text', 'session_end', 'running_work', 'running_duration', 'running_task_choice', 'task_add', 'task_edit', 'task_split', 'task_split_manual', 'timezone', 'settings_timezone', 'start_time', 'ritual', 'profile_ritual', 'meeting_time', 'meeting_time_soft', 'morning_time', 'profile', 'other']),
+    intercepted: z.boolean(),
+  }),
   tasks_parsed: z.strictObject({
     kind: z.enum(['session_intent', 'feedback', 'capture', 'start_task', 'complete_task', 'complete_and_start', 'complete_and_close_day', 'close_day']),
     count: z.int().min(0).max(10),
@@ -57,7 +62,7 @@ export const PAYLOADS = {
   }),
   route_confirmed: z.strictObject({ kind: z.literal('continue'), choice: z.enum(['same_task', 'clarify_step', 'change_task']) }),
   route_rejected: z.strictObject({ kind: z.literal('continue'), choice: z.enum(['rest', 'later', 'day_end']) }),
-  route_stale: z.strictObject({ stage: z.enum(['tasks', 'intent', 'report']) }),
+  route_stale: z.strictObject({ stage: z.enum(['tasks', 'intent', 'report', 'semantic_router']) }),
   task_selected: z.strictObject({ task_id: id, from_period_start: z.boolean().optional() }),
   task_completed: z.strictObject({ task_id: id, source: z.enum(['text', 'voice', 'button']) }),
   task_switched: z.strictObject({ from_task_id: id, to_task_id: id, source: z.enum(['text', 'voice']) }),

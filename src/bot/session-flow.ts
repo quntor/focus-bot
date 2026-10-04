@@ -3,9 +3,9 @@ import { Prisma, type FocusSession, type User } from '@prisma/client'
 import { logEvent } from '../analytics/log.js'
 import { workDayKey } from '../lib/day.js'
 import { nextLocalTime, parseClock } from '../lib/time.js'
-import { parseIntent } from '../llm/intent.js'
-import { explicitNewWork, parseReport } from '../llm/report.js'
-import { parseSessionHelp, type SessionHelpAction } from '../llm/session-help.js'
+import { parseIntent, type IntentResult } from '../llm/intent.js'
+import { explicitNewWork, parseReport, type ReportResult } from '../llm/report.js'
+import { parseSessionHelp, type SessionHelpAction, type SessionHelpResult } from '../llm/session-help.js'
 import { llmMeter } from '../analytics/calls.js'
 import { cancelPending, enqueue } from '../outbox/queue.js'
 import { creditCountedSession, type Credit } from '../retention/credit.js'
@@ -291,6 +291,7 @@ export async function onRunningFreeText(
   user: User,
   text: string,
   contextEventId: number | null = null,
+  prepared?: SessionHelpResult,
 ): Promise<boolean> {
   const session = await activeSession(ctx, user.id)
   if (!session || session.state !== 'running') return false
@@ -302,7 +303,7 @@ export async function onRunningFreeText(
     take: 20,
     select: { title: true },
   })
-  const parsed = await parseSessionHelp(
+  const parsed = prepared ? { result: prepared, failure: null } : await parseSessionHelp(
     ctx.llm,
     {
       text,
@@ -316,6 +317,10 @@ export async function onRunningFreeText(
     },
     llmMeter(ctx, user.id, 'session_help', session.id),
   )
+  if (prepared && phase === 'deadline_passed' && prepared.kind === 'finished_early') {
+    await onDone(ctx, user)
+    return true
+  }
   if (parsed.result.kind === 'other') return false
 
   const [current, freshUser] = await Promise.all([
@@ -615,7 +620,7 @@ export async function startTaskSession(ctx: Ctx, user: User, taskId: string): Pr
 
 // Свободный текст вне сессии — это ответ на «с чего начнёшь». Отдельной команды
 // для старта не нужно: /focus существует для тех, кто привык к командам.
-export async function onIntentText(ctx: Ctx, user: User, text: string): Promise<void> {
+export async function onIntentText(ctx: Ctx, user: User, text: string, prepared?: IntentResult): Promise<void> {
   const session = await openCollecting(ctx, user.id)
   if (session.state === 'running') {
     await reply(ctx, user, T.alreadyRunning(endText(ctx, user, session)))
@@ -627,7 +632,7 @@ export async function onIntentText(ctx: Ctx, user: User, text: string): Promise<
   }
   // Предложение длины уже показано — новый текст уточняет намерение, а не
   // начинает второе. Одно намерение за раз.
-  await handleIntent(ctx, user, session, text.trim().slice(0, INTENT_MAX))
+  await handleIntent(ctx, user, session, text.trim().slice(0, INTENT_MAX), prepared)
 }
 
 // Свободная техника длины не имеет: «Короче/Длиннее» ей не к чему.
@@ -667,7 +672,7 @@ function intentDisplayTitle(text: string, parsedTitle: string, task: { title: st
   return parsedTitle.replace(/\s+/g, ' ').trim().slice(0, 80)
 }
 
-async function handleIntent(ctx: Ctx, user: User, session: FocusSession, text: string): Promise<void> {
+async function handleIntent(ctx: Ctx, user: User, session: FocusSession, text: string, prepared?: IntentResult): Promise<void> {
   const now = ctx.now()
   const technique: Technique = isTechnique(user.technique) ? user.technique : 'auto'
   const named = parseNamedMinutes(text)
@@ -689,7 +694,7 @@ async function handleIntent(ctx: Ctx, user: User, session: FocusSession, text: s
       take: 20,
       select: { id: true, title: true },
     })
-    const parsed = await parseIntent(ctx.llm, { text, tasks, profile: user.profileText }, llmMeter(ctx, user.id, 'intent', session.id))
+    const parsed = prepared ? { result: prepared, failure: null } : await parseIntent(ctx.llm, { text, tasks, profile: user.profileText }, llmMeter(ctx, user.id, 'intent', session.id))
     const pinned = session.taskId ? tasks.find((task) => task.id === session.taskId) ?? null : null
     const exact = tasks.find((task) => normalizeWorkTitle(task.title) === normalizeWorkTitle(text)) ?? null
     const proposed = parsed.result.taskId ? tasks.find((task) => task.id === parsed.result.taskId) ?? null : null
@@ -1242,7 +1247,7 @@ function creditLines(credit: Credit | null): string[] {
 
 // Отчёт — пара слов после исхода. Привязывается к последней закрытой сессии
 // этого же пользователя, у которой отчёта ещё нет.
-function pendingReportSession(db: Ctx['db'] | Prisma.TransactionClient, userId: string, now: Date, includeId?: string) {
+export function pendingReportSession(db: Ctx['db'] | Prisma.TransactionClient, userId: string, now: Date, includeId?: string) {
   return db.focusSession.findFirst({
     where: { userId, state: 'finished', AND: [{ OR: [{ reportText: null }, ...(includeId ? [{ id: includeId }] : [])] }], OR: [{ restChoice: null }, { restChoice: 'rest' }], finishedAt: { gte: new Date(now.getTime() - REPORT_WINDOW_MS) } },
     orderBy: { finishedAt: 'desc' },
@@ -1265,18 +1270,19 @@ export async function onReportText(
   ctx: Ctx,
   user: User,
   text: string,
-  options: { endDay?: boolean } = {},
+  options: { endDay?: boolean; confirmedReport?: boolean; semantic?: { result: ReportResult; tasks: { id: string; title: string; label: string }[] }; suppressContinuation?: boolean } = {},
 ): Promise<{ kind: 'saved' | 'handled' | 'new_action'; sessionId: string | null }> {
   const session = await pendingReportSession(ctx.db, user.id, ctx.now())
   if (!session) return { kind: 'new_action', sessionId: null }
-  if (explicitNewWork(text)) return { kind: 'new_action', sessionId: session.id }
+  if (!options.semantic && !options.confirmedReport && explicitNewWork(text)) return { kind: 'new_action', sessionId: session.id }
   const report = text.trim().slice(0, REPORT_MAX)
-  const prepared = await prepareReport(ctx, user, session, report)
+  const prepared = options.semantic ? { labelledTasks: options.semantic.tasks, parsed: { result: options.semantic.result, failure: null } } : await prepareReport(ctx, user, session, report)
   const fresh = await ctx.db.user.findUniqueOrThrow({ where: { id: user.id } })
-  if (fresh.pendingInput !== 'report_text' || await activeSession(ctx, user.id) || (await pendingReportSession(ctx.db, user.id, ctx.now()))?.id !== session.id) {
+  if ((ctx.isCurrentInput && !ctx.isCurrentInput()) || fresh.pendingInput !== 'report_text' || await activeSession(ctx, user.id) || (await pendingReportSession(ctx.db, user.id, ctx.now()))?.id !== session.id) {
     await reply(ctx, user, T.stale)
     return { kind: 'handled', sessionId: session.id }
   }
+  if (options.confirmedReport) prepared.parsed.result.route = 'report'
   if (prepared.parsed.result.route === 'new_action') return { kind: 'new_action', sessionId: session.id }
   if (prepared.parsed.result.route === 'unclear') {
     await reply(ctx, user, 'Это про результат прошлой сессии или хочешь начать новую работу? Отчёт необязателен — можно просто назвать, что начинаешь.')
@@ -1332,12 +1338,12 @@ async function finalizeReport(
   user: User,
   session: FocusSession,
   text: string | null,
-  options: { endDay?: boolean; prepared?: Awaited<ReturnType<typeof prepareReport>> } = {},
+  options: { endDay?: boolean; suppressContinuation?: boolean; prepared?: Awaited<ReturnType<typeof prepareReport>> } = {},
 ): Promise<boolean> {
   const now = ctx.now()
   if (text !== null) {
     const saved = await ctx.db.$transaction(async (tx) => {
-      if ((await pendingReportSession(tx, user.id, now))?.id !== session.id) return false
+      if ((await pendingReportSession(tx, user.id, now))?.id !== session.id || (ctx.isCurrentInput && !ctx.isCurrentInput())) return false
       const res = await tx.focusSession.updateMany({
         where: { id: session.id, userId: user.id, state: 'finished', reportText: null, progress: null },
         data: { reportText: text },
@@ -1345,6 +1351,7 @@ async function finalizeReport(
       if (res.count !== 1) return false
       const released = await tx.user.updateMany({ where: { id: user.id, pendingInput: 'report_text' }, data: { pendingInput: 'none' } })
       if (released.count !== 1 || (await pendingReportSession(tx, user.id, now, session.id))?.id !== session.id || await tx.focusSession.findFirst({ where: { userId: user.id, state: { in: [...ACTIVE_STATES] } } })) throw new StaleTransition()
+      if (ctx.isCurrentInput && !ctx.isCurrentInput()) throw new StaleTransition()
       await logEvent(tx, user.id, 'report_submitted', { session_id: session.id, length_chars: text.length }, { at: now, sessionId: session.id })
       return true
     }).catch((error: unknown) => {
@@ -1356,7 +1363,7 @@ async function finalizeReport(
 
   const { labelledTasks, parsed } = options.prepared ?? await prepareReport(ctx, user, session, text)
   const failure = parsed.failure && !parsed.failure.ok ? parsed.failure.reason : null
-  const continuationRelevant = session.restChoice === null && !options.endDay && parsed.result.continueNow && (await activeSession(ctx, user.id)) === null
+  const continuationRelevant = session.restChoice === null && !options.endDay && !options.suppressContinuation && parsed.result.continueNow && (await activeSession(ctx, user.id)) === null
   const continuationMinutes = continuationRelevant ? parsed.result.continueMinutes : null
   let stuckTask: { id: string; title: string } | null = null
   let allocatedMinutes: number | null = null

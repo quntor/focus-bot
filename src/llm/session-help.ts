@@ -12,7 +12,7 @@ export type SessionHelpResult =
   | { kind: 'other'; reply: null; action: null; taskTitle: null; llmUsed: boolean }
 
 const shortReply = z.string().min(1).max(160)
-const answer = z.discriminatedUnion('kind', [
+export const sessionHelpAnswer = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('distracted'), reply: shortReply, action: z.enum(['continue', 'change_step']), task_title: z.null().default(null) }),
   z.strictObject({ kind: z.literal('stuck'), reply: shortReply, action: z.enum(['change_step', 'continue']), task_title: z.null().default(null) }),
   z.strictObject({ kind: z.literal('finished_early'), reply: shortReply, action: z.literal('finish'), task_title: z.null().default(null) }),
@@ -174,10 +174,10 @@ export async function parseSessionHelp(
     recent_context: (input.recentContext ?? []).slice(-4).map((item) => ({ role: item.role, text: item.text.slice(0, 300) })),
   })
   const deadline = Date.now() + TIMEOUT_MS
-  let out = await runLlm(provider, { system: SYSTEM, input: payload, maxTokens: 180, timeoutMs: TIMEOUT_MS }, answer, meter)
+  let out = await runLlm(provider, { system: SYSTEM, input: payload, maxTokens: 180, timeoutMs: TIMEOUT_MS }, sessionHelpAnswer, meter)
   const retryBudget = deadline - Date.now()
   if (!out.ok && out.reason === 'invalid' && retryBudget >= MIN_RETRY_BUDGET_MS) {
-    out = await runLlm(provider, { system: RETRY_SYSTEM, input: payload, maxTokens: 180, timeoutMs: retryBudget }, answer, meter)
+    out = await runLlm(provider, { system: RETRY_SYSTEM, input: payload, maxTokens: 180, timeoutMs: retryBudget }, sessionHelpAnswer, meter)
   }
   if (!out.ok) return { result: fallback, failure: out }
   const value = out.value

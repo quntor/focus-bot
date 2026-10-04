@@ -5,7 +5,7 @@ import { logEvent } from './log.js'
 
 // Касания, в которых решение вызывает модель. Закрытый список: имя уходит в
 // выгрузку организаторам, и произвольной строки там быть не должно.
-export const CALL_NAMES = ['intent', 'report', 'tasks', 'task_match', 'session_help', 'task_breakdown', 'voice_transcription'] as const
+export const CALL_NAMES = ['semantic_router', 'intent', 'report', 'tasks', 'task_match', 'session_help', 'task_breakdown', 'voice_transcription'] as const
 export type CallName = (typeof CALL_NAMES)[number]
 
 // Дневной лимит вызовов модели (и распознавания голоса) на пользователя, за

@@ -1,4 +1,4 @@
-import type { User } from '@prisma/client'
+import type { Prisma, User } from '@prisma/client'
 import { llmMeter } from '../analytics/calls.js'
 import { logEvent } from '../analytics/log.js'
 import { workDayKey } from '../lib/day.js'
@@ -447,9 +447,19 @@ export async function onTaskBreakdownAnswer(
 
 // created — задача новая; false — такая уже была в активных. Шаги разбора
 // передают parentId исходной задачи.
-async function captureTasks(ctx: Ctx, user: User, titles: string[], source: TaskInputSource, opts: { parentId?: string } = {}) {
+export async function onCapturedTasks(ctx: Ctx, user: User, titles: string[], source: TaskInputSource, guard?: (tx: Prisma.TransactionClient) => Promise<boolean>): Promise<void> {
+  let saved
+  try { saved = await captureTasks(ctx, user, titles, source, { guard }) }
+  catch (error) { if (error instanceof StaleTransition) return reply(ctx, user, T.stale); throw error }
+  if (!saved.length) return reply(ctx, user, T.tasksParseFailed)
+  if (saved.length === 1) return onTaskOpened(ctx, user, saved[0]!.id, 0, saved[0]!.created ? T.taskAdded(saved[0]!.title) : T.taskExists(saved[0]!.title))
+  await showTasks(ctx, user, 0, T.tasksCaptured(saved.map((task) => task.title)))
+}
+
+async function captureTasks(ctx: Ctx, user: User, titles: string[], source: TaskInputSource, opts: { parentId?: string; guard?: (tx: Prisma.TransactionClient) => Promise<boolean> } = {}) {
   return ctx.db.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
+    if (opts.guard && !await opts.guard(tx)) throw new StaleTransition()
     const selected: { id: string; title: string; created: boolean }[] = []
     // Порядок списка — порядок в сообщении: createdAt с шагом в миллисекунду,
     // иначе при равном времени порядок решал бы случайный id.

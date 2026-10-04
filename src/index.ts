@@ -27,6 +27,7 @@ const ctx: Ctx = {
   tg: telegram,
   llm,
   stt,
+  semanticRouterEnabled: cfg.SEMANTIC_ROUTER_ENABLED,
   now: () => new Date(),
 }
 

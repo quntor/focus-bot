@@ -24,7 +24,7 @@ export type ReportResult = {
   llmUsed: boolean
 }
 
-const answer = z.strictObject({
+export const reportAnswer = z.strictObject({
   route: z.enum(['report', 'new_action', 'unclear']).optional().default('report'),
   progress: z.enum(['moved', 'stuck']).nullable(),
   next_step: z.string().min(1).max(120).nullable(),
@@ -74,28 +74,25 @@ export async function parseReport(
 ): Promise<{ result: ReportResult; failure: LlmOutcome<never> | null }> {
   if (!input.report) return { result: fallbackReport(input.outcome), failure: null }
   const payload = JSON.stringify({ intent: input.intent, outcome: input.outcome, report: input.report, tasks: input.tasks ?? [] })
-  const out = await runLlm(provider, { system: SYSTEM, input: payload, maxTokens: 800, timeoutMs: 8_000 }, answer, meter)
+  const out = await runLlm(provider, { system: SYSTEM, input: payload, maxTokens: 800, timeoutMs: 8_000 }, reportAnswer, meter)
   if (!out.ok) return { result: fallbackReport(input.outcome), failure: out }
-  const grounded = out.value.allocations.every((allocation) => allocationGrounded(input.report!, allocation, input.tasks ?? []))
-  const isReport = out.value.route === 'report'
+  return { result: decodeReportAnswer(out.value, input.report, input.tasks ?? []), failure: null }
+}
+
+export function decodeReportAnswer(value: z.infer<typeof reportAnswer>, report: string, tasks: { label: string; title: string }[]): ReportResult {
+  const grounded = value.allocations.every((allocation) => allocationGrounded(report, allocation, tasks))
+  const isReport = value.route === 'report'
   return {
-    result: {
-      route: out.value.route,
-      progress: isReport ? out.value.progress : null,
-      nextStep: isReport ? out.value.next_step : null,
-      continueNow: isReport && out.value.continue_now,
-      continueMinutes: isReport && out.value.continue_now ? out.value.continue_minutes : null,
-      allocations: (isReport && grounded ? out.value.allocations : []).map((allocation) => ({
-        taskLabel: allocation.task,
-        title: allocation.title,
-        minutes: allocation.minutes,
-        remainder: allocation.remainder,
-      })),
-      llmUsed: true,
-    },
-    failure: null,
+    route: value.route, progress: isReport ? value.progress : null,
+    nextStep: isReport ? value.next_step : null,
+    continueNow: isReport && value.continue_now,
+    continueMinutes: isReport && value.continue_now ? value.continue_minutes : null,
+    allocations: (isReport && grounded ? value.allocations : []).map((allocation) => ({
+      taskLabel: allocation.task, title: allocation.title, minutes: allocation.minutes, remainder: allocation.remainder,
+    })), llmUsed: true,
   }
 }
+
 
 
 // Узкий fallback явного нового старта, независимый от доступности/ответа LLM.
@@ -104,7 +101,7 @@ export function explicitNewWork(text: string): boolean {
   return /^(?:я\s+)?(?:начинаю|приступаю|берусь|запусти|начни|давай\s+начн[её]м)(?![а-яё])/iu.test(text.trim())
 }
 
-function allocationGrounded(report: string, allocation: z.infer<typeof answer>['allocations'][number], tasks: { label: string; title: string }[]): boolean {
+function allocationGrounded(report: string, allocation: z.infer<typeof reportAnswer>['allocations'][number], tasks: { label: string; title: string }[]): boolean {
   const source = allocation.source
   if (!source || !report.includes(source)) return false
   const title = allocation.task ? tasks.find((task) => task.label === allocation.task)?.title : allocation.title

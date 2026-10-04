@@ -47,11 +47,12 @@ export function fakeTelegram(): Telegram & {
 // processed_updates не должен отбрасывать апдейты второго бота как дубли первого.
 let updateId = 1
 
-export function makeBot(opts: { now?: Date; llm?: LlmProvider; stt?: SttProvider } = {}) {
+export function makeBot(opts: { now?: Date; llm?: LlmProvider; stt?: SttProvider; semanticRouterEnabled?: boolean } = {}) {
   let now = opts.now ?? new Date('2026-09-22T07:00:00Z')
   const tg = fakeTelegram()
   const ctx: Ctx = {
     db: prisma,
+    semanticRouterEnabled: opts.semanticRouterEnabled ?? false,
     tg,
     llm: opts.llm ?? disabledProvider,
     stt: opts.stt ?? disabledSttProvider,

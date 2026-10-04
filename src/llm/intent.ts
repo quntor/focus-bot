@@ -17,7 +17,7 @@ export type IntentResult = {
   llmUsed: boolean
 }
 
-const answer = z.strictObject({
+export const intentAnswer = z.strictObject({
   task: z.string().regex(/^t\d{1,2}$/).nullable(),
   title: z.string().min(1).max(80),
   scope: z.enum(['step', 'multi_session']),
@@ -54,7 +54,7 @@ export async function parseIntent(
     tasks: [...labels].map(([label, t]) => ({ label, title: t.title })),
     profile: input.profile,
   })
-  const out = await runLlm(provider, { system: SYSTEM, input: payload, maxTokens: 200, timeoutMs: 8_000 }, answer, meter)
+  const out = await runLlm(provider, { system: SYSTEM, input: payload, maxTokens: 200, timeoutMs: 8_000 }, intentAnswer, meter)
   if (!out.ok) return { result: fallbackIntent(input.text, input.tasks), failure: out }
 
   let taskId: string | null = null

@@ -28,6 +28,7 @@ const schema = z
     LLM_API_KEY: optionalString,
     LLM_BASE_URL: optionalHttpsUrl,
     LLM_MODEL: optionalString,
+    SEMANTIC_ROUTER_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
     // STT использует те же ключ и base URL, но включается отдельно: голос не
     // должен неожиданно стать платным только из-за включённой текстовой модели.
     STT_MODEL: optionalString,

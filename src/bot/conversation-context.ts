@@ -10,6 +10,29 @@ const MAX_USERS = 10_000
 
 const windows = new Map<string, StoredItem[]>()
 let nextId = 1
+const questions = new Map<string, { pending: string; type: string; pendingAt: number }>()
+
+export function rememberQuestion(userId: string, pending: string, at: Date, type: string): void {
+  if (questions.size >= MAX_USERS && !questions.has(userId)) questions.delete(questions.keys().next().value!)
+  const prior = questions.get(userId)
+  const pendingAt = prior?.pending === pending && at.getTime() - prior.pendingAt <= TTL_MS ? prior.pendingAt : at.getTime()
+  questions.set(userId, { pending, type, pendingAt })
+}
+
+export function questionContext(userId: string, pending: string, at: Date) {
+  const q = questions.get(userId)
+  const matching = q && q.pending === pending && at.getTime() - q.pendingAt <= TTL_MS
+  return {
+    type: matching ? q.type : pending === 'none' ? null : pending.split(':')[0]!,
+    // This is the age of a process-observed matching pending question, never
+    // an invented DB creation timestamp. No pending (or restart) => unknown.
+    ageSeconds: matching && pending !== 'none' ? Math.max(0, Math.floor((at.getTime() - q.pendingAt) / 1000)) : null,
+  }
+}
+
+export function latestInputId(userId: string, at: Date): number | null {
+  return fresh(windows.get(userId) ?? [], at.getTime()).findLast((item) => item.role !== 'assistant')?.id ?? null
+}
 
 const normalizedText = (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, MAX_TEXT_CHARS)
 
@@ -67,9 +90,11 @@ export function recentConversationContext(
 
 export function resetConversationContext(userId: string): void {
   windows.delete(userId)
+  questions.delete(userId)
 }
 
 // Только для изоляции unit-тестов; production-код очищает окно по userId.
 export function clearConversationContext(): void {
   windows.clear()
+  questions.clear()
 }

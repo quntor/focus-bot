@@ -127,3 +127,11 @@ docs            схема событий и метрики, развёртыв�
 
 Все права защищены. Код открыт для чтения, разрешения на использование,
 копирование или распространение не даётся.
+
+## SBER500-20: optional semantic routing
+
+`SEMANTIC_ROUTER_ENABLED=false` (default) keeps legacy routing unchanged. With an enabled LLM and this flag `true`, free text and transcribed voice go through one bounded semantic routing call before pending input. Commands, buttons and strictly formatted answers bypass it. Provider/schema/timeout errors fall back to legacy. No migrations required.
+
+Rollback: set `SEMANTIC_ROUTER_ENABLED=false` and restart/recreate the application with the updated environment; keep database and existing LLM configuration. Old semantic proposal buttons become inactive. This task does not authorize release or deployment.
+
+Before activation: perform team Telegram checks from `docs/tasks/SBER500-20.md`, measure real added p95 latency (target ≤2.5s), and obtain the requested pre-push review. Unit/provider mocks do not establish live latency or Telegram behavior.
