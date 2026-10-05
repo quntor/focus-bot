@@ -104,7 +104,7 @@ export const T = {
       `Активные задачи${pages > 1 ? ` — страница ${page + 1} из ${pages}` : ''}:`,
       ...tasks.map((task, i) => `${page * 6 + i + 1}. ${task}`),
       '',
-      'Нажми на задачу, чтобы выбрать действие.',
+      'Напиши номер или нажми на задачу, чтобы выбрать действие.',
     ].filter(Boolean).join('\n'),
   tasksStartList: (tasks: string[], page: number, pages: number, prefix: string) => {
     const intro = prefix.replace(/\s*С чего начнёшь\?$/, '')

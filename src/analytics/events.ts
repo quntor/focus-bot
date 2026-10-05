@@ -3,6 +3,7 @@
 // развилку в одном месте важнее, чем удобство записи в вызывающем коде.
 // Схема полезной нагрузки каждого типа — в payloads.ts, рядом.
 export const EVENT_TYPES = [
+  'task_number_prompt',
   'bot_started',
   'consent_given',
   'timezone_set',
@@ -126,6 +127,7 @@ export const USER_ACTIONS = [
 // Истечение времени (session_expired, session_abandoned по таймауту,
 // meeting_defaulted) — тоже «мы»: человек в этот момент ничего не делал.
 export const BOT_EVENTS = [
+  'task_number_prompt',
   'session_auto_finished',
   'intent_parsed',
   'task_breakdown_vague',

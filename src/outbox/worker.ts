@@ -9,6 +9,7 @@ import { rememberConversationContext } from '../bot/conversation-context.js'
 import { buildSummary, declineKeyboard, DECLINES_BEFORE_ASK, ensureNextMeeting, reminderKeyboard } from '../bot/day-flow.js'
 import { autoFinish, deadlineKeyboard, openCollecting } from '../bot/session-flow.js'
 import { buildTaskStartPrompt } from '../bot/tasks.js'
+import { rememberTaskNumberPrompt } from '../bot/task-number-prompt.js'
 import { T } from '../bot/texts.js'
 import { DeliveryError, TelegramError, type Keyboard } from '../tg/client.js'
 import { enqueue } from './queue.js'
@@ -414,6 +415,7 @@ async function deliverMigratedLegacy(ctx: Ctx, claimed: OutboxMessage): Promise<
     }
     await tx.user.updateMany({ where: { id: claimed.userId, sendGateToken: token }, data: { sendGateToken: null, sendGateUntil: null } })
   })
+  if (error === undefined) await rememberTaskNumberPrompt(ctx, claimed.userId, msg.text, msg.keyboard)
 }
 
 async function recoverMigratedLegacy(ctx: Ctx, claimed: OutboxMessage): Promise<void> {
@@ -460,6 +462,7 @@ async function deliver(ctx: Ctx, m: OutboxMessage): Promise<void> {
     if (marked.count === 1 && owner?.reminderPolicy !== 1) await msg.after?.(tx)
   })
   rememberConversationContext(user.id, 'assistant', msg.text, ctx.now())
+  await rememberTaskNumberPrompt(ctx, user.id, msg.text, msg.keyboard)
 }
 
 // Классификация ошибок. Повторяем только то, что точно не ушло в Telegram:

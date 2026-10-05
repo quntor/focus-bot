@@ -8,6 +8,7 @@ import { logEvent } from '../analytics/log.js'
 import { cancelPending } from '../outbox/queue.js'
 import { T } from './texts.js'
 import { rememberConversationContext, rememberQuestion } from './conversation-context.js'
+import { rememberTaskNumberPrompt } from './task-number-prompt.js'
 
 // Всё, от чего зависит обработка: база, Telegram, модель и часы. Часы — тоже
 // зависимость: источник истины по времени — сервер, а тесты двигают время сами.
@@ -37,11 +38,13 @@ export async function markBlocked(ctx: Ctx, userId: string): Promise<void> {
 
 // Ответ пользователю в потоке обработки апдейта. Состояние к этому моменту уже
 // записано, поэтому ошибка отправки не откатывает его и наружу не летит.
-export async function reply(ctx: Ctx, user: Pick<User, 'id' | 'tgId'>, text: string, keyboard?: Keyboard): Promise<void> {
+export async function reply(ctx: Ctx, user: Pick<User, 'id' | 'tgId'>, text: string, keyboard?: Keyboard, options: { preserveTaskNumberPrompt?: boolean } = {}): Promise<void> {
   try {
     const replyKeyboard = keyboard ? undefined : await sessionKeyboard(ctx, user.id)
     if (ctx.semanticRouterEnabled && ctx.isCurrentInput && !ctx.isCurrentInput()) return
     await ctx.tg.send(user.tgId, text, keyboard, replyKeyboard)
+    if (ctx.semanticRouterEnabled && ctx.isCurrentInput && !ctx.isCurrentInput()) return
+    if (!options.preserveTaskNumberPrompt) await rememberTaskNumberPrompt(ctx, user.id, text, keyboard)
     rememberConversationContext(user.id, 'assistant', text, ctx.now())
     if (ctx.semanticRouterEnabled) {
       const fresh = await ctx.db.user.findUnique({ where: { id: user.id }, select: { pendingInput: true } })

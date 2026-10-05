@@ -18,6 +18,7 @@ import { recentConversationContext } from './conversation-context.js'
 import { activeElapsedMinutes, activeSession, onStartButton, startTaskSession } from './session-flow.js'
 import { T, hhmm } from './texts.js'
 import { findOrCreateTask } from './task-store.js'
+import { taskNumberPrompt } from './task-number-prompt.js'
 
 export type TaskInputSource = 'text' | 'voice'
 type TaskCompletionSource = TaskInputSource | 'button'
@@ -218,6 +219,22 @@ export async function onTaskOpened(ctx: Ctx, user: User, taskId: string, page: n
 
 export async function onTaskSelected(ctx: Ctx, user: User, taskId: string): Promise<void> {
   await startTaskSession(ctx, user, taskId)
+}
+
+export async function onTaskNumber(ctx: Ctx, user: User, text: string): Promise<boolean> {
+  if (!/^\d{1,6}$/.test(text.trim())) return false
+  const prompt = await taskNumberPrompt(ctx, user.id)
+  if (!prompt) return false
+  const choice = prompt.choices.find((item) => item.number === Number(text.trim()))
+  if (!choice) {
+    const first = prompt.choices[0]!
+    if (first.mode === 'start') await showTaskStartPrompt(ctx, user, first.page)
+    else await showTasks(ctx, user, first.page, 'Выбери номер из показанного списка или нажми на задачу.')
+    return true
+  }
+  if (choice.mode === 'start') await onTaskSelected(ctx, user, choice.task_id)
+  else await onTaskOpened(ctx, user, choice.task_id, choice.page)
+  return true
 }
 
 export async function onTaskEditRequested(ctx: Ctx, user: User, taskId: string): Promise<void> {
@@ -929,6 +946,6 @@ export async function transcribeVoice(
     { duration_seconds: voice.duration, length_chars: text.length },
     { at: ctx.now() },
   )
-  await reply(ctx, user, T.voiceTranscript(text))
+  await reply(ctx, user, T.voiceTranscript(text), undefined, { preserveTaskNumberPrompt: true })
   return text
 }

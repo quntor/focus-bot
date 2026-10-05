@@ -36,6 +36,10 @@ export const SETTINGS_KEYS = [
 ] as const
 
 export const PAYLOADS = {
+  task_number_prompt: z.strictObject({
+    fingerprint: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+    choices: z.array(z.strictObject({ number: z.int().min(1), task_id: id, mode: z.enum(['actions', 'start']), page: z.int().min(0) })).max(6),
+  }),
   // Метка источника проходит parseSource: [a-z0-9_-]{1,32}, это не текст человека.
   bot_started: z.strictObject({ source: z.string().regex(/^[a-z0-9_-]{1,32}$/).nullable(), returning: z.boolean() }),
   consent_given: empty,

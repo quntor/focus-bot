@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { OutboxMessage, Prisma, ReminderChain, User } from '@prisma/client'
 import type { Ctx } from '../bot/context.js'
+import { rememberTaskNumberPrompt } from '../bot/task-number-prompt.js'
 import { llmMeter } from '../analytics/calls.js'
 import { logEvent } from '../analytics/log.js'
 import type { EventPayload } from '../analytics/payloads.js'
@@ -178,6 +179,7 @@ export async function deliverReminder(ctx: Ctx, claimed: OutboxMessage): Promise
     }
     await releaseGate(tx, claimed.userId, token)
   })
+  if (error === undefined) await rememberTaskNumberPrompt(ctx, claimed.userId, ready.text, reminderKeyboard(claimed.id, ready.phase))
 }
 
 export async function recoverReminder(ctx: Ctx, claimed: OutboxMessage): Promise<void> {

@@ -262,6 +262,7 @@ export async function releasePending(ctx: Ctx, user: User): Promise<User> {
 
 // Commands/buttons are deterministic; free text/voice goes through the same router.
 async function routeInput(ctx: Ctx, user: User, text: string, via: 'text' | 'voice', contextEventId: number | null): Promise<void> {
+  if (await tasks.onTaskNumber(ctx, user, text)) return
   if(user.pendingInput.startsWith('retro:'))return onRetro(ctx,user,user.pendingInput.split(':')[1]!,text)
   return routeSemanticInput(ctx, user, text, via, contextEventId, routeLegacyInput, routePendingInput)
 }
