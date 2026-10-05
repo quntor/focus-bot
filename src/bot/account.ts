@@ -156,7 +156,7 @@ export async function sendSettings(ctx: Ctx, user: User): Promise<void> {
   await reply(
     ctx,
     user,
-    T.settings({ technique: user.technique, pings: user.pingsEnabled, proactive: user.proactive, morning: user.morningTime, timezone: user.timezone })+(user.reminderPolicy===1?'\nПроверки управляют рабочими циклами и перерывом; «писать первым» — утром и после отдыха.':''),
+    T.settings({ technique: user.technique, pings: user.pingsEnabled, proactive: user.proactive, morning: user.morningTime, timezone: user.timezone })+(user.reminderPolicy===1?'\nПинги управляют повторными проверками работы и перерыва, но не первым сигналом конца таймера. «Писать первым» — утром и после отдыха.':''),
     [
       [{ text: T.setTechnique, data: cb('set', null, 'technique') }],
       [{ text: T.togglePings, data: cb('set', null, 'pings') }],

@@ -54,7 +54,12 @@ async function snapshot(tx: Tx, m: OutboxMessage, now: Date) {
 
 function deferAt(user: User, chain: ReminderChain, now: Date): Date | null {
   if (user.blockedAt || user.reminderPolicy === 0) return null
-  if ((chain.kind === 'morning' || chain.kind === 'post_rest') ? !user.proactive : !user.pingsEnabled) return new Date(now.getTime() + 60 * 60_000)
+  // The legacy midpoint toggle must not swallow the first timer deadline.
+  // Later checks remain optional; quiet/window/global guards still apply below.
+  const checksDisabled = chain.kind === 'morning' || chain.kind === 'post_rest'
+    ? !user.proactive
+    : !user.pingsEnabled && chain.ordinal > 0
+  if (checksDisabled) return new Date(now.getTime() + 60 * 60_000)
   const quiet = user.quietUntil && user.quietUntil > now ? user.quietUntil : now
   return allowedAt(user, chain, quiet) ?? new Date(now.getTime() + 60 * 60_000)
 }
