@@ -1,4 +1,4 @@
-import { reconcile, freezeReminders } from '../reminders/store.js'
+import { reconcile, freezeReminders, lockUser } from '../reminders/store.js'
 import { logEvent, refreshRole } from '../analytics/log.js'
 import { ACTIVE_WINDOW_MS, NEW_DAYS } from '../analytics/roles.js'
 import { log } from '../lib/log.js'
@@ -36,7 +36,13 @@ export async function sweepOnce(ctx: Ctx): Promise<void> {
     let result: { elapsed: number; counted: boolean } | null = null
     try {
       result = await ctx.db.$transaction(async (tx) => {
-        const r = await autoFinish(tx, s.user, s, s.plannedEndAt!, now, 'timeout')
+        await lockUser(tx, s.userId)
+        const current = await tx.focusSession.findFirst({ where: {
+          id: s.id, userId: s.userId, reminderPolicy: 0, state: 'running',
+          plannedEndAt: { lt: new Date(now.getTime() - ABANDON_AFTER_MS) },
+        }, include: { user: true } })
+        if (!current) return null
+        const r = await autoFinish(tx, current.user, current, current.plannedEndAt!, now, 'timeout')
         if (r.counted) await tx.user.update({ where: { id: s.userId }, data: { pendingInput: 'report_text' } })
         else await tx.user.updateMany({ where: { id: s.userId, pendingInput: `session_end:${s.id}` }, data: { pendingInput: 'none' } })
         return r
@@ -59,12 +65,18 @@ export async function sweepOnce(ctx: Ctx): Promise<void> {
     let result: { elapsed: number; counted: boolean } | null = null
     try {
       result = await ctx.db.$transaction(async (tx) => {
-        const r = await autoFinish(tx, s.user, s, s.pausedAt!, now, 'break_timeout')
+        await lockUser(tx, s.userId)
+        const current = await tx.focusSession.findFirst({ where: {
+          id: s.id, userId: s.userId, reminderPolicy: 0, state: 'paused',
+          pausedAt: { lt: new Date(now.getTime() - EXPIRE_BREAK_MS) },
+        }, include: { user: true } })
+        if (!current) return null
+        const r = await autoFinish(tx, current.user, current, current.pausedAt!, now, 'break_timeout')
         await tx.user.updateMany({
           where: { id: s.userId, pendingInput: { in: [`session_end:${s.id}`, `running_work:${s.id}`, `running_duration:${s.id}`] } },
           data: { pendingInput: 'none' },
         })
-        await ensureNextMeeting(tx, s.user, now)
+        await ensureNextMeeting(tx, current.user, now)
         return r
       })
     } catch (error) {

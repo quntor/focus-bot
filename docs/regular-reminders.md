@@ -37,6 +37,9 @@ canary список Telegram ID. При следующем взаимодейс�
 user-policy1; текущая legacy работа остаётся policy0, новая/явный resume — policy1.
 Env задаётся в действующем `APP_ENV_FILE` compose.prod.yml; examples содержат флаг off.
 Не включать/не выкатывать без команды администратора.
+Список `REMINDER_USER_IDS` управляет первоначальным enrollment. Удаление ID
+не отключает уже переведённого policy1 пользователя; для аварийной остановки
+canary использовать глобальный `REMINDERS_ENABLED=false` и recreate app.
 
 ReminderChain revision/ordinal обеспечивает один слот. Owner lock и send gate
 охватывают проверку состояния, но не внешний LLM/Telegram запрос. После генерации
