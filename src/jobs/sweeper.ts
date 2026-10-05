@@ -1,3 +1,4 @@
+import { reconcile, freezeReminders } from '../reminders/store.js'
 import { logEvent, refreshRole } from '../analytics/log.js'
 import { ACTIVE_WINDOW_MS, NEW_DAYS } from '../analytics/roles.js'
 import { log } from '../lib/log.js'
@@ -20,12 +21,14 @@ export const EXPIRE_BREAK_MS = 3 * 60 * MIN
 
 export async function sweepOnce(ctx: Ctx): Promise<void> {
   const now = ctx.now()
+  if (ctx.remindersEnabled) await reconcile(ctx)
+  else await freezeReminders(ctx)
 
   // Час без ответа после планового конца — сессия засчитывается до планового
   // конца, и бот говорит об этом. Раньше она молча бросалась, и честная работа
   // пропадала.
   const overdue = await ctx.db.focusSession.findMany({
-    where: { state: 'running', plannedEndAt: { lt: new Date(now.getTime() - ABANDON_AFTER_MS) } },
+    where: { reminderPolicy:0,state: 'running', plannedEndAt: { lt: new Date(now.getTime() - ABANDON_AFTER_MS) } },
     include: { user: true },
     take: 200,
   })
@@ -48,7 +51,7 @@ export async function sweepOnce(ctx: Ctx): Promise<void> {
   // Засчитывается работа до перерыва, дальше — следующая встреча, чтобы бот
   // не замолчал.
   const forgotten = await ctx.db.focusSession.findMany({
-    where: { state: 'paused', pausedAt: { lt: new Date(now.getTime() - EXPIRE_BREAK_MS) } },
+    where: { reminderPolicy:0,state: 'paused', pausedAt: { lt: new Date(now.getTime() - EXPIRE_BREAK_MS) } },
     include: { user: true },
     take: 200,
   })

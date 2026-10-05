@@ -140,3 +140,11 @@ systemctl enable --now focus-bot-auto-deploy.timer
 ```bash
 FOCUS_DEPLOY_CHECK_ONLY=1 ./deploy/auto-deploy.sh
 ```
+
+## SBER500-26: regular reminders
+
+Флаги `REMINDERS_ENABLED=false`, `REMINDER_USER_IDS=` находятся в обоих env examples
+и читаются через действующий `APP_ENV_FILE` сервиса app в compose.prod.yml.
+Сначала аддитивные миграции с flag off, затем отдельно разрешённый canary.
+Rollback — **совместимый текущий build с flag off**, не старый sweeper.
+Подробно: [regular-reminders.md](regular-reminders.md).

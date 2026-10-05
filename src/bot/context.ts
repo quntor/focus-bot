@@ -16,6 +16,9 @@ export type Ctx = {
   tg: Telegram
   llm: LlmProvider
   stt: SttProvider
+  remindersEnabled?: boolean
+  reminderUserIds?: readonly string[]
+  inputUserId?: string
   semanticRouterEnabled?: boolean
   isCurrentInput?: () => boolean
   now: () => Date

@@ -1,3 +1,6 @@
+import { cancelPrimary, ensureMorning, slot } from '../reminders/store.js'
+import { allowedAt } from '../reminders/cadence.js'
+import { computeTimeline } from '../reminders/accounting.js'
 import { inputTransaction } from './input-lock.js'
 import type { Prisma, User } from '@prisma/client'
 import { logEvent } from '../analytics/log.js'
@@ -32,7 +35,7 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
   // по ключу дня в поясе пользователя: сутки сервера тут ни при чём.
   const since = new Date(Date.parse(`${day}T00:00:00Z`) - 36 * 60 * MIN)
   const sessions = await db.focusSession.findMany({
-    where: { userId: user.id, createdAt: { gte: since }, state: { in: ['finished', 'abandoned'] } },
+    where: { userId: user.id, finishedAt: { gte: since }, state: { in: ['finished', 'abandoned'] } },
     select: {
       id: true,
       state: true,
@@ -41,6 +44,9 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
       startedAt: true,
       finishedAt: true,
       pausedSeconds: true,
+      reminderPolicy: true,
+      legacyUnassignedSeconds: true,
+      workPeriods: { select: { startedAt: true, endedAt: true } },
       task: { select: { id: true, title: true } },
     },
   })
@@ -52,7 +58,7 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
     ? []
     : await db.taskTimeAllocation.findMany({
         where: { userId: user.id, sessionId: { in: sessionIds } },
-        select: { sessionId: true, taskId: true, seconds: true },
+        select: { sessionId: true, taskId: true, seconds: true, source: true },
       })
   const allocationsBySession = new Map<string, typeof manualAllocations>()
   for (const allocation of manualAllocations) {
@@ -91,9 +97,25 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
     if (duration <= 0) return
     durationByTask.set(taskId, (durationByTask.get(taskId) ?? 0) + duration)
   }
+  let totalMilliseconds = 0
+  let unassignedMilliseconds = 0
   for (const session of today) {
     if (!session.startedAt || !session.finishedAt) continue
-    const allocations = allocationsBySession.get(session.id) ?? []
+    const saved = allocationsBySession.get(session.id) ?? []
+    const reports = saved.filter((allocation) => allocation.source === 'report')
+    const allocations = reports.length > 0 ? reports : saved
+    if (session.reminderPolicy === 1) {
+      // Physical boundaries remain authoritative even with a report or no task.
+      // In particular, never fall through to the legacy final-task fallback.
+      const timeline = computeTimeline(session.workPeriods, eventsBySession.get(session.id) ?? [], session.finishedAt)
+      timeline.totalSeconds += session.legacyUnassignedSeconds
+      const selected = allocations.length > 0 ? allocations : timeline.allocations
+      for (const allocation of selected) addDuration(allocation.taskId, allocation.seconds * 1000)
+      totalMilliseconds += timeline.totalSeconds * 1000
+      unassignedMilliseconds += Math.max(0, timeline.totalSeconds - selected.reduce((sum, allocation) => sum + allocation.seconds, 0)) * 1000
+      continue
+    }
+    totalMilliseconds += Math.max(0, session.finishedAt.getTime() - session.startedAt.getTime() - session.pausedSeconds * 1000)
     if (allocations.length > 0) {
       for (const allocation of allocations) addDuration(allocation.taskId, allocation.seconds * 1000)
       continue
@@ -209,6 +231,8 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
     bestWeek,
     activeDays: recent,
     taskTimes,
+    totalMinutes: Math.floor(totalMilliseconds / MIN),
+    unassignedMinutes: Math.floor(unassignedMilliseconds / MIN),
     inProgress: active?.state === 'running' || active?.state === 'paused' ? active.state : null,
   }
 }
@@ -307,6 +331,7 @@ export async function nextMorning(tx: Prisma.TransactionClient, user: User, afte
 // «Третий раз откладываем» или повторного включения настройки. Уже
 // поставленную встречу не трогает.
 export async function ensureNextMeeting(tx: Prisma.TransactionClient, user: User, now: Date): Promise<void> {
+  if (user.reminderPolicy === 1) return ensureMorning(tx,user,now)
   if (!user.proactive || user.blockedAt) return
   const pending = await tx.outboxMessage.count({ where: { userId: user.id, kind: 'meeting', status: 'pending' } })
   if (pending > 0) return
@@ -316,6 +341,24 @@ export async function ensureNextMeeting(tx: Prisma.TransactionClient, user: User
 // Пояс или время утра сменились — утренняя встреча переезжает на новое утро.
 // Встреча на конкретное время («в 18:30») остаётся как договорились.
 export async function rescheduleMorning(tx: Prisma.TransactionClient, user: User, now: Date): Promise<void> {
+  if (user.reminderPolicy === 1) {
+    const fresh = await tx.user.findUniqueOrThrow({ where: { id: user.id } })
+    const chain = await tx.reminderChain.findFirst({ where: { userId: user.id, status: 'active' } })
+    if (!chain || chain.kind === 'morning') {
+      await cancelPrimary(tx, user.id)
+      await ensureMorning(tx, fresh, now)
+    } else {
+      // Invalidate cached texts and pending sends, preserving the phase, step
+      // and physical UTC history. Re-evaluate only the future delivery window.
+      await tx.outboxMessage.updateMany({ where: { chainId: chain.id, status: { in: ['pending', 'paused', 'sending'] } }, data: { status: 'canceled' } })
+      const due = allowedAt(fresh, chain, chain.nextDueAt > now ? chain.nextDueAt : now)
+      const updated = await tx.reminderChain.update({ where: { id: chain.id }, data: {
+        revision: { increment: 1 }, ...(due ? { nextDueAt: due } : {}),
+      } })
+      await slot(tx, updated)
+    }
+    return
+  }
   const morning = await tx.outboxMessage.findFirst({
     where: { userId: user.id, kind: 'meeting', status: 'pending', payload: { path: ['morning'], equals: true } },
   })
@@ -347,7 +390,7 @@ export async function closeDay(
       // Идущая сессия закрывается без исхода: человек его не называл, а «пока
       // не готово» портило бы сводку и память по задаче. Время — до планового
       // конца, как у таймаута.
-      await autoFinish(tx, user, active, active.plannedEndAt ?? now, now, 'day_end')
+      await autoFinish(tx, user, active, active.reminderPolicy === 1 ? now : active.plannedEndAt ?? now, now, 'day_end')
       await tx.focusSession.updateMany({ where: { id: active.id, userId: user.id }, data: { restChoice: 'day_end' } })
     }
     await tx.dailyGoal.upsert({

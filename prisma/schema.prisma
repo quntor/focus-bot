@@ -21,6 +21,12 @@ model User {
   source    String?
   createdAt DateTime  @default(now()) @map("created_at")
   blockedAt DateTime? @map("blocked_at")
+  quietUntil DateTime? @map("quiet_until")
+  reminderPolicy Int @default(0) @map("reminder_policy")
+  sendGateUntil DateTime? @map("send_gate_until")
+  sendGateToken String? @map("send_gate_token")
+  reminderChains ReminderChain[]
+  calendarPlans CalendarPlan[]
 
   // Псевдоним в журнале событий. Случайный, не выводится из id и tg_id. Журнал
   // ссылается на него, а не на пользователя: удаление строки users обезличивает
@@ -135,6 +141,7 @@ model Task {
 // начнёшь», не бросал работу, и смешивать это с брошенными сессиями значит
 // испортить долю доведённых до конца.
 model FocusSession {
+  legacyUnassignedSeconds Int @default(0) @map("legacy_unassigned_seconds")
   id     String  @id @default(uuid())
   userId String  @map("user_id")
   user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -207,6 +214,9 @@ model FocusSession {
   restEndedAt DateTime? @map("rest_ended_at")
 
   timeAllocations TaskTimeAllocation[]
+  reminderPolicy Int @default(0) @map("reminder_policy")
+  workPeriods WorkPeriod[]
+  reminderChains ReminderChain[]
 
   @@index([userId, createdAt])
   @@index([state, plannedEndAt])
@@ -351,8 +361,19 @@ model OutboxMessage {
   // Молчание на это напоминание уже засчитано отказом (один раз на сообщение).
   silenceCountedAt DateTime? @map("silence_counted_at")
 
+  chainId String? @map("chain_id")
+  chain ReminderChain? @relation(fields: [chainId], references: [id], onDelete: Cascade)
+  chainRevision Int? @map("chain_revision")
+  ordinal Int?
+  generationToken String? @map("generation_token")
+  generationStatus String? @map("generation_status")
+  generatedText String? @map("generated_text")
+  contextFingerprint String? @map("context_fingerprint")
+  provenance String?
+  sendAttemptStartedAt DateTime? @map("send_attempt_started_at")
   createdAt DateTime @default(now()) @map("created_at")
 
+  @@unique([chainId, chainRevision, ordinal])
   @@index([status, sendAfter])
   @@index([userId, status])
   @@map("outbox_messages")
@@ -549,4 +570,62 @@ model TeamSubject {
   createdAt DateTime @default(now()) @map("created_at")
 
   @@map("team_subjects")
+}
+
+
+model CalendarPlan {
+  id String @id @default(uuid())
+  userId String @map("user_id")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  localDate String @map("local_date")
+  answer String
+  answeredAt DateTime @map("answered_at")
+  source String
+  @@unique([userId, localDate])
+  @@map("calendar_plans")
+}
+
+model ReminderChain {
+  id String @id @default(uuid())
+  userId String @map("user_id")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind String
+  sessionId String? @map("session_id")
+  session FocusSession? @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  localDate String? @map("local_date")
+  revision Int @default(1)
+  phaseStartedAt DateTime @map("phase_started_at")
+  firstDueAt DateTime @map("first_due_at")
+  intervalMinutes Int @map("interval_minutes")
+  restStep Int @default(0) @map("rest_step")
+  ordinal Int @default(0)
+  nextDueAt DateTime @map("next_due_at")
+  deliveryAnchorAt DateTime? @map("delivery_anchor_at")
+  nightUntil DateTime? @map("night_until")
+  status String @default("active")
+  policyVersion Int @default(1) @map("policy_version")
+  outbox OutboxMessage[]
+  @@index([status, nextDueAt])
+  @@map("reminder_chains")
+}
+
+model WorkPeriod {
+  id String @id @default(uuid())
+  sessionId String @map("session_id")
+  session FocusSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  startedAt DateTime @map("started_at")
+  endedAt DateTime? @map("ended_at")
+  correctionId String? @map("correction_id")
+  originalEndedAt DateTime? @map("original_ended_at")
+  @@index([sessionId, startedAt])
+  @@map("work_periods")
+}
+
+model LlmBudgetReservation {
+  id String @id @default(uuid())
+  subjectId String @map("subject_id")
+  reservedAt DateTime @map("reserved_at")
+  componentCallId BigInt? @unique @map("component_call_id")
+  @@index([subjectId,reservedAt])
+  @@map("llm_budget_reservations")
 }

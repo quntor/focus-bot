@@ -1,3 +1,5 @@
+import { lockUser } from '../reminders/store.js'
+import { syncReminderState } from '../reminders/sync.js'
 import type { Prisma } from '@prisma/client'
 import { StaleTransition } from '../session/fsm.js'
 import type { Ctx } from './context.js'
@@ -34,7 +36,15 @@ export function assertCurrentInput(ctx: Ctx): void {
 export async function inputTransaction<T>(ctx: Ctx, work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
   return ctx.db.$transaction(async (tx) => {
     assertCurrentInput(ctx)
+    let before = null
+    if (ctx.inputUserId) {
+      await lockUser(tx, ctx.inputUserId)
+      before = await tx.focusSession.findFirst({where:{userId:ctx.inputUserId,state:{in:['running','paused','collecting_intent']}}})
+      // Rest choice may refer to the last closed session rather than an active one.
+      if (!before) before = await tx.focusSession.findFirst({where:{userId:ctx.inputUserId},orderBy:{createdAt:'desc'}})
+    }
     const result = await work(tx)
+    if (ctx.inputUserId) await syncReminderState(tx,ctx.inputUserId,before,ctx.now(),ctx.remindersEnabled===true)
     assertCurrentInput(ctx)
     return result
   })

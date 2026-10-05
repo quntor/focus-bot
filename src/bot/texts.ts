@@ -342,6 +342,7 @@ export const T = {
           : 'Сегодня сессий не было — бывает.'
         : `За сегодня: ${s.sessions} ${plural(s.sessions, 'сессия', 'сессии', 'сессий')}` +
           outcomesLine(s),
+      s.totalMinutes !== undefined ? `Фактически в работе: ${s.totalMinutes} мин.${s.unassignedMinutes ? ` Без привязки к задаче: ${s.unassignedMinutes} мин.` : ''}` : null,
       s.sessions > 0 && s.inProgress ? (s.inProgress === 'paused' ? 'Ещё одна — на перерыве.' : 'Ещё одна идёт сейчас.') : null,
       s.target ? `Цель: ${s.counted} из ${s.target}.` : null,
       s.abandoned > 0 ? `Брошено: ${s.abandoned}.` : null,
@@ -427,6 +428,8 @@ export const T = {
 
 export type DaySummary = {
   sessions: number
+  totalMinutes?: number
+  unassignedMinutes?: number
   done: number
   notDone: number
   other: number

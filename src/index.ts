@@ -28,6 +28,8 @@ const ctx: Ctx = {
   llm,
   stt,
   semanticRouterEnabled: cfg.SEMANTIC_ROUTER_ENABLED,
+  remindersEnabled: cfg.REMINDERS_ENABLED,
+  reminderUserIds: cfg.REMINDER_USER_IDS,
   now: () => new Date(),
 }
 

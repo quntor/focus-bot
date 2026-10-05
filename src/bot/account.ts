@@ -1,3 +1,4 @@
+import { quietKeyboard } from '../reminders/actions.js'
 import { inputTransaction } from './input-lock.js'
 import type { User } from '@prisma/client'
 import { logEvent } from '../analytics/log.js'
@@ -155,7 +156,7 @@ export async function sendSettings(ctx: Ctx, user: User): Promise<void> {
   await reply(
     ctx,
     user,
-    T.settings({ technique: user.technique, pings: user.pingsEnabled, proactive: user.proactive, morning: user.morningTime, timezone: user.timezone }),
+    T.settings({ technique: user.technique, pings: user.pingsEnabled, proactive: user.proactive, morning: user.morningTime, timezone: user.timezone })+(user.reminderPolicy===1?'\nПроверки управляют рабочими циклами и перерывом; «писать первым» — утром и после отдыха.':''),
     [
       [{ text: T.setTechnique, data: cb('set', null, 'technique') }],
       [{ text: T.togglePings, data: cb('set', null, 'pings') }],
@@ -164,6 +165,7 @@ export async function sendSettings(ctx: Ctx, user: User): Promise<void> {
         { text: T.setMorning, data: cb('set', null, 'morning') },
         { text: T.setTimezone, data: cb('set', null, 'timezone') },
       ],
+      ...(user.reminderPolicy===1?quietKeyboard(user,ctx.now()):[]),
     ],
   )
 }

@@ -28,6 +28,8 @@ const schema = z
     LLM_API_KEY: optionalString,
     LLM_BASE_URL: optionalHttpsUrl,
     LLM_MODEL: optionalString,
+    REMINDERS_ENABLED: z.enum(['true','false']).default('false').transform(value => value === 'true'),
+    REMINDER_USER_IDS: z.string().default('').transform(value => value.split(',').map(x => x.trim()).filter(Boolean)).refine(value => value.every(x => /^\d+$/.test(x))),
     SEMANTIC_ROUTER_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
     // STT использует те же ключ и base URL, но включается отдельно: голос не
     // должен неожиданно стать платным только из-за включённой текстовой модели.

@@ -6,7 +6,7 @@ import { PAYLOADS, type EventPayload } from './payloads.js'
 import { ACTIVE_WINDOW_MS, computeRole, type Role } from './roles.js'
 
 type Options = {
-  sessionId?: string
+  sessionId?: string | null
   at?: Date
 }
 

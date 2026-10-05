@@ -9,6 +9,14 @@ const base = {
 }
 
 describe('LLM config', () => {
+  it('regular reminder activation requires explicit flag and allowlist',()=>{
+    expect(parseConfig(base).REMINDERS_ENABLED).toBe(false)
+    expect(parseConfig(base).REMINDER_USER_IDS).toEqual([])
+    expect(parseConfig({...base,REMINDERS_ENABLED:'true',REMINDER_USER_IDS:'12, 34'})).toMatchObject({REMINDERS_ENABLED:true,REMINDER_USER_IDS:['12','34']})
+    expect(()=>parseConfig({...base,REMINDERS_ENABLED:'0'})).toThrow('REMINDERS_ENABLED')
+    expect(()=>parseConfig({...base,REMINDER_USER_IDS:'12,not-an-id'})).toThrow('REMINDER_USER_IDS')
+  })
+
   it('routing flag is explicit, default off, false is a real kill switch', () => {
     expect(parseConfig(base).SEMANTIC_ROUTER_ENABLED).toBe(false)
     expect(parseConfig({ ...base, SEMANTIC_ROUTER_ENABLED: 'false' }).SEMANTIC_ROUTER_ENABLED).toBe(false)

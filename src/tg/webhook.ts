@@ -1,3 +1,4 @@
+import { onReminderAction, onRetro } from '../reminders/actions.js'
 import { beginInput, withUserInputLock } from '../bot/input-lock.js'
 import { routeSemanticInput, onSemanticChoice, onRestoreReport, invalidateSemanticChoices } from '../bot/semantic-routing.js'
 import { z } from 'zod'
@@ -126,6 +127,10 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
     return
   }
   let { user, created } = await loadUser(ctx, tgId, command?.command === 'start' ? command.args : null)
+  ctx = { ...ctx, inputUserId: user.id }
+  if (ctx.remindersEnabled && ctx.reminderUserIds?.includes(String(user.tgId)) && user.reminderPolicy !== 1) {
+    user = await ctx.db.user.update({where:{id:user.id},data:{reminderPolicy:1}})
+  }
   const callback = cq ? parseCallback(cq.data) : null
   if (callback?.action !== 'sroute') invalidateSemanticChoices(user.id)
   const contextEventId = msg?.voice ? rememberConversationContext(user.id, 'user', '[voice]', ctx.now()) : msg?.text
@@ -257,6 +262,7 @@ export async function releasePending(ctx: Ctx, user: User): Promise<User> {
 
 // Commands/buttons are deterministic; free text/voice goes through the same router.
 async function routeInput(ctx: Ctx, user: User, text: string, via: 'text' | 'voice', contextEventId: number | null): Promise<void> {
+  if(user.pendingInput.startsWith('retro:'))return onRetro(ctx,user,user.pendingInput.split(':')[1]!,text)
   return routeSemanticInput(ctx, user, text, via, contextEventId, routeLegacyInput, routePendingInput)
 }
 async function routePendingInput(ctx: Ctx, user: User, text: string, via: 'text' | 'voice', contextEventId: number | null): Promise<void> {
@@ -383,6 +389,13 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
 
   try {
     switch (action) {
+      case 'cycle':
+      case 'morning':
+        if (arg) return await onReminderAction(ctx,user,id,arg)
+        break
+      case 'retro':
+        if (id && arg) return await onRetro(ctx,user,id,arg)
+        break
       case 'len':
         if (id && arg) return await session.onLength(ctx, user, id, arg)
         break

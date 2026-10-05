@@ -20,9 +20,12 @@ export const TECHNIQUES = ['auto', 'pomodoro', 'medium', 'long', 'free'] as cons
 export const REST_CHOICES = ['rest', 'continue', 'later', 'day_end'] as const
 export const SCOPES = ['step', 'multi_session'] as const
 export const POINT_REASONS = ['session_completed', 'daily_goal', 'comeback'] as const
-export const LLM_STAGES = ['semantic_router', 'intent', 'report', 'tasks', 'session_help', 'breakdown'] as const
+export const LLM_STAGES = ['semantic_router', 'intent', 'report', 'tasks', 'session_help', 'breakdown', 'reminder_text'] as const
 export const LLM_FALLBACK_REASONS = ['disabled', 'budget', 'error', 'timeout', 'invalid'] as const
-export const OUTBOX_KINDS = ['ping', 'session_end', 'rest_over', 'break_over', 'meeting', 'summary'] as const
+export const OUTBOX_KINDS = ['ping', 'session_end', 'rest_over', 'break_over', 'meeting', 'summary', 'reminder'] as const
+export const REMINDER_KINDS = ['morning', 'work', 'break', 'post_rest'] as const
+export const REMINDER_ACTIONS = ['work', 'off', 'continue', 'break', 'resume', 'rest', 'mute', 'unmute', 'stop_today', 'retro', 'retro5', 'retro10', 'retro15'] as const
+const reminderSlot = { chain_id: id, outbox_id: id, kind: z.enum(REMINDER_KINDS), revision: z.int().min(1), ordinal: z.int().min(0) }
 export const SETTINGS_KEYS = [
   'technique',
   'pings_enabled',
@@ -81,8 +84,8 @@ export const PAYLOADS = {
     technique: z.enum(TECHNIQUES),
     scope: z.enum(SCOPES),
   }),
-  session_paused: z.strictObject({ session_id: id, elapsed_minutes: minutes }),
-  session_resumed: z.strictObject({ session_id: id, paused_minutes: minutes }),
+  session_paused: z.strictObject({ session_id: id, elapsed_minutes: z.int().min(0) }),
+  session_resumed: z.strictObject({ session_id: id, paused_minutes: z.int().min(0) }),
   session_cancelled: empty,
   session_expired: empty,
   ping_sent: z.strictObject({ session_id: id }),
@@ -91,18 +94,18 @@ export const PAYLOADS = {
   session_completed: z.strictObject({
     session_id: id,
     outcome: z.enum(OUTCOMES),
-    elapsed_minutes: minutes,
+    elapsed_minutes: z.int().min(0),
     early: z.boolean(),
     counted: z.boolean(),
   }),
-  session_stopped: z.strictObject({ session_id: id, elapsed_minutes: minutes }),
+  session_stopped: z.strictObject({ session_id: id, elapsed_minutes: z.int().min(0) }),
   session_abandoned: z.strictObject({ session_id: id, reason: z.enum(['timeout', 'no_ping']) }),
   // Сессия засчитана без исхода: нет ответа на «Время вышло», пропущены
   // проверки, из перерыва начата новая, перерыв затянулся на часы или день
   // закрыт посреди сессии. Бросает сессию только /stop.
   session_auto_finished: z.strictObject({
     session_id: id,
-    elapsed_minutes: minutes,
+    elapsed_minutes: z.int().min(0),
     counted: z.boolean(),
     reason: z.enum(['timeout', 'no_ping', 'new_session', 'break_timeout', 'day_end']),
   }),
@@ -111,8 +114,8 @@ export const PAYLOADS = {
   task_time_allocated: z.strictObject({
     session_id: id,
     task_count: z.int().min(1).max(10),
-    allocated_seconds: z.int().min(0).max(24 * 60 * 60),
-    unassigned_seconds: z.int().min(0).max(24 * 60 * 60),
+    allocated_seconds: z.int().min(0),
+    unassigned_seconds: z.int().min(0),
     source: z.literal('report'),
   }),
   task_breakdown_requested: z.strictObject({ task_id: id }),
@@ -127,6 +130,23 @@ export const PAYLOADS = {
   // Модель сочла задачу размытой: round 1 — задан уточняющий вопрос, round 2 —
   // и после ответа неясно, бот просит одно действие на 10 минут.
   task_breakdown_vague: z.strictObject({ task_id: id, round: z.union([z.literal(1), z.literal(2)]) }),
+  reminder_chain_changed: z.strictObject({
+    chain_id: id, kind: z.enum(REMINDER_KINDS), revision: z.int().min(1),
+    reason: z.enum(['start', 'phase', 'cadence', 'task', 'correction', 'stop', 'mute', 'unmute', 'settings', 'recovered']),
+    interval_minutes: minutes.optional(), next_due_ms: z.number().int().min(0).optional(),
+  }),
+  reminder_delivery: z.strictObject({
+    ...reminderSlot,
+    status: z.enum(['sent', 'canceled', 'stale', 'quiet', 'window', 'disabled', 'gate_busy', 'recovered', 'uncertain', 'retry', 'failed', 'blocked']),
+    due_ms: z.number().int().min(0).optional(), anchor_ms: z.number().int().min(0).optional(), due_lag_ms: z.number().int().min(0).optional(),
+  }),
+  reminder_generated: z.strictObject({
+    ...reminderSlot, provenance: z.enum(['llm', 'fallback']),
+    llm_reason: z.enum([...LLM_FALLBACK_REASONS, 'uncertain', 'stale']).nullable(),
+  }),
+  reminder_answered: z.strictObject({
+    chain_id: id, kind: z.enum(REMINDER_KINDS), revision: z.int().min(1), action: z.enum(REMINDER_ACTIONS),
+  }),
   llm_fallback: z.strictObject({ stage: z.enum(LLM_STAGES), reason: z.enum(LLM_FALLBACK_REASONS) }),
   // Дневной лимит вызовов модели исчерпан; пишется раз в сутки на пользователя.
   llm_budget_exceeded: z.strictObject({ limit: z.int().min(1) }),

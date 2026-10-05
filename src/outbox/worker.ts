@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type { OutboxMessage, Prisma, User } from '@prisma/client'
 import { logEvent } from '../analytics/log.js'
 import { log } from '../lib/log.js'
@@ -12,6 +13,9 @@ import { T } from '../bot/texts.js'
 import { DeliveryError, TelegramError, type Keyboard } from '../tg/client.js'
 import { enqueue } from './queue.js'
 import { OUTBOX_KINDS } from '../analytics/payloads.js'
+import { deliverReminder, recoverReminder } from '../reminders/delivery.js'
+import { allowedAt } from '../reminders/cadence.js'
+import { lockUser } from '../reminders/store.js'
 
 const MIN = 60_000
 // Аренда строки на время отправки. Если процесс умер с арендой на руках, строка
@@ -30,7 +34,8 @@ type Render = Rendered | { skip: true } | { replace: Rendered }
 
 const payloadOf = (m: OutboxMessage) => (m.payload ?? {}) as Record<string, unknown>
 
-// Взять пачку: SELECT ... FOR UPDATE SKIP LOCKED в одном UPDATE. Два воркера
+// Claim only the immediately deliverable row, not leases for a waiting batch.
+// SELECT ... FOR UPDATE SKIP LOCKED in one UPDATE. Two workers
 // (две выкатки при деплое) не возьмут одну строку.
 async function claim(ctx: Ctx): Promise<OutboxMessage[]> {
   const now = ctx.now()
@@ -41,7 +46,7 @@ async function claim(ctx: Ctx): Promise<OutboxMessage[]> {
       SELECT id FROM outbox_messages
       WHERE status = 'pending' AND send_after <= ${now}
       ORDER BY send_after
-      LIMIT ${BATCH}
+      LIMIT 1
       FOR UPDATE SKIP LOCKED
     )
     RETURNING id`
@@ -91,13 +96,14 @@ async function renderReminder(ctx: Ctx, user: User, text: string, keyboard: Keyb
   }
 }
 
-async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
+async function render(ctx: Ctx, m: OutboxMessage, user: User, ownerTx?: Prisma.TransactionClient): Promise<Render> {
   const p = payloadOf(m)
   const now = ctx.now()
 
   if (m.kind === 'ping' || m.kind === 'session_end') {
     const sessionId = String(p.sessionId ?? '')
-    const session = await ctx.db.focusSession.findFirst({ where: { id: sessionId, userId: user.id } })
+    const db = ownerTx ?? ctx.db
+    const session = await db.focusSession.findFirst({ where: { id: sessionId, userId: user.id } })
     // Устаревшее сообщение к закрытой сессии не уходит.
     if (!session || session.state !== 'running') return { skip: true }
 
@@ -130,10 +136,11 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
       const missed = session.pingsMissed + 1
       if (missed >= 2) {
         // Засчитываем время до первой пропущенной проверки и говорим об этом.
-        const r = await ctx.db.$transaction(async (tx) => {
+        const finishFree = async (tx: Prisma.TransactionClient) => {
           await tx.focusSession.update({ where: { id: sessionId }, data: { pingsMissed: missed } })
           return autoFinish(tx, user, { ...session, pingsMissed: missed }, session.pingAt ?? now, now, 'no_ping')
-        })
+        }
+        const r = ownerTx ? await finishFree(ownerTx) : await ctx.db.$transaction(finishFree)
         return {
           text: T.autoFinished(r.elapsed, r.counted),
           after: async (tx) => {
@@ -141,7 +148,7 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
           },
         }
       }
-      await ctx.db.focusSession.update({ where: { id: sessionId }, data: { pingsMissed: missed } })
+      await db.focusSession.update({ where: { id: sessionId }, data: { pingsMissed: missed } })
     }
     return {
       text: T.ping,
@@ -169,6 +176,12 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
     if (!session || (session.restChoice !== null && session.restChoice !== 'rest')) return { skip: true }
     const active = await ctx.db.focusSession.count({ where: { userId: user.id, state: { in: ['running', 'paused'] } } })
     if (active > 0) return { skip: true }
+    if (user.reminderPolicy === 1) return {
+      text: T.restOver, keyboard: reminderKeyboard(), after: async (tx) => {
+        await logEvent(tx, user.id, 'rest_over_sent', { session_id: sessionId }, { at: now, sessionId })
+        await ensureNextMeeting(tx, user, now)
+      },
+    }
     const r = await renderReminder(ctx, user, T.restOver, reminderKeyboard(), true)
     return withEvent(r, async (tx) => {
       await logEvent(tx, user.id, 'rest_over_sent', { session_id: sessionId }, { at: now, sessionId })
@@ -193,6 +206,15 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User): Promise<Render> {
     if (p.defaulted === true && !user.proactive) return { skip: true }
     const active = await ctx.db.focusSession.count({ where: { userId: user.id, state: { in: ['running', 'paused'] } } })
     if (active > 0) return { skip: true }
+    if (user.reminderPolicy === 1) {
+      // Migrated mornings use the persisted chain. Explicit meetings ask only:
+      // no silent-decline mutation, collecting session, or pending-input reset.
+      if (p.defaulted === true || p.morning === true) return { skip: true }
+      return { text: T.meetingPlain, keyboard: reminderKeyboard(), after: async (tx) => {
+        await logEvent(tx, user.id, 'meeting_sent', {}, { at: now })
+        await ensureNextMeeting(tx, user, now)
+      } }
+    }
     const hour = localHour(user.timezone, now)
     const taskPrompt = p.morning === true
       ? await buildTaskStartPrompt(ctx, user, T.meetingMorning(hour))
@@ -254,12 +276,148 @@ function withEvent(r: Render, extra: (tx: Prisma.TransactionClient) => Promise<v
 }
 
 async function finish(ctx: Ctx, id: string, data: Prisma.OutboxMessageUpdateInput): Promise<void> {
-  await ctx.db.outboxMessage.update({ where: { id }, data: { lockedUntil: null, ...data } })
+  await ctx.db.outboxMessage.updateMany({ where: { id, status: 'sending' }, data: { lockedUntil: null, ...data } })
+}
+
+function legacyFingerprint(user: User): string {
+  return JSON.stringify([user.pendingInput, user.lastUserActionAt, user.timezone, user.morningTime, user.eveningTime, user.quietUntil, user.proactive, user.pingsEnabled, user.reminderPolicy])
+}
+
+async function legacySessionFingerprint(db: Prisma.TransactionClient, m: OutboxMessage): Promise<string> {
+  if (!['ping', 'session_end', 'rest_over', 'break_over'].includes(m.kind)) return ''
+  const session = await db.focusSession.findFirst({ where: { id: String(payloadOf(m).sessionId ?? ''), userId: m.userId } })
+  return JSON.stringify(session && [session.state, session.pausedAt, session.restChoice, session.pingAt, session.pingAnsweredAt, session.finishedAt, session.taskId, session.reminderPolicy])
+}
+
+async function legacyEligibility(tx: Prisma.TransactionClient, ctx: Ctx, m: OutboxMessage, user: User): Promise<'skip' | Date | null> {
+  if (user.blockedAt) return 'skip'
+  const p = payloadOf(m)
+  if (['ping', 'session_end', 'rest_over', 'break_over'].includes(m.kind)) {
+    const session = await tx.focusSession.findFirst({ where: { id: String(p.sessionId ?? ''), userId: user.id } })
+    if (!session || session.reminderPolicy === 1) return 'skip'
+  }
+  if (m.kind === 'meeting' && (p.defaulted === true || p.morning === true)) return 'skip'
+  if (!ctx.remindersEnabled) return new Date(ctx.now().getTime() + 60 * MIN)
+  const permitted = allowedAt(user, { nightUntil: null }, ctx.now())
+  if (!permitted) return new Date(ctx.now().getTime() + 60 * MIN)
+  if (permitted > ctx.now()) return permitted
+  if (m.kind === 'summary' || m.kind === 'meeting') {
+    if (!user.proactive && m.kind === 'summary') return 'skip'
+    if (m.kind === 'summary') {
+      const summaries = await tx.outboxMessage.findMany({ where: { userId: user.id, kind: 'summary', sendAfter: { lte: ctx.now() }, status: { in: ['pending', 'paused', 'sending', 'sent'] } }, select: { payload: true, sentAt: true } })
+      const day = String(p.dayKey ?? '')
+      // Recovery presents the latest relevant day, never a stack of old days.
+      if (summaries.some((entry) => String((entry.payload as Record<string, unknown> | null)?.dayKey ?? '') > day)) return 'skip'
+      if (summaries.some((entry) => entry.sentAt && entry.sentAt.getTime() > ctx.now().getTime() - MIN)) return new Date(ctx.now().getTime() + MIN)
+    }
+    if (user.pendingInput !== 'none') return new Date(ctx.now().getTime() + MIN)
+    const primary = await tx.reminderChain.findFirst({ where: { userId: user.id, status: 'active' } })
+    // A primary question due now or just delivered owns this turn. Do not
+    // suppress a summary indefinitely merely because work has a future timer.
+    if (primary && (primary.nextDueAt.getTime() <= ctx.now().getTime() + MIN || primary.deliveryAnchorAt && primary.deliveryAnchorAt.getTime() > ctx.now().getTime() - MIN)) return new Date(ctx.now().getTime() + MIN)
+    if (m.kind === 'summary') {
+      const goal = await tx.dailyGoal.findUnique({ where: { userId_dayKey: { userId: user.id, dayKey: String(p.dayKey ?? '') } } })
+      if (goal?.summarySentAt) return 'skip'
+    }
+  }
+  return null
+}
+
+async function deliverMigratedLegacy(ctx: Ctx, claimed: OutboxMessage): Promise<void> {
+  const token = randomUUID()
+  const initial = await ctx.db.$transaction(async (tx) => {
+    await lockUser(tx, claimed.userId)
+    const m = await tx.outboxMessage.findUnique({ where: { id: claimed.id } })
+    const user = await tx.user.findUnique({ where: { id: claimed.userId } })
+    if (!m || !user || m.status !== 'sending' || m.generationToken !== claimed.generationToken || m.lockedUntil?.getTime() !== claimed.lockedUntil?.getTime() || !m.lockedUntil || m.lockedUntil <= ctx.now()) return null
+    const eligibility = await legacyEligibility(tx, ctx, m, user)
+    if (eligibility) {
+      await tx.outboxMessage.update({ where: { id: m.id }, data: { status: eligibility === 'skip' ? 'skipped' : 'pending', ...(eligibility === 'skip' ? {} : { sendAfter: eligibility }), lockedUntil: null } })
+      return null
+    }
+    await tx.outboxMessage.update({ where: { id: m.id }, data: { generationToken: token } })
+    // The legacy free-mode ping can update missed checks and close a session.
+    // Keep those state mutations under the same owner lock as manual actions;
+    // this branch makes no LLM/network calls and never nests a transaction.
+    const rendered = m.kind === 'ping' ? await render(ctx, m, user, tx) : null
+    return { user, fingerprint: legacyFingerprint(user), rendered, sessionFingerprint: rendered ? await legacySessionFingerprint(tx, m) : null }
+  })
+  if (!initial) return
+  let rendered: Render
+  try { rendered = initial.rendered ?? await render(ctx, claimed, initial.user) }
+  catch (error) {
+    log.error('outbox_render_failed', error, { kind: claimed.kind })
+    await ctx.db.outboxMessage.updateMany({ where: { id: claimed.id, status: 'sending', generationToken: token }, data: { status: 'failed', lockedUntil: null, lastError: 'render' } })
+    return
+  }
+  if ('skip' in rendered) {
+    await ctx.db.outboxMessage.updateMany({ where: { id: claimed.id, status: 'sending', generationToken: token }, data: { status: 'skipped', lockedUntil: null } })
+    return
+  }
+  const msg = 'replace' in rendered ? rendered.replace : rendered
+  // Rendering may legitimately finish a legacy free-mode session. Snapshot
+  // its resulting state, then fence any subsequent manual phase change.
+  const sessionFingerprint = initial.sessionFingerprint ?? await legacySessionFingerprint(ctx.db, claimed)
+  const ready = await ctx.db.$transaction(async (tx) => {
+    await lockUser(tx, claimed.userId)
+    const m = await tx.outboxMessage.findUnique({ where: { id: claimed.id } })
+    const user = await tx.user.findUnique({ where: { id: claimed.userId } })
+    if (!m || !user || m.status !== 'sending' || m.generationToken !== token || !m.lockedUntil || m.lockedUntil <= ctx.now()) return null
+    const eligibility = await legacyEligibility(tx, ctx, m, user)
+    const changed = legacyFingerprint(user) !== initial.fingerprint || await legacySessionFingerprint(tx, m) !== sessionFingerprint
+    const gateBusy = user.sendGateUntil && user.sendGateUntil > ctx.now()
+    if (eligibility || changed || gateBusy) {
+      const skip = eligibility === 'skip'
+      const due = eligibility instanceof Date ? eligibility : gateBusy ? user.sendGateUntil! : new Date(ctx.now().getTime() + MIN)
+      await tx.outboxMessage.update({ where: { id: m.id }, data: { status: skip ? 'skipped' : 'pending', sendAfter: due, lockedUntil: null } })
+      return null
+    }
+    const started = ctx.now()
+    await tx.user.update({ where: { id: user.id }, data: { sendGateToken: token, sendGateUntil: new Date(started.getTime() + LEASE_MS) } })
+    await tx.outboxMessage.update({ where: { id: m.id }, data: { sendAttemptStartedAt: started, lockedUntil: new Date(started.getTime() + LEASE_MS), contextFingerprint: initial.fingerprint } })
+    return user
+  })
+  if (!ready) return
+  let error: unknown
+  try { await ctx.tg.send(ready.tgId, msg.text, msg.keyboard) } catch (caught) { error = caught }
+  await ctx.db.$transaction(async (tx) => {
+    await lockUser(tx, claimed.userId)
+    const m = await tx.outboxMessage.findUnique({ where: { id: claimed.id } })
+    const user = await tx.user.findUnique({ where: { id: claimed.userId } })
+    if (m?.status === 'sending' && m.generationToken === token && user) {
+      let data: Prisma.OutboxMessageUpdateInput
+      if (error === undefined) data = { status: 'sent', sentAt: ctx.now() }
+      else if (error instanceof TelegramError && error.code === 429) data = { status: 'pending', sendAfter: new Date(ctx.now().getTime() + (error.retryAfterSec ?? 30) * 1000), sendAttemptStartedAt: null, lastError: '429' }
+      else if (error instanceof DeliveryError && !error.maybeSent && m.attempts < MAX_ATTEMPTS) data = { status: 'pending', sendAfter: new Date(ctx.now().getTime() + 30_000 * m.attempts), sendAttemptStartedAt: null, lastError: error.code.slice(0, 40) }
+      else if (error instanceof TelegramError || error instanceof DeliveryError && !error.maybeSent) data = { status: 'failed', lastError: error instanceof TelegramError ? String(error.code) : error.code.slice(0, 40) }
+      else data = { status: 'uncertain', lastError: error instanceof DeliveryError ? error.code.slice(0, 40) : 'unknown' }
+      await tx.outboxMessage.update({ where: { id: m.id }, data: { ...data, lockedUntil: null } })
+      // Never let an old rendered turn clear a newer manual pending input.
+      if (error === undefined && legacyFingerprint(user) === initial.fingerprint) await msg.after?.(tx)
+      if (error instanceof TelegramError && error.code === 403) {
+        await tx.user.update({ where: { id: user.id }, data: { blockedAt: ctx.now() } })
+        await tx.outboxMessage.updateMany({ where: { userId: user.id, status: { in: ['pending', 'paused'] } }, data: { status: 'canceled' } })
+      }
+    }
+    await tx.user.updateMany({ where: { id: claimed.userId, sendGateToken: token }, data: { sendGateToken: null, sendGateUntil: null } })
+  })
+}
+
+async function recoverMigratedLegacy(ctx: Ctx, claimed: OutboxMessage): Promise<void> {
+  await ctx.db.$transaction(async (tx) => {
+    await lockUser(tx, claimed.userId)
+    const m = await tx.outboxMessage.findUnique({ where: { id: claimed.id } })
+    if (!m || m.status !== 'sending' || !m.lockedUntil || m.lockedUntil >= ctx.now()) return
+    await tx.outboxMessage.update({ where: { id: m.id }, data: { status: m.sendAttemptStartedAt ? 'uncertain' : 'pending', sendAfter: ctx.now(), generationToken: null, lockedUntil: null, lastError: 'lease_expired' } })
+    if (m.generationToken) await tx.user.updateMany({ where: { id: m.userId, sendGateToken: m.generationToken }, data: { sendGateToken: null, sendGateUntil: null } })
+  })
 }
 
 async function deliver(ctx: Ctx, m: OutboxMessage): Promise<void> {
+  if (m.kind === 'reminder') return deliverReminder(ctx, m)
   const user = await ctx.db.user.findUnique({ where: { id: m.userId } })
   if (!user || user.blockedAt) return finish(ctx, m.id, { status: 'skipped' })
+  if (user.reminderPolicy === 1) return deliverMigratedLegacy(ctx, m)
 
   let rendered: Render
   try {
@@ -271,6 +429,11 @@ async function deliver(ctx: Ctx, m: OutboxMessage): Promise<void> {
   if ('skip' in rendered) return finish(ctx, m.id, { status: 'skipped' })
   const msg = 'replace' in rendered ? rendered.replace : rendered
 
+  // A manual new-policy start may have migrated the owner during legacy
+  // rendering. Discard the old turn and let the fenced path revalidate it.
+  const fresh = await ctx.db.user.findUnique({ where: { id: m.userId } })
+  if (fresh?.reminderPolicy === 1) return deliverMigratedLegacy(ctx, m)
+
   try {
     await ctx.tg.send(user.tgId, msg.text, msg.keyboard)
   } catch (error) {
@@ -279,8 +442,9 @@ async function deliver(ctx: Ctx, m: OutboxMessage): Promise<void> {
 
   // Отметка об отправке и всё, что из неё следует, — одной транзакцией.
   await ctx.db.$transaction(async (tx) => {
-    await tx.outboxMessage.update({ where: { id: m.id }, data: { status: 'sent', sentAt: ctx.now(), lockedUntil: null } })
-    await msg.after?.(tx)
+    const marked = await tx.outboxMessage.updateMany({ where: { id: m.id, status: 'sending', lockedUntil: m.lockedUntil }, data: { status: 'sent', sentAt: ctx.now(), lockedUntil: null } })
+    const owner = await tx.user.findUnique({ where: { id: m.userId }, select: { reminderPolicy: true } })
+    if (marked.count === 1 && owner?.reminderPolicy !== 1) await msg.after?.(tx)
   })
   rememberConversationContext(user.id, 'assistant', msg.text, ctx.now())
 }
@@ -312,7 +476,7 @@ async function onSendError(ctx: Ctx, m: OutboxMessage, error: unknown): Promise<
 async function markUncertain(ctx: Ctx, m: OutboxMessage, code: string): Promise<void> {
   await ctx.db.$transaction(async (tx) => {
     const res = await tx.outboxMessage.updateMany({
-      where: { id: m.id, status: 'sending' },
+      where: { id: m.id, status: 'sending', lockedUntil: m.lockedUntil },
       data: { status: 'uncertain', lockedUntil: null, lastError: code.slice(0, 40) },
     })
     if (res.count === 1) {
@@ -329,13 +493,20 @@ export async function recoverStuck(ctx: Ctx): Promise<void> {
     where: { status: 'sending', lockedUntil: { lt: ctx.now() } },
     take: BATCH,
   })
-  for (const m of stuck) await markUncertain(ctx, m, 'lease_expired')
+  for (const m of stuck) {
+    if (m.kind === 'reminder') await recoverReminder(ctx, m)
+    else if (m.generationToken) await recoverMigratedLegacy(ctx, m)
+    else await markUncertain(ctx, m, 'lease_expired')
+  }
 }
 
 export async function runOutboxOnce(ctx: Ctx): Promise<number> {
   await recoverStuck(ctx)
-  const batch = await claim(ctx)
-  for (const m of batch) {
+  let processed = 0
+  while (processed < BATCH) {
+    const [m] = await claim(ctx)
+    if (!m) break
+    processed++
     try {
       await deliver(ctx, m)
     } catch (error) {
@@ -344,5 +515,5 @@ export async function runOutboxOnce(ctx: Ctx): Promise<number> {
       log.error('outbox_deliver_failed', error, { kind: m.kind })
     }
   }
-  return batch.length
+  return processed
 }

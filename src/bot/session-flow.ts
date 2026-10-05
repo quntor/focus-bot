@@ -1,3 +1,6 @@
+import { onReminderAction, quietKeyboard } from '../reminders/actions.js'
+import { cancelPrimary } from '../reminders/store.js'
+import { closePeriod, projectAllocations } from '../reminders/accounting.js'
 import { inputTransaction, assertCurrentInput } from './input-lock.js'
 import { randomBytes } from 'node:crypto'
 import { Prisma, type FocusSession, type User } from '@prisma/client'
@@ -119,7 +122,12 @@ export async function autoFinish(
   reason: AutoFinishReason,
 ): Promise<{ elapsed: number; counted: boolean; credit: Credit | null }> {
   if (session.state !== 'running' && session.state !== 'paused') throw new StaleTransition()
-  const end = until < now ? until : now
+  const end = session.reminderPolicy === 1 ? now : until < now ? until : now
+  if (session.reminderPolicy === 1) {
+    await cancelPrimary(tx,user.id)
+    await closePeriod(tx,session.id,end)
+    await projectAllocations(tx,user.id,session.id,now)
+  }
   const elapsed = Math.floor(activeElapsedMs(session, end) / MIN)
   const counted = isCounted('finished', elapsed)
   const openPauseSeconds = session.state === 'paused' && session.pausedAt ? Math.floor(Math.max(0, end.getTime() - session.pausedAt.getTime()) / 1000) : 0
@@ -490,11 +498,11 @@ export async function onSessionHelpAction(
 export async function askIntent(ctx: Ctx, user: User, opts: { continue?: boolean; preset?: { minutes: number }; prefix?: string } = {}) {
   const session = await openCollecting(ctx, user.id, opts.preset)
   if (session.state === 'running') {
-    await reply(ctx, user, T.alreadyRunning(endText(ctx, user, session)))
+    await reply(ctx, user, T.alreadyRunning(endText(ctx, user, session)),session.reminderPolicy===1?quietKeyboard(user,ctx.now()):undefined)
     return
   }
   if (session.state === 'paused') {
-    await reply(ctx, user, T.breakChoice)
+    await reply(ctx, user, T.breakChoice,session.reminderPolicy===1?[[{text:'Вернуться к работе',data:cb('cycle',null,'resume')},{text:'Ещё отдыхаю',data:cb('cycle',null,'rest')}],...quietKeyboard(user,ctx.now())]:undefined)
     return
   }
   const text = opts.continue
@@ -515,7 +523,7 @@ export async function onStartButton(ctx: Ctx, user: User): Promise<void> {
 // отчёте. Общий таймер при этом запускается по обычным настройкам.
 export async function startUnassigned(ctx: Ctx, user: User): Promise<void> {
   const session = await openCollecting(ctx, user.id)
-  if (session.state === 'running') return reply(ctx, user, T.alreadyRunning(endText(ctx, user, session)))
+  if (session.state === 'running') return reply(ctx, user, T.alreadyRunning(endText(ctx, user, session)),session.reminderPolicy===1?quietKeyboard(user,ctx.now()):undefined)
   if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
   // Намерение уже написано и длина предложена — «Начать сессию» значит «Ок»,
   // а не «стереть, что я написал».
@@ -630,11 +638,11 @@ export async function startTaskSession(ctx: Ctx, user: User, taskId: string): Pr
 export async function onIntentText(ctx: Ctx, user: User, text: string, prepared?: IntentResult): Promise<void> {
   const session = await openCollecting(ctx, user.id)
   if (session.state === 'running') {
-    await reply(ctx, user, T.alreadyRunning(endText(ctx, user, session)))
+    await reply(ctx, user, T.alreadyRunning(endText(ctx, user, session)),session.reminderPolicy===1?quietKeyboard(user,ctx.now()):undefined)
     return
   }
   if (session.state === 'paused') {
-    await reply(ctx, user, T.breakChoice)
+    await reply(ctx, user, T.breakChoice,session.reminderPolicy===1?[[{text:'Вернуться к работе',data:cb('cycle',null,'resume')},{text:'Ещё отдыхаю',data:cb('cycle',null,'rest')}],...quietKeyboard(user,ctx.now())]:undefined)
     return
   }
   // Предложение длины уже показано — новый текст уточняет намерение, а не
@@ -1022,7 +1030,7 @@ export async function onRunningDurationText(ctx: Ctx, user: User, sessionId: str
   })
   const periodStartedAt = lastResume?.createdAt ?? session.startedAt
   const elapsedMs = Math.max(0, now.getTime() - periodStartedAt.getTime())
-  const remainingMs = minutes * MIN - elapsedMs
+  const remainingMs = session.reminderPolicy===1?minutes*MIN:minutes * MIN - elapsedMs
   if (remainingMs <= 0) return reply(ctx, user, T.runningDurationTooShort(Math.max(1, Math.ceil(elapsedMs / MIN))))
   const plannedEndAt = new Date(now.getTime() + remainingMs)
   const rest = restFor(minutes)
@@ -1189,6 +1197,7 @@ export async function onDeadlineChoice(
   }))
   // «Пора отдыхать» после отработанного периода — конец сессии, а не перерыв:
   // исход, отчёт и отдых, как у /done. Перерыв посреди работы — кнопка «Перерыв».
+  if (session.reminderPolicy === 1) return onReminderAction(ctx,user,null,choice === 'break' ? 'break' : 'continue')
   if (choice === 'break') return reply(ctx, user, T.deadlineBreak, outcomeKeyboard(sessionId))
   // «Ещё поработаю» сдвигает конец: иначе через час сессия считалась бы брошенной.
   const end = new Date(now.getTime() + DEADLINE_EXTEND_MINUTES * MIN)
@@ -1207,15 +1216,15 @@ export async function onDeadlineChoice(
 export async function onDone(ctx: Ctx, user: User): Promise<void> {
   const session = await activeSession(ctx, user.id)
   if (ctx.semanticRouterEnabled && ctx.isCurrentInput && !ctx.isCurrentInput()) return
-  if (session?.state === 'paused') return reply(ctx, user, T.breakChoice)
-  if (!session || session.state !== 'running') return reply(ctx, user, T.nothingRunning)
+  if (session?.state === 'paused' && session.reminderPolicy !== 1) return reply(ctx, user, T.breakChoice)
+  if (!session || !['running','paused'].includes(session.state)) return reply(ctx, user, T.nothingRunning)
   await reply(ctx, user, T.sessionEndEarly, outcomeKeyboard(session.id))
 }
 
 export async function onOutcome(ctx: Ctx, user: User, sessionId: string, outcome: Outcome): Promise<void> {
   const now = ctx.now()
   const session = await ownedSession(ctx, user.id, sessionId)
-  if (!session || session.state !== 'running' || !session.startedAt) return reply(ctx, user, T.stale)
+  if (!session || !session.startedAt || (session.state !== 'running' && !(session.state === 'paused' && session.reminderPolicy === 1))) return reply(ctx,user,T.stale)
 
   const elapsed = Math.floor(activeElapsedMs(session, now) / MIN)
   const counted = isCounted('finished', elapsed)
@@ -1225,7 +1234,7 @@ export async function onOutcome(ctx: Ctx, user: User, sessionId: string, outcome
   let credit: Credit | null = null
   try {
     await inputTransaction(ctx, async (tx) => {
-      await transition(tx, { sessionId, userId: user.id }, 'running', 'finished', { outcome, finishedAt: now, counted })
+      await transition(tx, { sessionId, userId: user.id }, session.state as 'running'|'paused', 'finished', { outcome, finishedAt: now, counted, ...(session.state === 'paused' ? { pausedAt:null,pausedSeconds:session.pausedSeconds+Math.floor((now.getTime()-session.pausedAt!.getTime())/1000) } : {}) })
       await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `ping:${sessionId}` } })
       await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `session_end:${sessionId}` } })
       await logEvent(tx, user.id, 'session_completed', { session_id: sessionId, outcome, elapsed_minutes: elapsed, early, counted }, { at: now, sessionId })
@@ -1551,7 +1560,7 @@ async function askRest(
 ): Promise<void> {
   const now = ctx.now()
   const rest = session.plannedRestMinutes ?? restFor(session.plannedMinutes)
-  await enqueue(ctx.db, {
+  if (session.reminderPolicy !== 1) await enqueue(ctx.db, {
     userId: user.id,
     kind: 'rest_over',
     key: `rest_over:${session.id}`,
@@ -1732,6 +1741,7 @@ export async function onBreak(ctx: Ctx, user: User): Promise<void> {
     })
     return reply(ctx, user, T.restingIdle)
   }
+  if (session.reminderPolicy === 1) return onReminderAction(ctx,user,null,'break')
   if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
   // Перерыв без конца забывается: по истечении отдыха бот зовёт обратно.
   const breakEnd = new Date(now.getTime() + (session.plannedRestMinutes ?? restFor(session.plannedMinutes)) * MIN)
@@ -1772,6 +1782,7 @@ export async function onResume(ctx: Ctx, user: User): Promise<void> {
   const session = await activeSession(ctx, user.id)
   if (!session || session.state !== 'paused' || !session.pausedAt) return reply(ctx, user, T.nothingPaused)
 
+  if (session.reminderPolicy === 1) return onReminderAction(ctx,user,null,'resume')
   const pauseMs = Math.max(0, now.getTime() - session.pausedAt.getTime())
   const plannedEndAt = session.plannedMinutes === null ? null : new Date(now.getTime() + session.plannedMinutes * MIN)
   const pingAt = periodPingAt(user, session, now)
