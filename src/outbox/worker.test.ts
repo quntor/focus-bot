@@ -200,7 +200,7 @@ describe.skipIf(!hasDb)('outbox', () => {
     breakBot.advance(40)
     await runOutboxOnce(breakBot.ctx)
     await breakBot.press(A, `end:${pausing.id}:break`)
-    expect(breakBot.lastText(A)).toBe('Отдых заслужен. Как прошло?')
+    expect(breakBot.lastText(A)).toContain('Перерыв начался: 10 минут.')
     await breakBot.press(A, `out:${pausing.id}:done`)
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: pausing.id } })).toMatchObject({ state: 'finished', counted: true })
   })

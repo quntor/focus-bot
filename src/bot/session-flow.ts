@@ -882,7 +882,7 @@ export async function startRunning(ctx: Ctx, user: User, sessionId: string): Pro
         })
       }
       // Человек начал сам — ждущие напоминания на ближайшие часы уже не нужны.
-      await cancelPending(tx, { userId: user.id, kind: 'rest_over' })
+      await cancelPending(tx, { userId: user.id, kind: { in: ['rest_over', 'break_over'] } })
       await cancelPending(tx, { userId: user.id, kind: 'meeting', sendAfter: { lte: new Date(now.getTime() + 3 * 60 * MIN) } })
       // Старт — новое действие: отложенный отчёт прошлой сессии, время встречи,
       // правка профиля или задачи больше не ждут ответа.
@@ -1195,10 +1195,9 @@ export async function onDeadlineChoice(
     where: { id: user.id, pendingInput: `session_end:${sessionId}` },
     data: { pendingInput: 'none' },
   }))
-  // «Пора отдыхать» после отработанного периода — конец сессии, а не перерыв:
-  // исход, отчёт и отдых, как у /done. Перерыв посреди работы — кнопка «Перерыв».
+  // Отдых начинается по выбору, а не после необязательного исхода/отчёта.
   if (session.reminderPolicy === 1) return onReminderAction(ctx,user,null,choice === 'break' ? 'break' : 'continue')
-  if (choice === 'break') return reply(ctx, user, T.deadlineBreak, outcomeKeyboard(sessionId))
+  if (choice === 'break') return pauseForBreak(ctx, user, session, now, true)
   // «Ещё поработаю» сдвигает конец: иначе через час сессия считалась бы брошенной.
   const end = new Date(now.getTime() + DEADLINE_EXTEND_MINUTES * MIN)
   await inputTransaction(ctx, async (tx) => {
@@ -1224,7 +1223,9 @@ export async function onDone(ctx: Ctx, user: User): Promise<void> {
 export async function onOutcome(ctx: Ctx, user: User, sessionId: string, outcome: Outcome): Promise<void> {
   const now = ctx.now()
   const session = await ownedSession(ctx, user.id, sessionId)
-  if (!session || !session.startedAt || (session.state !== 'running' && !(session.state === 'paused' && session.reminderPolicy === 1))) return reply(ctx,user,T.stale)
+  if (!session || !session.startedAt || !['running', 'paused'].includes(session.state)) return reply(ctx,user,T.stale)
+
+  const legacyBreak = session.state === 'paused' && session.reminderPolicy !== 1
 
   const elapsed = Math.floor(activeElapsedMs(session, now) / MIN)
   const counted = isCounted('finished', elapsed)
@@ -1234,7 +1235,12 @@ export async function onOutcome(ctx: Ctx, user: User, sessionId: string, outcome
   let credit: Credit | null = null
   try {
     await inputTransaction(ctx, async (tx) => {
-      await transition(tx, { sessionId, userId: user.id }, session.state as 'running'|'paused', 'finished', { outcome, finishedAt: now, counted, ...(session.state === 'paused' ? { pausedAt:null,pausedSeconds:session.pausedSeconds+Math.floor((now.getTime()-session.pausedAt!.getTime())/1000) } : {}) })
+      await transition(tx, { sessionId, userId: user.id }, session.state as 'running'|'paused', 'finished', { outcome, finishedAt: now, counted, ...(legacyBreak ? { restChoice: 'rest' } : {}), ...(session.state === 'paused' ? { pausedAt:null,pausedSeconds:session.pausedSeconds+Math.floor((now.getTime()-session.pausedAt!.getTime())/1000) } : {}) })
+      if (legacyBreak) {
+        // Сохраняем ту же строку/дедлайн break_over даже при уже начавшейся
+        // доставке: отчёт не продлевает отдых и не создаёт второго напоминания.
+        await logEvent(tx, user.id, 'rest_chosen', { session_id: sessionId, choice: 'rest', rest_minutes: session.plannedRestMinutes ?? restFor(session.plannedMinutes) }, { at: session.pausedAt!, sessionId })
+      }
       await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `ping:${sessionId}` } })
       await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `session_end:${sessionId}` } })
       await logEvent(tx, user.id, 'session_completed', { session_id: sessionId, outcome, elapsed_minutes: elapsed, early, counted }, { at: now, sessionId })
@@ -1743,6 +1749,10 @@ export async function onBreak(ctx: Ctx, user: User): Promise<void> {
   }
   if (session.reminderPolicy === 1) return onReminderAction(ctx,user,null,'break')
   if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
+  return pauseForBreak(ctx, user, session, now)
+}
+
+async function pauseForBreak(ctx: Ctx, user: User, session: FocusSession, now: Date, askOutcome = false): Promise<void> {
   // Перерыв без конца забывается: по истечении отдыха бот зовёт обратно.
   const breakEnd = new Date(now.getTime() + (session.plannedRestMinutes ?? restFor(session.plannedMinutes)) * MIN)
   try {
@@ -1774,7 +1784,10 @@ export async function onBreak(ctx: Ctx, user: User): Promise<void> {
     if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
     throw error
   }
-  await reply(ctx, user, `${T.breakStarted(hhmm(breakEnd, user.timezone))}\n${T.breakChoice}`)
+  await reply(ctx, user, askOutcome
+    ? `${T.deadlineBreakStarted(session.plannedRestMinutes ?? restFor(session.plannedMinutes), hhmm(breakEnd, user.timezone))}\nКак прошло? Можно ответить позже.`
+    : `${T.breakStarted(hhmm(breakEnd, user.timezone))}\n${T.breakChoice}`,
+  askOutcome ? outcomeKeyboard(session.id) : undefined)
 }
 
 export async function onResume(ctx: Ctx, user: User): Promise<void> {

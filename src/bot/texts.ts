@@ -242,7 +242,7 @@ export const T = {
   // --- Конец и отчёт. Исход троичный.
   sessionEnd: 'Время вышло: поработай ещё или пора отдыхать?',
   deadlineContinue: (end: string) => `Хорошо, ещё ${DEADLINE_EXTEND_MINUTES} минут — напишу в ${end}. Закончишь раньше — /done.`,
-  deadlineBreak: 'Отдых заслужен. Как прошло?',
+  deadlineBreakStarted: (minutes: number, end: string) => `Перерыв начался: ${minutes} минут. Напишу в ${end}.`,
   // Сессия закончилась без ответа: время засчитано, а не выброшено.
   autoFinished: (minutes: number, counted: boolean) =>
     counted

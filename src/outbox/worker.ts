@@ -192,10 +192,23 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User, ownerTx?: Prisma.T
   if (m.kind === 'break_over') {
     const sessionId = String(p.sessionId ?? '')
     const session = await ctx.db.focusSession.findFirst({ where: { id: sessionId, userId: user.id } })
+    if (!session) return { skip: true }
+    const paused = session.state === 'paused' && session.pausedAt?.getTime() === Number(p.pausedAt)
+    // Исход во время отдыха закрывает сессию, но не отменяет таймер. Проверка
+    // последнего pause не позволяет воскресить уведомление старого перерыва.
+    let finished = false
+    if (session.state === 'finished' && session.restChoice === 'rest') {
+      const latestPause = await ctx.db.event.findFirst({
+        where: { subjectId: user.subjectId, sessionId, type: 'session_paused' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      })
+      const active = await ctx.db.focusSession.count({ where: { userId: user.id, state: { in: ['collecting_intent', 'running', 'paused'] } } })
+      finished = latestPause?.createdAt.getTime() === Number(p.pausedAt) && active === 0
+    }
     // Человек уже вернулся, начал новую или ушёл на другой перерыв — молчим.
-    if (!session || session.state !== 'paused' || session.pausedAt?.getTime() !== Number(p.pausedAt)) return { skip: true }
+    if (!paused && !finished) return { skip: true }
     return {
-      text: T.breakOver,
+      text: finished ? T.restOver : T.breakOver,
       after: async (tx) => {
         await logEvent(tx, user.id, 'break_over_sent', { session_id: sessionId }, { at: now, sessionId })
       },
