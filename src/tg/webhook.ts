@@ -13,6 +13,7 @@ import * as account from '../bot/account.js'
 import * as day from '../bot/day-flow.js'
 import * as session from '../bot/session-flow.js'
 import * as tasks from '../bot/tasks.js'
+import { showStatus } from '../bot/status.js'
 import { OUTCOMES, StaleTransition, type Outcome } from '../session/fsm.js'
 import { parseCommand, parseSource } from './commands.js'
 import { claimUpdate } from './dedupe.js'
@@ -105,7 +106,9 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
   if (chatType !== undefined && chatType !== 'private') return
 
   const tgId = BigInt(sender.id)
-  if (ctx.semanticRouterEnabled) ctx = { ...ctx, isCurrentInput: beginInput(String(tgId)) }
+  const command = parseCommand(msg?.text)
+  const statusRequest = command?.command === 'status' || msg?.text?.trim() === T.statusButton
+  if (ctx.semanticRouterEnabled && !statusRequest) ctx = { ...ctx, isCurrentInput: beginInput(String(tgId)) }
   const count = await countInWindow(ctx, tgId)
   if (count > RATE_LIMIT_PER_MINUTE) {
     // Молчание выглядит как сломанный бот. Но отвечать на каждое сообщение
@@ -116,7 +119,18 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
     return
   }
 
-  const command = parseCommand(msg?.text)
+  // Справочное чтение не отменяет выбор, ожидаемый ответ или текущий LLM-ввод.
+  if (statusRequest) {
+    try {
+      const statusUser = await ctx.db.user.findUnique({ where: { tgId } })
+      if (statusUser) await showStatus(ctx, statusUser)
+      else await ctx.tg.send(tgId, T.statusIdle)
+    } catch (error) {
+      log.error('status_failed', error)
+      await ctx.tg.send(tgId, T.error).catch(() => {})
+    }
+    return
+  }
   // Инструкция доступна даже до /start и не должна сбрасывать ожидаемый ввод:
   // это справка, а не новое действие внутри пользовательского сценария.
   if (command?.command === 'guide') {

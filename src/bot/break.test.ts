@@ -17,7 +17,7 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
 
     expect((bot.tg.sent.at(-1) as { replyKeyboard?: string[][] } | undefined)?.replyKeyboard).toEqual([
       ['Начать сессию', 'Перерыв'],
-      ['Мои задачи'],
+      ['Мои задачи', 'Статус'],
     ])
   })
 
@@ -136,7 +136,7 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
     expect((paused as { pausedAt?: Date | null }).pausedAt).toEqual(bot.now())
     expect((bot.tg.sent.at(-1) as { replyKeyboard?: string[][] } | undefined)?.replyKeyboard).toEqual([
       ['Вернуться к работе', 'Начать новую сессию'],
-      ['Мои задачи'],
+      ['Мои задачи', 'Статус'],
     ])
     expect(await prisma.outboxMessage.findFirstOrThrow({ where: { idempotencyKey: `session_end:${running.id}` } })).toMatchObject({ status: 'canceled' })
 
@@ -159,7 +159,7 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
     expect(bot.lastText(A)).toContain('Новый период работы — 40 минут')
     expect((bot.tg.sent.at(-1) as { replyKeyboard?: string[][] } | undefined)?.replyKeyboard).toEqual([
       ['Начать сессию', 'Перерыв'],
-      ['Мои задачи'],
+      ['Мои задачи', 'Статус'],
     ])
 
     bot.advance(39)

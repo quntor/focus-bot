@@ -38,12 +38,13 @@ export async function markBlocked(ctx: Ctx, userId: string): Promise<void> {
 
 // Ответ пользователю в потоке обработки апдейта. Состояние к этому моменту уже
 // записано, поэтому ошибка отправки не откатывает его и наружу не летит.
-export async function reply(ctx: Ctx, user: Pick<User, 'id' | 'tgId'>, text: string, keyboard?: Keyboard, options: { preserveTaskNumberPrompt?: boolean } = {}): Promise<void> {
+export async function reply(ctx: Ctx, user: Pick<User, 'id' | 'tgId'>, text: string, keyboard?: Keyboard, options: { preserveTaskNumberPrompt?: boolean; informational?: boolean } = {}): Promise<void> {
   try {
     const replyKeyboard = keyboard ? undefined : await sessionKeyboard(ctx, user.id)
     if (ctx.semanticRouterEnabled && ctx.isCurrentInput && !ctx.isCurrentInput()) return
     await ctx.tg.send(user.tgId, text, keyboard, replyKeyboard)
     if (ctx.semanticRouterEnabled && ctx.isCurrentInput && !ctx.isCurrentInput()) return
+    if (options.informational) return
     if (!options.preserveTaskNumberPrompt) await rememberTaskNumberPrompt(ctx, user.id, text, keyboard)
     rememberConversationContext(user.id, 'assistant', text, ctx.now())
     if (ctx.semanticRouterEnabled) {
@@ -69,6 +70,6 @@ async function sessionKeyboard(ctx: Ctx, userId: string): Promise<ReplyKeyboard 
   if (['timezone', 'start_time', 'ritual'].includes(user.pendingInput)) return 'remove'
   const paused = await ctx.db.focusSession.count({ where: { userId, state: 'paused' } })
   return paused > 0
-    ? [[T.sessionResumeButton, T.sessionNewButton], [T.tasksButton]]
-    : [[T.sessionStartButton, T.sessionBreakButton], [T.tasksButton]]
+    ? [[T.sessionResumeButton, T.sessionNewButton], [T.tasksButton, T.statusButton]]
+    : [[T.sessionStartButton, T.sessionBreakButton], [T.tasksButton, T.statusButton]]
 }

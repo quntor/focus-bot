@@ -83,6 +83,16 @@ export const T = {
   sessionResumeButton: 'Вернуться к работе',
   sessionNewButton: 'Начать новую сессию',
   tasksButton: 'Мои задачи',
+  statusButton: 'Статус',
+  statusIdle: 'Сейчас нет активной сессии или отдыха.',
+  statusPreparing: 'Сессия ещё не началась: выбираем задачу и длительность.',
+  statusNoTask: 'Задача не выбрана.',
+  statusWork: 'Идёт рабочая сессия.',
+  statusRest: 'Идёт отдых.',
+  statusUnknownTime: 'Время начала не сохранено.',
+  statusElapsed: (duration: string) => `Прошло: ${duration}.`,
+  statusTask: (title: string, resting: boolean) => `${resting ? 'Последняя задача' : 'Задача'}: ${title}`,
+  statusDeadlinePassed: 'Плановое время вышло; режим не изменён.',
 
   // --- Список задач и голос.
   voiceTooLong: 'Голосовое должно быть не длиннее 3 минут.',
@@ -414,7 +424,7 @@ export const T = {
 
   help:
     `${onboardingGuide}\n\nКоманды:\n` +
-    '/focus — начать сессию\n/tasks — мои задачи\n/done — закончить раньше\n/stop — бросить сессию\n' +
+    '/focus — начать сессию\n/status — текущий режим, время и задача\n/tasks — мои задачи\n/done — закончить раньше\n/stop — бросить сессию\n' +
     '/today — на сегодня всё\n/goal — цель на день\n/dayoff — завтра выходной\n/settings — настройки\n' +
     '/profile — что я о тебе помню\n/guide — подробная инструкция\n/delete_me — удалить все данные',
   guide: `Подробная инструкция с примерами и картинками: ${GUIDE_URL}`,

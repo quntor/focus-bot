@@ -5,6 +5,7 @@ describe('нативное меню Telegram', () => {
   it('показывает все пользовательские действия в понятном порядке', () => {
     expect(BOT_COMMANDS).toEqual([
       { command: 'focus', description: 'Начать фокус-сессию' },
+      { command: 'status', description: 'Текущий режим, время и задача' },
       { command: 'tasks', description: 'Показать мои задачи' },
       { command: 'done', description: 'Закончить текущую сессию' },
       { command: 'stop', description: 'Бросить текущую сессию' },

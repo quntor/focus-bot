@@ -26,7 +26,7 @@ describe.skipIf(!hasDb)('онбординг нового пользовател�
     expect(text).toContain('С чего начнёшь?')
     expect((bot.tg.sent.at(-1) as { replyKeyboard?: string[][] } | undefined)?.replyKeyboard).toEqual([
       ['Начать сессию', 'Перерыв'],
-      ['Мои задачи'],
+      ['Мои задачи', 'Статус'],
     ])
   })
 
