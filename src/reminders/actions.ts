@@ -32,6 +32,7 @@ export async function onReminderAction(ctx: Ctx,user: User,id: string|null,arg: 
     if(arg==='quiet'||arg==='stop'){
       await tx.user.update({where:{id:user.id},data:{quietUntil:midnight(fresh,now)}})
       if(arg==='stop'){
+        await tx.focusSession.updateMany({where:{userId:user.id,state:'finished',restChoice:'rest',restEndedAt:null},data:{restEndedAt:now}})
         if(session){
           const paused=session.state==='paused'&&session.pausedAt?Math.floor((now.getTime()-session.pausedAt.getTime())/1000):0
           await tx.focusSession.update({where:{id:session.id},data:{state:session.state==='collecting_intent'?'cancelled':'finished',finishedAt:now,outcome:null,counted:false,pausedAt:null,pausedSeconds:{increment:Math.max(0,paused)}}})

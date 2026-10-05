@@ -39,6 +39,17 @@ export async function showStatus(ctx: Ctx, user: User): Promise<void> {
       })
       start = event?.createdAt ?? null
     }
+    if (session.state === 'finished' && resting) {
+      // Старые завершения дня не заполняли restEndedAt. Учитываем их журнал,
+      // но выключение уведомлений (mute) само по себе отдых не заканчивает.
+      const ended = await tx.event.findFirst({
+        where: { subjectId: user.subjectId, createdAt: { gte: start ?? session.finishedAt ?? session.createdAt }, OR: [
+          { type: 'day_closed' },
+          { type: 'reminder_answered', payload: { path: ['action'], equals: 'stop_today' } },
+        ] },
+      })
+      if (ended) return T.statusIdle
+    }
     const title = session.task?.title ?? session.intentText
     const lines: string[] = [resting ? T.statusRest : T.statusWork]
     lines.push(start ? T.statusElapsed(elapsed(start, now)) : T.statusUnknownTime)

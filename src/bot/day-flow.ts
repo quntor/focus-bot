@@ -393,6 +393,10 @@ export async function closeDay(
       await autoFinish(tx, user, active, active.reminderPolicy === 1 ? now : active.plannedEndAt ?? now, now, 'day_end')
       await tx.focusSession.updateMany({ where: { id: active.id, userId: user.id }, data: { restChoice: 'day_end' } })
     }
+    await tx.focusSession.updateMany({
+      where: { userId: user.id, state: 'finished', restChoice: 'rest', restEndedAt: null },
+      data: { restEndedAt: now },
+    })
     await tx.dailyGoal.upsert({
       where: { userId_dayKey: { userId: user.id, dayKey: day } },
       create: { userId: user.id, dayKey: day, summarySentAt: now },

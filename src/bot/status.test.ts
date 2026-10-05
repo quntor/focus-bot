@@ -85,6 +85,39 @@ describe.skipIf(!hasDb)('Статус', () => {
     expect((await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).pendingTaskTitle).toBe('Новая задача')
   })
 
+  for (const ending of ['/today', 'stop', 'quiet'] as const) {
+    it(`после отдыха корректно учитывает ${ending}`, async () => {
+      const bot = makeBot()
+      bot.ctx.remindersEnabled = true
+      bot.ctx.reminderUserIds = [String(A)]
+      await bot.onboard(A)
+      const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+      await prisma.user.update({ where: { id: user.id }, data: { reminderPolicy: 1 } })
+      await bot.text(A, 'Начать сессию')
+      const session = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })
+      bot.advance(10)
+      await bot.press(A, `out:${session.id}:done`)
+      await bot.press(A, `skiprep:${session.id}:`)
+      await bot.press(A, `rest:${session.id}:rest`)
+      bot.advance(2)
+      await bot.text(A, '/status')
+      expect(bot.lastText(A)).toContain('Идёт отдых')
+      if (ending === '/today') await bot.text(A, ending)
+      else await bot.press(A, `cycle::${ending}`)
+      bot.advance(3)
+      await bot.text(A, '/status')
+      expect(bot.lastText(A)).toContain(ending === 'quiet' ? 'Идёт отдых' : 'Сейчас нет активной сессии или отдыха')
+      if (ending === 'quiet') expect(bot.lastText(A)).toContain('5 мин')
+      else {
+        expect((await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).restEndedAt).not.toBeNull()
+        // До релиза старые данные не имели restEndedAt: журнал тоже закрывает отдых.
+        await prisma.focusSession.update({ where: { id: session.id }, data: { restEndedAt: null } })
+        await bot.text(A, '/status')
+        expect(bot.lastText(A)).toContain('Сейчас нет активной сессии или отдыха')
+      }
+    })
+  }
+
   it('не видит чужую сессию и не объявляет законченный отдых активным', async () => {
     const bot = makeBot()
     await bot.onboard(A)
