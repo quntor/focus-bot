@@ -30,7 +30,7 @@ function morningOfWorkDay(user: User, day: string): Date {
   return localDateTime(user.timezone, clock.h < WORK_DAY_START_HOUR ? addDays(day, 1) : day, clock)
 }
 
-export async function buildSummary(db: Prisma.TransactionClient, user: User, day: string): Promise<DaySummary> {
+export async function buildSummary(db: Prisma.TransactionClient, user: User, day: string, asOf?: Date): Promise<DaySummary> {
   // Сессии дня — по дню пользователя. Берём с запасом по времени и фильтруем
   // по ключу дня в поясе пользователя: сутки сервера тут ни при чём.
   const since = new Date(Date.parse(`${day}T00:00:00Z`) - 36 * 60 * MIN)
@@ -214,7 +214,7 @@ export async function buildSummary(db: Prisma.TransactionClient, user: User, day
     where: { userId: user.id, dayKey: { gte: addDays(day, -6), lte: day }, completedSessions: { gt: 0 } },
   })
   // Идущая сессия в итог ещё не вошла — но и «сессий не было» про неё неправда.
-  const active = await db.focusSession.findFirst({ where: { userId: user.id, state: { in: ['running', 'paused'] } }, select: { state: true } })
+  const active = asOf && workDayKey(asOf, user.timezone) !== day ? null : await db.focusSession.findFirst({ where: { userId: user.id, state: { in: ['running', 'paused'] } }, select: { state: true } })
 
   return {
     sessions: finished.length,

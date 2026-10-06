@@ -3,6 +3,8 @@ import { makeBot } from '../test/bot.js'
 import { hasDb, prisma, resetDb } from '../test/db.js'
 import { onIntentText, onResume, onContinueChoice, onRunningWorkText } from './session-flow.js'
 import { routeSemanticInput } from './semantic-routing.js'
+import { onReminderAction } from '../reminders/actions.js'
+import { releasePending } from '../tg/webhook.js'
 import type { Ctx } from './context.js'
 
 // A real DB await completing after the arrival fence changes must not commit.
@@ -114,6 +116,26 @@ describe.skipIf(!hasDb)('semantic mutation arrival fence across DB awaits', () =
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).toMatchObject({ taskId: task.id, intentText: task.title })
     expect(await prisma.task.count()).toBe(1)
     expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ pendingInput: fresh.pendingInput })
+  })
+  it('explicit pause rolls back period and chain when superseded during UPDATE', async () => {
+    const { bot, user } = await ready()
+    const session = await prisma.focusSession.create({data:{userId:user.id,state:'running',reminderPolicy:1,plannedMinutes:40,startedAt:bot.now()}})
+    const chain = await prisma.reminderChain.create({data:{userId:user.id,sessionId:session.id,kind:'work',phaseStartedAt:bot.now(),firstDueAt:bot.now(),nextDueAt:bot.now(),intervalMinutes:40}})
+    await prisma.workPeriod.create({data:{sessionId:session.id,startedAt:bot.now()}})
+    await onReminderAction(invalidateAfter(bot.ctx,'focusSession','update'),user,null,'break',{restMinutes:90})
+    expect(await prisma.focusSession.findUniqueOrThrow({where:{id:session.id}})).toMatchObject({state:'running',pausedAt:null})
+    expect(await prisma.workPeriod.count({where:{sessionId:session.id,endedAt:null}})).toBe(1)
+    expect(await prisma.reminderChain.findUniqueOrThrow({where:{id:chain.id}})).toMatchObject({status:'active',kind:'work',revision:chain.revision})
+    expect(await prisma.reminderChain.count({where:{kind:'break'}})).toBe(0)
+  })
+  it('explicit pending release rolls back candidate and pending during UPDATE', async () => {
+    const { bot, user } = await ready()
+    const session = await prisma.focusSession.create({data:{userId:user.id,state:'running',pendingTaskTitle:'Кандидат'}})
+    const pendingInput = `running_task_choice:${session.id}:1234abcd`
+    const fresh = await prisma.user.update({where:{id:user.id},data:{pendingInput}})
+    await expect(releasePending(invalidateAfter(bot.ctx,'user','updateMany'),fresh,true)).rejects.toThrow()
+    expect(await prisma.user.findUniqueOrThrow({where:{id:user.id}})).toMatchObject({pendingInput})
+    expect(await prisma.focusSession.findUniqueOrThrow({where:{id:session.id}})).toMatchObject({pendingTaskTitle:'Кандидат'})
   })
   it('flag-off ignores arrival fencing and preserves named-time legacy start', async () => {
     const { bot, user } = await ready()

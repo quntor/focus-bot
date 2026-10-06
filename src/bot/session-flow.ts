@@ -356,7 +356,7 @@ export async function onRunningFreeText(
   }
 
   if (parsed.result.kind === 'pause') {
-    await onBreak(ctx, user)
+    await onBreak(ctx, user, parseNamedMinutes(text) ?? undefined)
     return true
   }
   if (parsed.result.kind === 'complete_and_rest') {
@@ -1735,7 +1735,7 @@ export async function onRest(
 
 // «Перерыв» завершает текущий рабочий период, но не логическую сессию. При
 // возврате начинается новый полный период той же настроенной длительности.
-export async function onBreak(ctx: Ctx, user: User): Promise<void> {
+export async function onBreak(ctx: Ctx, user: User, restMinutes?: number): Promise<void> {
   const now = ctx.now()
   const session = await activeSession(ctx, user.id)
   if (!session) return reply(ctx, user, T.restingIdle)
@@ -1747,14 +1747,15 @@ export async function onBreak(ctx: Ctx, user: User): Promise<void> {
     })
     return reply(ctx, user, T.restingIdle)
   }
-  if (session.reminderPolicy === 1) return onReminderAction(ctx,user,null,'break')
   if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
-  return pauseForBreak(ctx, user, session, now)
+  if (session.reminderPolicy === 1) return onReminderAction(ctx,user,null,'break', { restMinutes })
+  return pauseForBreak(ctx, user, session, now, false, restMinutes)
 }
 
-async function pauseForBreak(ctx: Ctx, user: User, session: FocusSession, now: Date, askOutcome = false): Promise<void> {
+async function pauseForBreak(ctx: Ctx, user: User, session: FocusSession, now: Date, askOutcome = false, restMinutes?: number): Promise<void> {
   // Перерыв без конца забывается: по истечении отдыха бот зовёт обратно.
-  const breakEnd = new Date(now.getTime() + (session.plannedRestMinutes ?? restFor(session.plannedMinutes)) * MIN)
+  const duration = restMinutes ?? session.plannedRestMinutes ?? restFor(session.plannedMinutes)
+  const breakEnd = new Date(now.getTime() + duration * MIN)
   try {
     await inputTransaction(ctx, async (tx) => {
       await transition(tx, { sessionId: session.id, userId: user.id }, 'running', 'paused', { pausedAt: now })
@@ -1786,7 +1787,7 @@ async function pauseForBreak(ctx: Ctx, user: User, session: FocusSession, now: D
   }
   await reply(ctx, user, askOutcome
     ? `${T.deadlineBreakStarted(session.plannedRestMinutes ?? restFor(session.plannedMinutes), hhmm(breakEnd, user.timezone))}\nКак прошло? Можно ответить позже.`
-    : `${T.breakStarted(hhmm(breakEnd, user.timezone))}\n${T.breakChoice}`,
+    : `${T.breakStarted(hhmm(breakEnd, user.timezone))} Перерыв — ${duration} мин.\n${T.breakChoice}`,
   askOutcome ? outcomeKeyboard(session.id) : undefined)
 }
 

@@ -1,5 +1,6 @@
 import { onReminderAction, onRetro } from '../reminders/actions.js'
-import { beginInput, withUserInputLock } from '../bot/input-lock.js'
+import { beginInput, withUserInputLock, currentInputTransaction, assertCurrentInput } from '../bot/input-lock.js'
+import { explicitBreakMinutes } from '../session/break-intent.js'
 import { routeSemanticInput, onSemanticChoice, onRestoreReport, invalidateSemanticChoices } from '../bot/semantic-routing.js'
 import { z } from 'zod'
 import type { User } from '@prisma/client'
@@ -252,30 +253,40 @@ const KEYBOARD_ACTIONS: Record<string, (ctx: Ctx, user: User) => Promise<void>> 
 // «Время вышло» привязано к сессии и живёт вместе с ней.
 const ONBOARDING_INPUTS = ['timezone', 'start_time', 'ritual']
 
-export async function releasePending(ctx: Ctx, user: User): Promise<User> {
+export async function releasePending(ctx: Ctx, user: User, fenced = false): Promise<User> {
   if (user.pendingInput === 'none' || ONBOARDING_INPUTS.includes(user.pendingInput) || user.pendingInput.startsWith('session_end:')) return user
+  if (fenced) assertCurrentInput(ctx)
   const runningTaskChoice = /^running_task_choice:([0-9a-f-]{36}):([0-9a-f]{8})$/.exec(user.pendingInput)
-  if (runningTaskChoice?.[1]) {
-    await ctx.db.$transaction(async (tx) => {
+  const release = async (tx: import('@prisma/client').Prisma.TransactionClient) => {
+    if (runningTaskChoice?.[1]) {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
-      const released = await tx.user.updateMany({
-        where: { id: user.id, pendingInput: user.pendingInput },
-        data: { pendingInput: 'none' },
-      })
+      const released = await tx.user.updateMany({where:{id:user.id,pendingInput:user.pendingInput},data:{pendingInput:'none'}})
       if (released.count !== 1) return
-      await tx.focusSession.updateMany({
-        where: { id: runningTaskChoice[1], userId: user.id, state: 'running', taskId: null },
-        data: { pendingTaskTitle: null },
-      })
-    })
-  } else {
-    await ctx.db.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput: 'none' } })
+      await tx.focusSession.updateMany({where:{id:runningTaskChoice[1],userId:user.id,state:'running',taskId:null},data:{pendingTaskTitle:null}})
+    } else {
+      await tx.user.updateMany({where:{id:user.id,pendingInput:user.pendingInput},data:{pendingInput:'none'}})
+    }
   }
+  if (fenced) await currentInputTransaction(ctx, release)
+  else if (runningTaskChoice?.[1]) await ctx.db.$transaction(release)
+  else await ctx.db.user.updateMany({where:{id:user.id,pendingInput:user.pendingInput},data:{pendingInput:'none'}})
   return { ...user, pendingInput: 'none' }
 }
 
 // Commands/buttons are deterministic; free text/voice goes through the same router.
 async function routeInput(ctx: Ctx, user: User, text: string, via: 'text' | 'voice', contextEventId: number | null): Promise<void> {
+  assertCurrentInput(ctx)
+  const rest = explicitBreakMinutes(text)
+  if (rest !== undefined && !['timezone','start_time','ritual'].includes(user.pendingInput)) {
+    const active = await session.activeSession(ctx, user.id)
+    assertCurrentInput(ctx)
+    if (active?.state === 'running' || active?.state === 'paused') {
+      invalidateSemanticChoices(user.id)
+      const released = await releasePending(ctx, user, true)
+      assertCurrentInput(ctx)
+      return session.onBreak(ctx, released, rest ?? undefined)
+    }
+  }
   if (await tasks.onTaskNumber(ctx, user, text)) return
   if(user.pendingInput.startsWith('retro:'))return onRetro(ctx,user,user.pendingInput.split(':')[1]!,text)
   return routeSemanticInput(ctx, user, text, via, contextEventId, routeLegacyInput, routePendingInput)

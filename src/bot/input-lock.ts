@@ -33,6 +33,15 @@ export function beginInput(key: string): () => boolean {
 export function assertCurrentInput(ctx: Ctx): void {
   if (ctx.semanticRouterEnabled && ctx.isCurrentInput && !ctx.isCurrentInput()) throw new StaleTransition()
 }
+// Fence explicit transitions without resynchronizing their custom reminder chain.
+export async function currentInputTransaction<T>(ctx: Ctx, work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+  return ctx.db.$transaction(async tx => {
+    assertCurrentInput(ctx)
+    const result = await work(tx)
+    assertCurrentInput(ctx)
+    return result
+  })
+}
 export async function inputTransaction<T>(ctx: Ctx, work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
   return ctx.db.$transaction(async (tx) => {
     assertCurrentInput(ctx)

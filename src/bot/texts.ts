@@ -344,13 +344,13 @@ export const T = {
       : 'Начинаем новую серию — сегодня первый день.',
   streakRepaired: (n: number) => `Серия восстановлена: ${n} ${plural(n, 'день', 'дня', 'дней')}.`,
   comeback: 'С возвращением!',
-  summary: (s: DaySummary) =>
+  summary: (s: DaySummary, day?: string) =>
     [
       s.sessions === 0
         ? s.inProgress
           ? `${s.inProgress === 'paused' ? 'Сессия на перерыве' : 'Сессия ещё идёт'} — итог посчитаю, когда закончишь.`
-          : 'Сегодня сессий не было — бывает.'
-        : `За сегодня: ${s.sessions} ${plural(s.sessions, 'сессия', 'сессии', 'сессий')}` +
+          : day ? `За ${day.split('-').reverse().join('.')} сессий не было — бывает.` : 'Сегодня сессий не было — бывает.'
+        : `За ${day ? day.split('-').reverse().join('.') : 'сегодня'}: ${s.sessions} ${plural(s.sessions, 'сессия', 'сессии', 'сессий')}` +
           outcomesLine(s),
       s.totalMinutes !== undefined ? `Фактически в работе: ${s.totalMinutes} мин.${s.unassignedMinutes ? ` Без привязки к задаче: ${s.unassignedMinutes} мин.` : ''}` : null,
       s.sessions > 0 && s.inProgress ? (s.inProgress === 'paused' ? 'Ещё одна — на перерыве.' : 'Ещё одна идёт сейчас.') : null,
@@ -366,7 +366,7 @@ export const T = {
             }),
           ].join('\n')
         : null,
-      `Серия: ${s.streak} ${plural(s.streak, 'день', 'дня', 'дней')}. Очки за сегодня: ${s.points}.`,
+      `Серия: ${s.streak} ${plural(s.streak, 'день', 'дня', 'дней')}. Очки за ${day ? day.split('-').reverse().join('.') : 'сегодня'}: ${s.points}.`,
       weekLine(s),
       `Активных дней за последние 7: ${s.activeDays} из 7.`,
     ]

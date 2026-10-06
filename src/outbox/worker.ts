@@ -15,7 +15,8 @@ import { DeliveryError, TelegramError, type Keyboard } from '../tg/client.js'
 import { enqueue } from './queue.js'
 import { OUTBOX_KINDS } from '../analytics/payloads.js'
 import { deliverReminder, recoverReminder } from '../reminders/delivery.js'
-import { allowedAt } from '../reminders/cadence.js'
+import { allowedAt, summaryAllowedAt } from '../reminders/cadence.js'
+import { workDayKey } from '../lib/day.js'
 import { lockUser } from '../reminders/store.js'
 
 const MIN = 60_000
@@ -258,9 +259,9 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User, ownerTx?: Prisma.T
     if (!user.proactive) return { skip: true }
     const goal = await ctx.db.dailyGoal.findUnique({ where: { userId_dayKey: { userId: user.id, dayKey: day } } })
     if (goal?.summarySentAt) return { skip: true }
-    const summary = await buildSummary(ctx.db, user, day)
+    const summary = await buildSummary(ctx.db, user, day, now)
     return {
-      text: T.summary(summary),
+      text: T.summary(summary, day === workDayKey(now, user.timezone) ? undefined : day),
       keyboard: [[{ text: T.closeDay, data: cb('sum', null, day.replace(/-/g, '')) }]],
       after: async (tx) => {
         await tx.dailyGoal.upsert({
@@ -312,7 +313,7 @@ async function legacyEligibility(tx: Prisma.TransactionClient, ctx: Ctx, m: Outb
   }
   if (m.kind === 'meeting' && (p.defaulted === true || p.morning === true)) return 'skip'
   if (!ctx.remindersEnabled) return new Date(ctx.now().getTime() + 60 * MIN)
-  const permitted = allowedAt(user, { nightUntil: null }, ctx.now())
+  const permitted = m.kind === 'summary' ? summaryAllowedAt(user, ctx.now()) : allowedAt(user, { nightUntil: null }, ctx.now())
   if (!permitted) return new Date(ctx.now().getTime() + 60 * MIN)
   if (permitted > ctx.now()) return permitted
   if (m.kind === 'summary' || m.kind === 'meeting') {

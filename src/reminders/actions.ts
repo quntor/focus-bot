@@ -3,7 +3,10 @@ import type { Ctx } from '../bot/context.js'
 import { reply } from '../bot/context.js'
 import { cb } from '../bot/callbacks.js'
 import type { Keyboard } from '../tg/client.js'
-import { dayKey } from '../lib/day.js'
+import { dayKey, workDayKey } from '../lib/day.js'
+import { buildSummary } from '../bot/day-flow.js'
+import { T, hhmm } from '../bot/texts.js'
+import { currentInputTransaction } from '../bot/input-lock.js'
 import { StaleTransition } from '../session/fsm.js'
 import { MIN, midnight, nightAllowance } from './cadence.js'
 import { answerPlan, cancelPrimary, lockUser, replaceChain, resetChain } from './store.js'
@@ -15,9 +18,9 @@ export function quietKeyboard(user: Pick<User,'quietUntil'>,now: Date): Keyboard
     [{text:'Сегодня больше не беспокоить',data:cb('cycle',null,'stop')}],
     [{text:'Отключить уведомления',data:cb('cycle',null,'quiet')}]]
 }
-export async function onReminderAction(ctx: Ctx,user: User,id: string|null,arg: string): Promise<void> {
+export async function onReminderAction(ctx: Ctx,user: User,id: string|null,arg: string, options: { restMinutes?: number } = {}): Promise<void> {
   let start=false, text='Напоминания обновлены.', pauseId: string|null=null
-  try {await ctx.db.$transaction(async tx=>{
+  try {await currentInputTransaction(ctx,async tx=>{
     await lockUser(tx,user.id)
     const fresh=await tx.user.findUniqueOrThrow({where:{id:user.id}}),now=ctx.now()
     let chain=await tx.reminderChain.findFirst({where:{userId:user.id,status:'active'}})
@@ -40,7 +43,14 @@ export async function onReminderAction(ctx: Ctx,user: User,id: string|null,arg: 
         }
         await cancelPrimary(tx,user.id)
         await tx.user.update({where:{id:user.id},data:{pendingInput:'none'}})
-        text='На сегодня остановились. Время сохранено без отметки о результате; напоминания выключены до полуночи.'
+        const day = workDayKey(now, fresh.timezone)
+        const summary = await buildSummary(tx, fresh, day, now)
+        await tx.dailyGoal.upsert({where:{userId_dayKey:{userId:user.id,dayKey:day}},create:{userId:user.id,dayKey:day,summarySentAt:now},update:{summarySentAt:now}})
+        const summaries = await tx.outboxMessage.findMany({where:{userId:user.id,kind:'summary',status:{in:['pending','paused']}},select:{id:true,payload:true}})
+        const currentIds = summaries.filter(m=>(m.payload as {dayKey?:string}|null)?.dayKey===day).map(m=>m.id)
+        await tx.outboxMessage.updateMany({where:{id:{in:currentIds}},data:{status:'canceled'}})
+        await logEvent(tx,user.id,'day_closed',{day_key:day,via:'button'},{at:now})
+        text=`${T.summary(summary)}\n\nНа сегодня остановились. Время сохранено без отметки о результате; напоминания выключены до полуночи.`
       }else text='Уведомления выключены до местной полуночи. Текущий режим не изменён.'
       await tx.outboxMessage.updateMany({where:{userId:user.id,status:{in:['pending','paused']},kind:{not:'reminder'}},data:{sendAfter:midnight(fresh,now)}})
       return
@@ -62,9 +72,10 @@ export async function onReminderAction(ctx: Ctx,user: User,id: string|null,arg: 
       if(session.state!=='running'||chain?.kind!=='work') throw new StaleTransition()
       await tx.focusSession.update({where:{id:session.id},data:{state:'paused',pausedAt:now}})
       await closePeriod(tx,session.id,now);await projectAllocations(tx,user.id,session.id,now)
-      await replaceChain(tx,fresh,'break',session,now,session.plannedRestMinutes??10,{manual:true})
+      const duration=options.restMinutes??session.plannedRestMinutes??10
+      const rest=await replaceChain(tx,fresh,'break',session,now,duration,{manual:true})
       await logEvent(tx,user.id,'session_paused',{session_id:session.id,elapsed_minutes:Math.max(0,Math.floor(((now.getTime()-(session.startedAt??now).getTime())/1000-session.pausedSeconds)/60))},{at:now,sessionId:session.id})
-      pauseId=(await tx.workPeriod.findFirstOrThrow({where:{sessionId:session.id},orderBy:{startedAt:'desc'}})).id;text='Перерыв начат сейчас. Если уже отдыхал, можно уточнить начало.'
+      pauseId=(await tx.workPeriod.findFirstOrThrow({where:{sessionId:session.id},orderBy:{startedAt:'desc'}})).id;text=`Перерыв начат сейчас — ${duration} мин. Напишу в ${hhmm(rest.firstDueAt,fresh.timezone)}. Если уже отдыхал, можно уточнить начало.`
     }else if(arg==='resume'){
       if(session.state!=='paused'||!session.pausedAt||chain?.kind!=='break') throw new StaleTransition()
       const pause=Math.max(0,Math.floor((now.getTime()-session.pausedAt.getTime())/1000))
@@ -86,7 +97,7 @@ export async function onReminderAction(ctx: Ctx,user: User,id: string|null,arg: 
   if(start)return askIntent(ctx,user)
   const fresh=await ctx.db.user.findUniqueOrThrow({where:{id:user.id}})
   const keyboard=pauseId?[[{text:'Уже отдыхаю',data:cb('retro',pauseId,'choose')}],...quietKeyboard(fresh,ctx.now())]:quietKeyboard(fresh,ctx.now())
-  await reply(ctx,user,text,keyboard)
+  await reply(ctx,user,text,arg==='stop'?undefined:keyboard)
 }
 export async function onRetro(ctx: Ctx,user: User,id: string,arg: string): Promise<void> {
   const selected=await ctx.db.workPeriod.findFirst({where:{id,session:{userId:user.id,state:'paused',reminderPolicy:1}},include:{session:true}})
