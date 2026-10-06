@@ -120,11 +120,11 @@ describe.skipIf(!hasDb)('cascade delete through Telegram', () => {
     let read!: () => void
     const readReady = new Promise<void>(r => { read = r })
     const findFirst = prisma.task.findFirst.bind(prisma.task)
-    const spy = winner === 'delete' ? vi.spyOn(prisma.task, 'findFirst').mockImplementationOnce(async args => {
+    const spy = winner === 'delete' ? vi.spyOn(prisma.task, 'findFirst').mockImplementationOnce((async (args: Parameters<typeof findFirst>[0]) => {
       const result = await findFirst(args)
       read()
       return result
-    }) : null
+    }) as typeof findFirst) : null
     const second = winner === 'delete' ? startTaskSession(bot.ctx, user, leaf.id) : onTaskDropped(bot.ctx, user, root.id)
     if (winner === 'delete') await readReady // old active snapshot is guaranteed before the delete commits
     release()
