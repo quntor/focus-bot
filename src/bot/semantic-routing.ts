@@ -14,6 +14,8 @@ import * as session from './session-flow.js'
 import * as tasks from './tasks.js'
 import * as day from './day-flow.js'
 import { T } from './texts.js'
+import { parseNamedMinutes } from '../session/duration.js'
+import { onReminderAction } from '../reminders/actions.js'
 
 // Short-lived dialogue data, not an action receipt. Restarts fail closed.
 const TTL = 10 * 60_000
@@ -51,7 +53,7 @@ function allowedRoutes(s: Snapshot): SemanticRouteName[] {
   if (pending !== 'none' && pending !== 'report_text' && !pending.startsWith('session_end:')) routes.push('answer_pending')
   if (s.report && !s.active) routes.push('report')
   if (s.active?.state === 'running') routes.push('session_help')
-  if (s.active?.state === 'paused' || (!s.active && s.last?.intentText) || (s.active?.state === 'collecting_intent' && s.active.taskId)) routes.push('continue_same')
+  if (s.active?.state === 'running' || s.active?.state === 'paused' || (!s.active && s.last?.intentText) || (s.active?.state === 'collecting_intent' && s.active.taskId)) routes.push('continue_same')
   return routes
 }
 function strictlyFormatted(pending: string, text: string): boolean {
@@ -192,7 +194,17 @@ async function dispatchRoute(ctx: Ctx, s: Snapshot, route: SemanticRoute, via: '
     else await session.onRunningFreeText(ctx, user, route.text, contextEventId, { ...route.help, taskTitle: route.help.task_title, llmUsed: true })
   } else if (route.route === 'close_day') await day.closeDay(ctx, user, via, { guard })
   else if (route.route === 'continue_same') {
-    if (s.active?.state === 'paused') await session.onResume(ctx, user)
+    const minutes = parseNamedMinutes(route.text)
+    if (s.active?.reminderPolicy === 1 && (s.active.state === 'running' || s.active.state === 'paused')) {
+      await onReminderAction(ctx, user, null, s.active.state === 'running' ? 'continue' : 'resume', { workMinutes: minutes ?? undefined, guard })
+    } else if (s.active?.state === 'running') {
+      if (minutes !== null) await session.onRunningDurationText(ctx, user, s.active.id, route.text, { fromNow: true })
+      else if (s.active.plannedEndAt && s.active.plannedEndAt <= ctx.now()) await session.onDeadlineChoice(ctx, user, s.active.id, 'continue')
+      else await session.onSessionHelpAction(ctx, user, s.active.id, 'continue')
+    } else if (s.active?.state === 'paused') {
+      await session.onResume(ctx, user)
+      if (minutes !== null) await session.onRunningDurationText(ctx, user, s.active.id, route.text, { fromNow: true })
+    }
     else if (!s.active && s.last?.continueSuggested && s.last.restChoice === null && s.last.taskId && s.labelledTasks.some((task) => task.id === s.last!.taskId && task.status === 'active')) {
       await session.onContinueChoice(ctx, user, s.last.id, 'same', { change: () => tasks.onSessionStart(ctx, user) })
     } else {

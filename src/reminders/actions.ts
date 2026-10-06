@@ -1,4 +1,4 @@
-import type { User } from '@prisma/client'
+import type { Prisma, User } from '@prisma/client'
 import type { Ctx } from '../bot/context.js'
 import { reply } from '../bot/context.js'
 import { cb } from '../bot/callbacks.js'
@@ -18,10 +18,11 @@ export function quietKeyboard(user: Pick<User,'quietUntil'>,now: Date): Keyboard
     [{text:'Сегодня больше не беспокоить',data:cb('cycle',null,'stop')}],
     [{text:'Отключить уведомления',data:cb('cycle',null,'quiet')}]]
 }
-export async function onReminderAction(ctx: Ctx,user: User,id: string|null,arg: string, options: { restMinutes?: number } = {}): Promise<void> {
+export async function onReminderAction(ctx: Ctx,user: User,id: string|null,arg: string, options: { restMinutes?: number; workMinutes?: number; guard?: (tx: Prisma.TransactionClient) => Promise<boolean> } = {}): Promise<void> {
   let start=false, text='Напоминания обновлены.', pauseId: string|null=null
   try {await currentInputTransaction(ctx,async tx=>{
     await lockUser(tx,user.id)
+    if(options.guard && !await options.guard(tx)) throw new StaleTransition()
     const fresh=await tx.user.findUniqueOrThrow({where:{id:user.id}}),now=ctx.now()
     let chain=await tx.reminderChain.findFirst({where:{userId:user.id,status:'active'}})
     if(id){
@@ -32,6 +33,8 @@ export async function onReminderAction(ctx: Ctx,user: User,id: string|null,arg: 
     } else if(!['quiet','stop','unmute','break','resume','continue','rest'].includes(arg)) throw new StaleTransition()
     if(chain){const action=arg==='quiet'?'mute':arg==='stop'?'stop_today':arg;await logEvent(tx,user.id,'reminder_answered',{chain_id:chain.id,kind:chain.kind as 'morning'|'work'|'break'|'post_rest',revision:chain.revision,action:action as 'work'|'off'|'continue'|'break'|'resume'|'rest'|'mute'|'unmute'|'stop_today'},{at:now})}
     const session=await tx.focusSession.findFirst({where:{userId:user.id,state:{in:['running','paused','collecting_intent']}}})
+    const workMinutes=options.workMinutes??session?.plannedMinutes
+    const workPlan=options.workMinutes===undefined?{}:{plannedMinutes:options.workMinutes,minutesSource:'user' as const}
     if(arg==='quiet'||arg==='stop'){
       await tx.user.update({where:{id:user.id},data:{quietUntil:midnight(fresh,now)}})
       if(arg==='stop'){
@@ -79,15 +82,15 @@ export async function onReminderAction(ctx: Ctx,user: User,id: string|null,arg: 
     }else if(arg==='resume'){
       if(session.state!=='paused'||!session.pausedAt||chain?.kind!=='break') throw new StaleTransition()
       const pause=Math.max(0,Math.floor((now.getTime()-session.pausedAt.getTime())/1000))
-      await tx.focusSession.update({where:{id:session.id},data:{state:'running',pausedAt:null,pausedSeconds:{increment:pause},plannedEndAt:new Date(now.getTime()+session.plannedMinutes*MIN)}})
+      await tx.focusSession.update({where:{id:session.id},data:{state:'running',pausedAt:null,pausedSeconds:{increment:pause},...workPlan,plannedEndAt:new Date(now.getTime()+workMinutes!*MIN)}})
       await logEvent(tx,user.id,'session_resumed',{session_id:session.id,paused_minutes:Math.floor(pause/60)},{at:now,sessionId:session.id})
-      await openPeriod(tx,session.id,now);await replaceChain(tx,fresh,'work',session,now,session.plannedMinutes,{manual:true});text='Вернулись к работе. Новый полный интервал в той же сессии.'
+      await openPeriod(tx,session.id,now);await replaceChain(tx,fresh,'work',session,now,workMinutes!,{manual:true});text=options.workMinutes===undefined?'Вернулись к работе. Новый полный интервал в той же сессии.':`Вернулись к работе. Следующий вопрос — через ${workMinutes} мин.`
     }else if(arg==='continue'){
       if(session.state!=='running'||chain?.kind!=='work') throw new StaleTransition()
-      await tx.focusSession.update({where:{id:session.id},data:{plannedEndAt:new Date(now.getTime()+session.plannedMinutes*MIN)}})
-      const c=await resetChain(tx,chain,now,session.plannedMinutes)
+      await tx.focusSession.update({where:{id:session.id},data:{...workPlan,plannedEndAt:new Date(now.getTime()+workMinutes!*MIN)}})
+      const c=await resetChain(tx,chain,now,workMinutes!)
       await tx.reminderChain.update({where:{id:c.id},data:{nightUntil:nightAllowance(fresh,now)}})
-      text='Продолжаем. Следующий вопрос — через полный рабочий интервал.'
+      text=options.workMinutes===undefined?'Продолжаем. Следующий вопрос — через полный рабочий интервал.':`Продолжаем. Следующий вопрос — через ${workMinutes} мин.`
     }else if(arg==='rest'){
       if(!chain||!['break','post_rest'].includes(chain.kind)) throw new StaleTransition()
       await resetChain(tx,chain,now);text='Ещё отдыхаем. Начало перерыва не меняется.'

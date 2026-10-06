@@ -4,6 +4,8 @@ import { makeBot } from '../test/bot.js'
 import { handleUpdate } from '../tg/webhook.js'
 import { latestInputId } from './conversation-context.js'
 import { hasDb, prisma, resetDb } from '../test/db.js'
+import { deliverReminder } from '../reminders/delivery.js'
+import { runOutboxOnce } from '../outbox/worker.js'
 
 const A = 50201
 const B = 50202
@@ -30,6 +32,60 @@ async function past(userId: string, now: Date) {
 
 describe.skipIf(!hasDb)('semantic routing: реальные регрессии и отсутствие смешанных записей', () => {
   beforeEach(resetDb)
+  it.each([
+    ['running', 'еще 15 минут поработаю', 15],
+    ['running', 'продолжу работать', 40],
+    ['paused', 'еще 15 минут поработаю', 15],
+  ] as const)('продолжает %s после вопроса, сохраняя задачу и заданный интервал (%s)', async (state, text, minutes) => {
+    const { bot, llm, user } = await ready(async (req: LlmRequest) => {
+      if (!req.system.includes('семантический маршрутизатор')) return { text: 'Продолжишь или передохнёшь?', taskId: null }
+      const input = JSON.parse(req.input)
+      return { route: input.allowedRoutes.includes('continue_same') ? 'continue_same' : 'unclear', text, followUp: null }
+    })
+    bot.ctx.remindersEnabled = true
+    const now = bot.ctx.now()
+    const task = await prisma.task.create({ data: { userId: user.id, title: 'Фокус-бот' } })
+    await prisma.user.update({ where: { id: user.id }, data: { reminderPolicy: 1, pendingInput: 'none' } })
+    const startedAt = new Date(now.getTime() - 40 * 60_000)
+    const active = await prisma.focusSession.create({ data: { userId: user.id, taskId: task.id, intentText: task.title, state, reminderPolicy: 1, startedAt, plannedEndAt: now, plannedMinutes: 40, pausedAt: state === 'paused' ? now : null } })
+    await prisma.workPeriod.create({ data: { sessionId: active.id, startedAt, endedAt: state === 'paused' ? now : null } })
+    const chain = await prisma.reminderChain.create({ data: { userId: user.id, sessionId: active.id, kind: state === 'running' ? 'work' : 'break', phaseStartedAt: startedAt, firstDueAt: now, nextDueAt: now, intervalMinutes: 40 } })
+    if (state === 'running') {
+      const message = await prisma.outboxMessage.create({ data: { userId: user.id, kind: 'reminder', chainId: chain.id, chainRevision: 1, ordinal: 0, idempotencyKey: `reminder:${chain.id}:1:0`, sendAfter: now, status: 'sending', attempts: 1, lockedUntil: new Date(now.getTime() + 60_000) } })
+      await deliverReminder(bot.ctx, message)
+    }
+    await bot.text(A, text)
+    const routed = await prisma.event.findFirstOrThrow({ where: { type: 'semantic_routed' } })
+    expect(routed.payload).toMatchObject({ route: 'continue_same' })
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: active.id } })).toMatchObject({ state: 'running', taskId: task.id, startedAt, plannedEndAt: new Date(now.getTime() + minutes * 60_000), reportText: null, outcome: null })
+    expect(await prisma.task.count()).toBe(1)
+    expect(await prisma.focusSession.count()).toBe(1)
+    expect(await prisma.reminderChain.findFirstOrThrow({ where: { userId: user.id, status: 'active' } })).toMatchObject({ kind: 'work', nextDueAt: new Date(now.getTime() + minutes * 60_000), intervalMinutes: minutes })
+    expect(bot.textsTo(A)).not.toContain('Это отчёт о результате или новая задача?')
+    const request = vi.mocked(llm.complete).mock.calls.find(([req]) => req.system.includes('семантический маршрутизатор'))![0]
+    if (state === 'running') expect(JSON.parse(request.input).recentContext).toContainEqual({ role: 'assistant', text: 'Продолжишь или передохнёшь?' })
+    const sent = bot.tg.sent.length
+    bot.advance(minutes - 1)
+    await runOutboxOnce(bot.ctx)
+    expect(bot.tg.sent).toHaveLength(sent)
+    bot.advance(1)
+    await runOutboxOnce(bot.ctx)
+    expect(bot.lastText(A)).toBe('Продолжишь или передохнёшь?')
+    expect(bot.tg.sent).toHaveLength(sent + 1)
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: active.id } })).toMatchObject({ state: 'running', taskId: task.id, outcome: null })
+  })
+  it('legacy: ещё 15 минут — от момента ответа, не от начала сорокаминутной работы', async () => {
+    const text = 'еще 15 минут поработаю'
+    const { bot, user } = await ready({ route: 'continue_same', text, followUp: null })
+    const now = bot.ctx.now()
+    const active = await prisma.focusSession.create({ data: { userId: user.id, state: 'running', startedAt: new Date(now.getTime() - 40 * 60_000), plannedMinutes: 40, plannedEndAt: now } })
+    await prisma.user.update({ where: { id: user.id }, data: { pendingInput: `session_end:${active.id}` } })
+    await bot.text(A, text)
+    const next = new Date(now.getTime() + 15 * 60_000)
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: active.id } })).toMatchObject({ state: 'running', plannedEndAt: next, reportText: null })
+    expect(await prisma.outboxMessage.findFirstOrThrow({ where: { userId: user.id, kind: 'session_end', status: 'pending' } })).toMatchObject({ sendAfter: next })
+    expect(await prisma.task.count()).toBe(0)
+  })
   it('«Начинаю делать фокус-бот.» при report pending — новая работа, не отчёт', async () => {
     const text = 'Начинаю делать фокус-бот.'
     const { bot, llm, user } = await ready(newAction(text))

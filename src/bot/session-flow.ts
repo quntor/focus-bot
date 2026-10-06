@@ -1013,7 +1013,7 @@ export async function onRunningWorkText(ctx: Ctx, user: User, sessionId: string,
   await reply(ctx, user, T.runningWorkUpdated(workTitle), runningEditKeyboard(session.id))
 }
 
-export async function onRunningDurationText(ctx: Ctx, user: User, sessionId: string, text: string): Promise<void> {
+export async function onRunningDurationText(ctx: Ctx, user: User, sessionId: string, text: string, options: { fromNow?: boolean } = {}): Promise<void> {
   const minutes = parseNamedMinutes(text)
   if (minutes === null) return reply(ctx, user, T.badRunningDuration)
   const now = ctx.now()
@@ -1030,7 +1030,7 @@ export async function onRunningDurationText(ctx: Ctx, user: User, sessionId: str
   })
   const periodStartedAt = lastResume?.createdAt ?? session.startedAt
   const elapsedMs = Math.max(0, now.getTime() - periodStartedAt.getTime())
-  const remainingMs = session.reminderPolicy===1?minutes*MIN:minutes * MIN - elapsedMs
+  const remainingMs = session.reminderPolicy===1 || options.fromNow ? minutes*MIN : minutes * MIN - elapsedMs
   if (remainingMs <= 0) return reply(ctx, user, T.runningDurationTooShort(Math.max(1, Math.ceil(elapsedMs / MIN))))
   const plannedEndAt = new Date(now.getTime() + remainingMs)
   const rest = restFor(minutes)
