@@ -31,10 +31,10 @@ function toNumber(raw: string): number {
   return word ?? Number(raw.replace(',', '.'))
 }
 
-const clampUser = (n: number) => Math.min(USER_MAX, Math.max(USER_MIN, Math.round(n)))
-
 // Возвращает названные минуты или null, если время не названо.
-export function parseNamedMinutes(text: string): number | null {
+// Рабочий интервал по умолчанию ограничен порогом засчёта; отдых может быть короче.
+export function parseNamedMinutes(text: string, minimumMinutes = USER_MIN): number | null {
+  const clampUser = (n: number) => Math.min(USER_MAX, Math.max(minimumMinutes, Math.round(n)))
   const t = text.toLowerCase().replace(/ё/g, 'е')
 
   if (/полтора\s+час/.test(t)) return 90

@@ -11,5 +11,5 @@ export function explicitBreakMinutes(text: string): number | null | undefined {
   // from being mistaken for a pause merely because it contains a time.
   if (!/^(?:полтора\s+часа|полчаса|час|\d{1,3}\s*(?:минут(?:а|ы)?|мин\.?|час(?:а|ов)?|ч)|(?:один|два|две|три|четыре|пять|десять|пятнадцать|двадцать|тридцать|сорок|шестьдесят)\s+(?:минут(?:а|ы)?|час(?:а|ов)?))$/u.test(command[1])) return undefined
   if (/^0+(?:\s|$)/u.test(command[1])) return undefined
-  return parseNamedMinutes(command[1]) ?? undefined
+  return parseNamedMinutes(command[1], 1) ?? undefined
 }

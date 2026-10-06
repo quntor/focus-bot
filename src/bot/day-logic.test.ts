@@ -6,6 +6,7 @@ import { reconcile } from '../reminders/store.js'
 import { explicitBreakMinutes } from '../session/break-intent.js'
 import { beginInput } from './input-lock.js'
 import { buildSummary } from './day-flow.js'
+import { onRunningFreeText } from './session-flow.js'
 
 const A = 903035
 const MIN = 60_000
@@ -87,6 +88,55 @@ describe.skipIf(!hasDb)('SBER500-35 day logic', () => {
       expect(await buildSummary(prisma, user, '2026-10-06')).toMatchObject({ totalMinutes: 47 })
     }
   })
+  it.each([
+    [true, 'text'], [false, 'text'], [true, 'voice'], [false, 'voice'],
+  ] as const)('explicit 5-minute break preserves deadline across restart, policy1=%s via=%s', async (migrated, via) => {
+    const { bot, user, session, task } = await setup('2026-10-06T12:04:50Z', migrated)
+    bot.advance(13)
+    bot.ctx.semanticRouterEnabled = true
+    bot.ctx.llm = { enabled: true, model: 'test', async complete() { throw new Error('break must not call LLM') } }
+    if (via === 'voice') {
+      bot.ctx.stt = { enabled: true, model: 'test', async transcribe() { return 'Перерыв 5 минут' } }
+      bot.tg.downloads.set('short-break', new Uint8Array([1, 2, 3]))
+      await bot.voice(A, { fileId: 'short-break', duration: 3, mimeType: 'audio/ogg' })
+    } else await bot.text(A, 'Перерыв 5 минут')
+    expect(bot.lastText(A)).toContain('5 мин')
+    expect(bot.lastText(A)).toContain('15:22')
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).toMatchObject({
+      state: 'paused', taskId: task.id, plannedRestMinutes: session.plannedRestMinutes, pausedAt: bot.now(),
+    })
+    // A repeated break command must not move the original deadline.
+    bot.advance(1)
+    await bot.text(A, 'Перерыв 5 минут')
+    const restart = makeBot({ now: new Date(bot.now().getTime() + 3 * MIN) })
+    restart.ctx.remindersEnabled = true
+    await reconcile(restart.ctx)
+    await runOutboxOnce(restart.ctx)
+    expect(restart.tg.sent).toHaveLength(0)
+    restart.advance(1)
+    await runOutboxOnce(restart.ctx)
+    expect(restart.tg.sent).toHaveLength(1)
+    await runOutboxOnce(restart.ctx)
+    expect(restart.tg.sent).toHaveLength(1)
+    await restart.text(A, 'Вернуться к работе')
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).toMatchObject({
+      state: 'running', taskId: task.id, plannedEndAt: new Date(restart.now().getTime() + session.plannedMinutes! * MIN),
+    })
+    expect(await prisma.task.count({ where: { userId: user.id } })).toBe(1)
+  })
+  it.each([true, false])('break without duration keeps configured rest, policy1=%s', async migrated => {
+    const { bot, session } = await setup('2026-10-06T12:04:50Z', migrated)
+    await bot.text(A, 'Перерыв')
+    expect(bot.lastText(A)).toContain(`${session.plannedRestMinutes} мин`)
+  })
+  it.each([true, false])('semantic pause also preserves short rest, policy1=%s', async migrated => {
+    const { bot, user } = await setup('2026-10-06T12:18:03Z', migrated)
+    await onRunningFreeText(bot.ctx, user, 'Мне нужен перерыв на 5 минут', null, {
+      kind: 'pause', reply: null, action: null, taskTitle: null, llmUsed: true,
+    })
+    expect(bot.lastText(A)).toContain('5 мин')
+    expect(bot.lastText(A)).toContain('15:23')
+  })
   it.each(['disabled', 'error', 'voice'])('explicit rest is independent of LLM: %s', async mode => {
     const { bot, user, session } = await setup('2026-10-06T07:00:00Z')
     bot.ctx.semanticRouterEnabled = true
@@ -144,6 +194,13 @@ describe.skipIf(!hasDb)('SBER500-35 day logic', () => {
 
 
 describe('explicit break command boundary', () => {
+  it.each([
+    ['Перерыв 5 минут', 5], ['Перерыв на пять минут', 5],
+    ['Беру перерыв на 1 мин', 1], ['Перерыв 2 мин.', 2],
+    ['Перерыв 9 минут', 9], ['Перерыв 10 минут', 10],
+  ])('preserves short rest: %s → %i', (text, minutes) => {
+    expect(explicitBreakMinutes(String(text))).toBe(minutes)
+  })
   it.each(['Сейчас перерыв полтора часа', 'Беру перерыв на 90 минут', 'Ухожу отдыхать на полтора часа'])('accepts %s', text => {
     expect(explicitBreakMinutes(text)).toBe(90)
   })

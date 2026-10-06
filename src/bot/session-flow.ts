@@ -357,7 +357,7 @@ export async function onRunningFreeText(
   }
 
   if (parsed.result.kind === 'pause') {
-    await onBreak(ctx, user, parseNamedMinutes(text) ?? undefined)
+    await onBreak(ctx, user, parseNamedMinutes(text, 1) ?? undefined)
     return true
   }
   if (parsed.result.kind === 'complete_and_rest') {
