@@ -34,6 +34,7 @@ export const ACTIONS = [
   'onb', // знакомство: tz_yes | tz_no | st_0900 | st_1000 | st_1200 | st_custom | st_skip
   'off', // объявить выходной: tomorrow
   'task', // открыть/начать/изменить/завершить/удалить/вернуть/разобрать: viewN | start | edit | done | drop | restore | split | splitauto
+  'taskundo', // persistent tree deletion operation UUID
   'tasks', // страница списка: p0, p1, ... | add — добавить задачу
   'quick', // утренний быстрый выбор: start | goal
 ] as const

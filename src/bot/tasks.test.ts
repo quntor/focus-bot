@@ -125,9 +125,9 @@ describe.skipIf(!hasDb)('список задач из текста и голос
     expect(await prisma.task.findUniqueOrThrow({ where: { id: removable.id } })).toMatchObject({ status: 'dropped' })
     expect(bot.textsTo(A).some((text) => text.includes('Убрал «Лишняя задача»'))).toBe(true)
 
-    await bot.press(A, `task:${removable.id}:restore`)
+    await bot.press(A, bot.buttons(A).find(b => b.data.startsWith('taskundo:'))!.data)
     expect(await prisma.task.findUniqueOrThrow({ where: { id: removable.id } })).toMatchObject({ status: 'active' })
-    expect(bot.lastText(A)).toContain('Вернул «Лишняя задача»')
+    expect(bot.lastText(A)).toContain('Вернул задач: 1')
 
     await bot.press(A, `task:${current.id}:start`)
     await bot.press(A, `task:${current.id}:drop`)

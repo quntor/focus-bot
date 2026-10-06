@@ -506,6 +506,9 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
       case 'off':
         if (arg === 'tomorrow') return await day.planDayOff(ctx, user)
         break
+      case 'taskundo':
+        if (id && !arg) return await tasks.onTaskUndo(ctx, user, id)
+        break
       case 'task':
         if (id && arg?.startsWith('view')) {
           const page = /^view(\d{1,4})$/.exec(arg)

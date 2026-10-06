@@ -1,3 +1,5 @@
+import { lockUser } from '../reminders/store.js'
+import { StaleTransition } from '../session/fsm.js'
 import type { Prisma } from '@prisma/client'
 
 // Одно место, где создаётся задача по названию. Раньше каждый путь создавал
@@ -40,6 +42,8 @@ export async function findOrCreateTask(
   tx: Prisma.TransactionClient,
   input: { userId: string; title: string; now: Date; parentId?: string | null },
 ): Promise<{ id: string; title: string; created: boolean }> {
+  await lockUser(tx, input.userId)
+  if (input.parentId && !await tx.task.findFirst({ where: { id: input.parentId, userId: input.userId, status: 'active' }, select: { id: true } })) throw new StaleTransition()
   const title = cleanTaskTitle(input.title)
   const key = normalizeTaskTitle(title)
   const active = await tx.task.findMany({ where: { userId: input.userId, status: 'active' }, select: { id: true, title: true } })

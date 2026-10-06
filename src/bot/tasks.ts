@@ -1,3 +1,4 @@
+import { dropTaskTree, undoTaskTree } from './task-tree.js'
 import { inputTransaction } from './input-lock.js'
 import type { Prisma, User } from '@prisma/client'
 import { llmMeter } from '../analytics/calls.js'
@@ -83,7 +84,7 @@ function taskKeyboard(
   tasks: { id: string; title: string }[],
   page: number,
   pages: number,
-  restore?: { id: string },
+  restore?: { id: string; operation?: boolean },
   mode: 'actions' | 'start' = 'actions',
 ): Keyboard {
   const keyboard: Keyboard = tasks.map((task) => [
@@ -92,7 +93,7 @@ function taskKeyboard(
   const pageMode = mode === 'start' ? 's' : 'p'
   if (page > 0) keyboard.push([{ text: '← Назад', data: cb('tasks', null, `${pageMode}${page - 1}`) }])
   if (page + 1 < pages) keyboard.push([{ text: 'Дальше →', data: cb('tasks', null, `${pageMode}${page + 1}`) }])
-  if (restore) keyboard.push([{ text: T.taskRestoreButton, data: cb('task', restore.id, 'restore') }])
+  if (restore) keyboard.push([{ text: T.taskRestoreButton, data: cb(restore.operation ? 'taskundo' : 'task', restore.id, restore.operation ? null : 'restore') }])
   if (mode === 'actions') keyboard.push([{ text: T.taskAddButton, data: cb('tasks', null, 'add') }])
   return keyboard
 }
@@ -116,14 +117,20 @@ async function orderedActiveTasks(ctx: Ctx, userId: string): Promise<{ id: strin
     : []
   const isStep = (task: { parentId: string | null }) => task.parentId !== null && activeIds.has(task.parentId)
   const ordered: { id: string; title: string }[] = []
-  for (const root of active.filter((task) => !isStep(task))) {
-    ordered.push({ id: root.id, title: root.title })
-    const siblings = allSteps.filter((step) => step.parentId === root.id)
-    for (const step of active.filter((task) => task.parentId === root.id)) {
-      const n = siblings.findIndex((sibling) => sibling.id === step.id) + 1
-      ordered.push({ id: step.id, title: T.stepLabel(step.title, n, siblings.length) })
+  const visited = new Set<string>()
+  const visit = (task: typeof active[number], label: string) => {
+    if (visited.has(task.id)) return
+    visited.add(task.id)
+    ordered.push({ id: task.id, title: label })
+    const siblings = allSteps.filter(step => step.parentId === task.id)
+    for (const child of active.filter(child => child.parentId === task.id)) {
+      const n = siblings.findIndex(s => s.id === child.id) + 1
+      visit(child, T.stepLabel(child.title, n, siblings.length))
     }
   }
+  for (const root of active.filter(task => !isStep(task))) visit(root, root.title)
+  // Corrupt cycles must not hide otherwise active tasks.
+  for (const task of active) visit(task, task.title)
   return ordered
 }
 
@@ -163,11 +170,11 @@ async function showTaskStartPrompt(ctx: Ctx, user: User, page: number): Promise<
   await reply(ctx, user, prompt.text, prompt.keyboard)
 }
 
-export async function showTasks(ctx: Ctx, user: User, page = 0, notice?: string, restore?: { id: string }): Promise<void> {
+export async function showTasks(ctx: Ctx, user: User, page = 0, notice?: string, restore?: { id: string; operation?: boolean }): Promise<void> {
   const list = await activeTaskPage(ctx, user, page)
   if (!list) {
     const keyboard = [
-      ...(restore ? [[{ text: T.taskRestoreButton, data: cb('task', restore.id, 'restore') }]] : []),
+      ...(restore ? [[{ text: T.taskRestoreButton, data: cb(restore.operation ? 'taskundo' : 'task', restore.id, restore.operation ? null : 'restore') }]] : []),
       [{ text: T.taskAddButton, data: cb('tasks', null, 'add') }],
     ]
     await reply(ctx, user, notice ? `${notice}\n${T.tasksEmpty}` : T.tasksEmpty, keyboard)
@@ -287,41 +294,27 @@ export async function onTaskEditText(ctx: Ctx, user: User, taskId: string, rawTi
 }
 
 export async function onTaskDropped(ctx: Ctx, user: User, taskId: string): Promise<void> {
-  let title: string | null = null
-  let isCurrent = false
-  await inputTransaction(ctx, async (tx) => {
-    const locked = await tx.task.updateMany({
-      where: { id: taskId, userId: user.id, status: 'active' },
-      data: { status: 'active' },
-    })
-    if (locked.count !== 1) return
-    const task = await tx.task.findFirst({ where: { id: taskId, userId: user.id, status: 'active' }, select: { title: true } })
-    if (!task) return
-    title = task.title
-    const current = await tx.focusSession.findFirst({
-      where: { userId: user.id, taskId, state: { in: ['collecting_intent', 'running', 'paused'] } },
-      select: { id: true },
-    })
-    if (current) {
-      isCurrent = true
-      return
-    }
-    await tx.task.update({ where: { id: taskId }, data: { status: 'dropped' } })
-  })
-  if (!title) return reply(ctx, user, T.stale)
-  if (isCurrent) return reply(ctx, user, T.taskDropActive)
-  await showTasks(ctx, user, 0, T.taskDropped(title), { id: taskId })
+  const result = await inputTransaction({ ...ctx, inputUserId: user.id }, tx => dropTaskTree(tx, user.id, taskId), { syncReminders: false })
+  if (result.kind === 'stale') return reply(ctx, user, T.stale)
+  if (result.kind === 'busy') return reply(ctx, user, T.taskDropActive)
+  await showTasks(ctx, user, 0, T.taskDropped(result.title, result.count - 1), { id: result.operationId, operation: true })
+}
+
+export async function onTaskUndo(ctx: Ctx, user: User, operationId: string): Promise<void> {
+  const restored = await inputTransaction({ ...ctx, inputUserId: user.id }, tx => undoTaskTree(tx, user.id, operationId), { syncReminders: false })
+  if (!restored.count) return reply(ctx, user, 'Это удаление уже отменено или кнопка устарела.')
+  await showTasks(ctx, user, 0, `Вернул задач: ${restored.count}.`)
 }
 
 export async function onTaskRestored(ctx: Ctx, user: User, taskId: string): Promise<void> {
-  const task = await ctx.db.task.findFirst({ where: { id: taskId, userId: user.id, status: 'dropped' } })
-  if (!task) return reply(ctx, user, T.stale)
-  const restored = await inputTransaction(ctx, (tx) => tx.task.updateMany({
-    where: { id: task.id, userId: user.id, status: 'dropped' },
-    data: { status: 'active' },
-  }))
-  if (restored.count !== 1) return reply(ctx, user, T.stale)
-  await showTasks(ctx, user, 0, T.taskRestored(task.title))
+  const title = await inputTransaction({ ...ctx, inputUserId: user.id }, async tx => {
+    const task = await tx.task.findFirst({ where: { id: taskId, userId: user.id, status: 'dropped', dropOperationId: null } })
+    if (!task) return null
+    await tx.task.update({ where: { id: task.id }, data: { status: 'active' } })
+    return task.title
+  }, { syncReminders: false })
+  if (!title) return reply(ctx, user, T.stale)
+  await showTasks(ctx, user, 0, T.taskRestored(title))
 }
 
 // --- Добавить задачу без старта. Ожидание — pendingInput task_add.
@@ -446,15 +439,19 @@ export async function onTaskBreakdownAnswer(
     return reply(ctx, user, T.breakdownManual)
   }
 
-  // Ожидание снимается до записи: пока шла модель, человек мог нажать другое.
-  const claimed = await inputTransaction(ctx, (tx) => tx.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput: 'none' } }))
-  if (claimed.count !== 1) return reply(ctx, user, T.stale)
-  // Повторный разбор заменяет незакрытые и ещё не начатые шаги, а не копит их.
-  await inputTransaction(ctx, (tx) => tx.task.updateMany({
-    where: { userId: user.id, parentId: task.id, status: 'active', sessionsCount: 0 },
-    data: { status: 'dropped' },
-  }))
-  const saved = await captureTasks(ctx, user, steps, source, { parentId: task.id })
+  // Commit the claim, replacement and new children under the same owner lock.
+  let saved
+  try {
+    saved = await captureTasks(ctx, user, steps, source, { parentId: task.id, guard: async tx => {
+      const parent = await tx.task.findFirst({ where: { id: task.id, userId: user.id, status: 'active' }, select: { id: true } })
+      if (!parent) return false
+      const claimed = await tx.user.updateMany({ where: { id: user.id, pendingInput: user.pendingInput }, data: { pendingInput: 'none' } })
+      if (claimed.count !== 1) return false
+      const used = await tx.focusSession.findMany({ where: { userId: user.id, state: { in: ['collecting_intent', 'running', 'paused'] }, taskId: { not: null } }, select: { taskId: true } })
+      await tx.task.updateMany({ where: { userId: user.id, parentId: task.id, status: 'active', sessionsCount: 0, id: { notIn: used.map(s => s.taskId!) } }, data: { status: 'dropped' } })
+      return true
+    } })
+  } catch (error) { if (error instanceof StaleTransition) return reply(ctx, user, T.stale); throw error }
   if (!saved.length) return reply(ctx, user, T.tasksParseFailed)
   await logEvent(ctx.db, user.id, 'task_breakdown_done', { task_id: task.id, mode, steps: saved.length, llm_used: llmUsed }, { at: ctx.now() })
   await reply(ctx, user, T.breakdownDone(task.title, saved.map((step) => step.title)), [
@@ -475,7 +472,7 @@ export async function onCapturedTasks(ctx: Ctx, user: User, titles: string[], so
 }
 
 async function captureTasks(ctx: Ctx, user: User, titles: string[], source: TaskInputSource, opts: { parentId?: string; guard?: (tx: Prisma.TransactionClient) => Promise<boolean> } = {}) {
-  return inputTransaction(ctx, async (tx) => {
+  return inputTransaction({ ...ctx, inputUserId: user.id }, async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
     if (opts.guard && !await opts.guard(tx)) throw new StaleTransition()
     const selected: { id: string; title: string; created: boolean }[] = []
@@ -510,7 +507,7 @@ async function resolveOrCreateTask(
   }
 
   const candidate = parsed.result.title.replace(/\s+/g, ' ').trim().slice(0, 80) || title.replace(/\s+/g, ' ').trim().slice(0, 80)
-  return inputTransaction(ctx, async (tx) => {
+  return inputTransaction({ ...ctx, inputUserId: user.id }, async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
     if (parsed.result.taskId) {
       const matched = await tx.task.findFirst({

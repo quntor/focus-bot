@@ -118,6 +118,7 @@ model Task {
   createdAt             DateTime  @default(now()) @map("created_at")
 
   // Шаг разбора ссылается на исходную задачу («Разобрать»).
+  dropOperationId String? @map("drop_operation_id") @db.Uuid
   parentId String? @map("parent_id")
   parent   Task?   @relation("TaskSteps", fields: [parentId], references: [id], onDelete: SetNull)
   steps    Task[]  @relation("TaskSteps")
@@ -127,6 +128,7 @@ model Task {
 
   @@index([userId, status])
   @@index([parentId])
+  @@index([userId, dropOperationId])
   @@map("tasks")
 }
 

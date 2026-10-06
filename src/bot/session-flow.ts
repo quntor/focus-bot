@@ -1,3 +1,4 @@
+import { requireActiveTask } from './task-tree.js'
 import { onReminderAction, quietKeyboard } from '../reminders/actions.js'
 import { cancelPrimary } from '../reminders/store.js'
 import { closePeriod, projectAllocations } from '../reminders/accounting.js'
@@ -552,6 +553,7 @@ export async function startUnassigned(ctx: Ctx, user: User): Promise<void> {
 // Выбор из списка задач пропускает повторный LLM-разбор. Если таймер уже идёт,
 // меняем задачу внутри той же сессии, не сдвигая startedAt и plannedEndAt.
 export async function startTaskSession(ctx: Ctx, user: User, taskId: string): Promise<void> {
+  ctx = { ...ctx, inputUserId: user.id }
   const task = await ctx.db.task.findFirst({ where: { id: taskId, userId: user.id, status: 'active' } })
   if (!task) return reply(ctx, user, T.stale)
 
@@ -614,6 +616,7 @@ export async function startTaskSession(ctx: Ctx, user: User, taskId: string): Pr
   const minutes = preset ?? (technique === 'auto' ? proposeMinutes(await sessionHistory(ctx, user.id)) : PRESETS[technique].minutes)
   const rest = preset !== null || technique === 'auto' ? restFor(minutes) : PRESETS[technique].rest
   const updated = await inputTransaction(ctx, async (tx) => {
+    if (!await tx.task.findFirst({ where: { id: task.id, userId: user.id, status: 'active' }, select: { id: true } })) return 0
     const res = await tx.focusSession.updateMany({
       where: { id: session.id, userId: user.id, state: 'collecting_intent' },
       data: {
@@ -746,6 +749,7 @@ async function handleIntent(ctx: Ctx, user: User, session: FocusSession, text: s
 
   try {
     await inputTransaction(ctx, async (tx) => {
+      if (taskId) await requireActiveTask(tx, user.id, taskId)
       // Большая задача сохраняется сразу: сессия будет её первым шагом, а
       // «Написать диплом» остаётся в списке, а не теряется за «составить план».
       let bigTaskCreated = false
@@ -963,6 +967,7 @@ export async function onRunningWorkText(ctx: Ctx, user: User, sessionId: string,
         taskId = task.id
         isNewTask = task.created
       }
+      await requireActiveTask(tx, user.id, taskId)
       const changed = await tx.focusSession.updateMany({
         where: {
           id: session.id,
@@ -1642,6 +1647,7 @@ export async function onContinueChoice(
       })
       if (res.count !== 1) return false
       if (choice === 'same' || choice === 'step') {
+        await requireActiveTask(tx, user.id, task!.id)
         const created = await tx.focusSession.create({
           data: {
             userId: user.id,
