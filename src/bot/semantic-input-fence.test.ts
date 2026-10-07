@@ -3,7 +3,7 @@ import { makeBot } from '../test/bot.js'
 import { hasDb, prisma, resetDb } from '../test/db.js'
 import { onIntentText, onResume, onContinueChoice, onRunningWorkText } from './session-flow.js'
 import { routeSemanticInput } from './semantic-routing.js'
-import { onReminderAction } from '../reminders/actions.js'
+import { onReminderAction, onRetro } from '../reminders/actions.js'
 import { releasePending } from '../tg/webhook.js'
 import type { Ctx } from './context.js'
 
@@ -44,6 +44,30 @@ describe.skipIf(!hasDb)('semantic mutation arrival fence across DB awaits', () =
     await prisma.focusSession.deleteMany({ where: { userId: user.id } })
     return { bot, user }
   }
+  it('retro custom pending rolls back when a newer input arrives during UPDATE', async () => {
+    const { bot, user } = await ready()
+    const session = await prisma.focusSession.create({ data: { userId: user.id, state: 'paused', reminderPolicy: 1, startedAt: bot.ctx.now(), pausedAt: bot.ctx.now() } })
+    const period = await prisma.workPeriod.create({ data: { sessionId: session.id, startedAt: bot.ctx.now(), endedAt: bot.ctx.now() } })
+    await expect(onRetro(invalidateAfter(bot.ctx, 'user', 'update'), user, period.id, 'custom')).rejects.toThrow()
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ pendingInput: user.pendingInput })
+  })
+
+  it('retro accounting and reminder correction roll back when superseded at pending UPDATE', async () => {
+    const { bot, user } = await ready()
+    const now = bot.ctx.now(), startedAt = new Date(now.getTime() - 30 * 60_000)
+    const session = await prisma.focusSession.create({ data: { userId: user.id, state: 'paused', reminderPolicy: 1, startedAt, pausedAt: now } })
+    const period = await prisma.workPeriod.create({ data: { sessionId: session.id, startedAt, endedAt: now } })
+    const chain = await prisma.reminderChain.create({ data: { userId: user.id, sessionId: session.id, kind: 'break', phaseStartedAt: now, firstDueAt: now, nextDueAt: now, intervalMinutes: 10 } })
+    const pendingInput = `retro:${period.id}`
+    const fresh = await prisma.user.update({ where: { id: user.id }, data: { pendingInput } })
+    await onRetro(invalidateAfter(bot.ctx, 'user', 'updateMany'), fresh, period.id, 'm5')
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ pendingInput })
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).toMatchObject({ pausedAt: now })
+    expect(await prisma.workPeriod.findUniqueOrThrow({ where: { id: period.id } })).toMatchObject({ endedAt: now, correctionId: null })
+    expect(await prisma.reminderChain.findUniqueOrThrow({ where: { id: chain.id } })).toEqual(chain)
+    expect(await prisma.event.count({ where: { type: 'reminder_answered' } })).toBe(0)
+  })
+
   it('collecting creation rolls back when superseded during INSERT', async () => {
     const { bot, user } = await ready()
     const ctx = invalidateAfter(bot.ctx, 'focusSession', 'create')

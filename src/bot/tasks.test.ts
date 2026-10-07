@@ -525,6 +525,26 @@ describe.skipIf(!hasDb)('разбор задачи на шаги', () => {
     return { user, task }
   }
 
+  it.each(['error', 'timeout', 'invalid'].flatMap(failure => ['task_split', 'task_split_clarify'].flatMap(stage => ['Начну с данных', 'Собрать данные\nНаписать выводы'].map(text => ({ failure, stage, text })))))('secondary $failure keeps $stage unchanged for $text', async ({ failure, stage, text }) => {
+    const provider: LlmProvider = { enabled: true, model: 'failure-test', complete: async req => {
+      if (req.system.includes('семантический маршрутизатор')) return reply(JSON.stringify(pendingText(text)))
+      if (failure === 'invalid') return reply('not json')
+      throw new Error(failure)
+    } }
+    const bot = makeBot({ llm: provider })
+    const { user, task } = await taskCard(bot, A)
+    const pendingInput = `${stage}:${task.id}`
+    await prisma.user.update({ where: { id: user.id }, data: { pendingInput } })
+    const sessionsBefore = await prisma.focusSession.findMany({ where: { userId: user.id } })
+    const outboxBefore = await prisma.outboxMessage.findMany({ where: { userId: user.id } })
+    await bot.text(A, text)
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ pendingInput })
+    expect(await prisma.task.count({ where: { userId: user.id } })).toBe(1)
+    expect(await prisma.focusSession.findMany({ where: { userId: user.id } })).toEqual(sessionsBefore)
+    expect(await prisma.outboxMessage.findMany({ where: { userId: user.id } })).toEqual(outboxBefore)
+    expect(bot.lastText(A)).toContain('Ничего не меняю')
+  })
+
   it('сначала спрашивает, как человек видит задачу, и строит шаги от его ответа', async () => {
     const llm = breakdown(['Перечитать требования', 'Набросать план', 'Написать введение'], [['начну с требований, потом план', pendingText('начну с требований, потом план')]])
     const bot = makeBot({ llm: llm.provider })
@@ -562,21 +582,21 @@ describe.skipIf(!hasDb)('разбор задачи на шаги', () => {
     expect((await prisma.event.findFirstOrThrow({ where: { type: 'task_breakdown_done' } })).payload).toMatchObject({ mode: 'auto', llm_used: true })
   })
 
-  it('при ошибке breakdown просит список и записывает семантически подготовленные шаги', async () => {
+  it('ошибка breakdown сохраняет ожидание; новый подготовленный LLM список можно применить', async () => {
     const llm = breakdown(null, [['сначала разберусь с темой', pendingText('сначала разберусь с темой')]])
     const bot = makeBot({ llm: llm.provider })
     const { user, task } = await taskCard(bot, A)
 
     await bot.press(A, `task:${task.id}:split`)
     await bot.text(A, 'сначала разберусь с темой')
-    expect(bot.lastText(A)).toBe('Не смог разобрать сам. Напиши шаги, каждый с новой строки, — запишу.')
-    expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ pendingInput: `task_split_manual:${task.id}` })
+    expect(bot.lastText(A)).toContain('Ничего не меняю')
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ pendingInput: `task_split:${task.id}` })
 
     await bot.textAs(A, '1. Выбрать тему\n2. Найти три источника', pendingSteps('1. Выбрать тему\n2. Найти три источника', ['Выбрать тему', 'Найти три источника']))
 
     expect(bot.lastText(A)).toContain('1. Выбрать тему\n2. Найти три источника')
     expect(await prisma.task.count({ where: { userId: user.id } })).toBe(3)
-    expect((await prisma.event.findFirstOrThrow({ where: { type: 'task_breakdown_done' } })).payload).toMatchObject({ mode: 'manual', steps: 2, llm_used: true })
+    expect((await prisma.event.findFirstOrThrow({ where: { type: 'task_breakdown_done' } })).payload).toMatchObject({ mode: 'answered', steps: 2, llm_used: true })
     expect(await prisma.event.findFirst({ where: { type: 'llm_fallback', payload: { path: ['stage'], equals: 'breakdown' } } })).not.toBeNull()
   })
 

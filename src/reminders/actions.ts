@@ -117,12 +117,12 @@ export async function onRetro(ctx: Ctx,user: User,id: string,arg: string): Promi
   if(!s||latest?.id!==id)return reply(ctx,user,'Эта кнопка уже неактуальна.')
   if(arg==='choose')return reply(ctx,user,'Когда начался перерыв?',[[5,10,15].map(n=>({text:`${n} минут назад`,data:cb('retro',id,`m${n}`)})),[{text:'Своё время',data:cb('retro',id,'custom')}]])
   if(arg==='custom'){
-    await ctx.db.$transaction(async tx=>{await lockUser(tx,user.id);const current=await tx.focusSession.findFirst({where:{id:s.id,userId:user.id,state:'paused'}});if(current)await tx.user.update({where:{id:user.id},data:{pendingInput:`retro:${id}`}})})
+    await currentInputTransaction(ctx,async tx=>{await lockUser(tx,user.id);const current=await tx.focusSession.findFirst({where:{id:s.id,userId:user.id,state:'paused'}});if(current)await tx.user.update({where:{id:user.id},data:{pendingInput:`retro:${id}`}})})
     return reply(ctx,user,'Сколько минут до нажатия «Перерыв» ты уже отдыхал?')
   }
   const minutes=Number(arg.replace(/^m/,''))
   if(!Number.isFinite(minutes)||minutes<=0||minutes>1440)return reply(ctx,user,'Укажи положительное число минут.')
-  try{await ctx.db.$transaction(async tx=>{
+  try{await currentInputTransaction(ctx,async tx=>{
     await lockUser(tx,user.id)
     const period=await tx.workPeriod.findFirstOrThrow({where:{sessionId:s.id},orderBy:{startedAt:'desc'}})
     if(period.id!==id)throw new StaleTransition()

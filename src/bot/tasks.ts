@@ -427,14 +427,8 @@ export async function onTaskBreakdownAnswer(
       llmUsed = true
     } else {
       await logEvent(ctx.db, user.id, 'llm_fallback', { stage: 'breakdown', reason: out.ok ? 'invalid' : out.reason }, { at: ctx.now() })
-      // Человек уже перечислил шаги — записываем их и без модели.
-      const listed = text === null ? [] : splitManualSteps(text)
-      if (listed.length < 2) {
-        if (!(await moveTo(`task_split_manual:${task.id}`))) return reply(ctx, user, T.stale)
-        return reply(ctx, user, T.breakdownManual)
-      }
-      steps = listed
-      mode = 'manual'
+      // Secondary model failure is fail-closed too: no text parsing or pending mutation.
+      return reply(ctx, user, T.cannotInterpret, undefined, { informational: true })
     }
   }
   steps = steps.filter((step) => normalize(step) !== normalize(task.title))
