@@ -10,8 +10,8 @@ describe.skipIf(!hasDb)('онбординг нового пользовател�
   it('после пропуска ритуала объясняет быстрый старт и способы персонализации', async () => {
     const bot = makeBot()
 
-    await bot.text(A, '/start')
-    await bot.text(A, '10:00')
+    await bot.textAs(A, '/start', {"text":"/start","route":"control","action":"start","value":null,"followUp":null})
+    await bot.textAs(A, '10:00', {"text":"10:00","route":"answer_pending","answer":{"kind":"clock","hour":10,"minute":0,"day":"next"},"followUp":null})
     await bot.press(A, 'onb::st_skip')
     await bot.press(A, 'skip::ritual')
 
@@ -33,10 +33,10 @@ describe.skipIf(!hasDb)('онбординг нового пользовател�
   it('показывает ту же памятку после сохранения ритуала', async () => {
     const bot = makeBot()
 
-    await bot.text(A, '/start')
-    await bot.text(A, '10:00')
+    await bot.textAs(A, '/start', {"text":"/start","route":"control","action":"start","value":null,"followUp":null})
+    await bot.textAs(A, '10:00', {"text":"10:00","route":"answer_pending","answer":{"kind":"clock","hour":10,"minute":0,"day":"next"},"followUp":null})
     await bot.press(A, 'onb::st_1000')
-    await bot.text(A, 'налить воду и закрыть лишние вкладки')
+    await bot.textAs(A, 'налить воду и закрыть лишние вкладки', {"text":"налить воду и закрыть лишние вкладки","route":"answer_pending","answer":{"kind":"text","value":"налить воду и закрыть лишние вкладки"},"followUp":null})
 
     const text = bot.lastText(A)
     expect(text).toContain('Быстрый старт')
@@ -47,7 +47,7 @@ describe.skipIf(!hasDb)('онбординг нового пользовател�
   it('подтверждение московского пояса — одно нажатие, затем время старта и ритуал', async () => {
     const bot = makeBot()
 
-    await bot.text(A, '/start')
+    await bot.textAs(A, '/start', {"text":"/start","route":"control","action":"start","value":null,"followUp":null})
     expect(bot.lastText(A)).toContain('У тебя сейчас 10:00, как в Москве?')
     await bot.press(A, 'onb::tz_yes')
     expect(bot.lastText(A)).toBe('Во сколько обычно садишься работать?')
@@ -63,15 +63,15 @@ describe.skipIf(!hasDb)('онбординг нового пользовател�
   it('«Нет, другое время» — прежний ввод времени, «Своё время» принимает текст', async () => {
     const bot = makeBot()
 
-    await bot.text(A, '/start')
+    await bot.textAs(A, '/start', {"text":"/start","route":"control","action":"start","value":null,"followUp":null})
     await bot.press(A, 'onb::tz_no')
     expect(bot.lastText(A)).toContain('Сколько у тебя сейчас времени?')
-    await bot.text(A, '12:00')
+    await bot.textAs(A, '12:00', {"text":"12:00","route":"answer_pending","answer":{"kind":"clock","hour":12,"minute":0,"day":"next"},"followUp":null})
     expect(bot.lastText(A)).toBe('Во сколько обычно садишься работать?')
     await bot.press(A, 'onb::st_custom')
-    await bot.text(A, 'в обед')
-    expect(bot.lastText(A)).toContain('Не понял время')
-    await bot.text(A, '8:30')
+    await bot.textAs(A, 'в обед', {"text":"в обед","route":"clarify","question":"Во сколько именно? Напиши время, например 12:00.","followUp":null})
+    expect(bot.lastText(A)).toContain('Во сколько именно?')
+    await bot.textAs(A, '8:30', {"text":"8:30","route":"answer_pending","answer":{"kind":"clock","hour":8,"minute":30,"day":"next"},"followUp":null})
 
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     expect(user).toMatchObject({ timezone: 'Asia/Yekaterinburg', morningTime: '08:30', pendingInput: 'ritual' })
@@ -79,7 +79,7 @@ describe.skipIf(!hasDb)('онбординг нового пользовател�
 
   it('«По-разному» не трогает время утра; старые кнопки знакомства не срабатывают повторно', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const before = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     expect(before.morningTime).toBe('10:00')
 
@@ -92,20 +92,20 @@ describe.skipIf(!hasDb)('онбординг нового пользовател�
 
   it('/start посреди знакомства продолжает с шага времени старта', async () => {
     const bot = makeBot()
-    await bot.text(A, '/start')
+    await bot.textAs(A, '/start', {"text":"/start","route":"control","action":"start","value":null,"followUp":null})
     await bot.press(A, 'onb::tz_yes')
 
-    await bot.text(A, '/start')
+    await bot.textAs(A, '/start', {"text":"/start","route":"control","action":"start","value":null,"followUp":null})
 
     expect(bot.lastText(A)).toBe('Во сколько обычно садишься работать?')
   })
 
   it('не повторяет вводную памятку возвращающемуся пользователю', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.text(A, '/stop')
+    await bot.setupOnboarded(A)
+    await bot.textAs(A, '/stop', {"text":"/stop","route":"control","action":"stop","value":null,"followUp":null})
 
-    await bot.text(A, '/start')
+    await bot.textAs(A, '/start', {"text":"/start","route":"control","action":"start","value":null,"followUp":null})
 
     expect(bot.lastText(A)).toContain('С возвращением.')
     expect(bot.lastText(A)).not.toContain('Быстрый старт')
@@ -114,9 +114,9 @@ describe.skipIf(!hasDb)('онбординг нового пользовател�
 
   it('/help повторяет практические подсказки после онбординга', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
 
-    await bot.text(A, '/help')
+    await bot.textAs(A, '/help', {"text":"/help","route":"control","action":"help","value":null,"followUp":null})
 
     expect(bot.lastText(A)).toContain('Быстрый старт')
     expect(bot.lastText(A)).toContain('Как быстрее подстроить меня')
@@ -126,34 +126,35 @@ describe.skipIf(!hasDb)('онбординг нового пользовател�
 
   it('/guide открывает подробную инструкцию и остаётся в /help', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     await prisma.user.update({ where: { tgId: BigInt(A) }, data: { pendingInput: 'profile' } })
 
-    await bot.text(A, '/guide')
+    await bot.textAs(A, '/guide', {"text":"/guide","route":"control","action":"guide","value":null,"followUp":null})
 
     expect(bot.lastText(A)).toContain('Подробная инструкция')
     expect(bot.lastText(A)).toContain('https://agent07.ru/guide')
     expect(await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })).toMatchObject({ pendingInput: 'profile' })
 
-    await bot.text(A, '/help')
+    await bot.textAs(A, '/help', {"text":"/help","route":"control","action":"help","value":null,"followUp":null})
     expect(bot.lastText(A)).toContain('/guide — подробная инструкция')
   })
 
-  it('/guide до /start не создаёт пользователя и не заменяет первое знакомство', async () => {
+  it('/guide до /start создаёт только технического пользователя и не заменяет первое знакомство', async () => {
     const bot = makeBot()
 
-    await bot.text(A, '/guide')
+    await bot.textAs(A, '/guide', {"text":"/guide","route":"control","action":"guide","value":null,"followUp":null})
 
     expect(bot.lastText(A)).toContain('https://agent07.ru/guide')
-    expect(await prisma.user.findUnique({ where: { tgId: BigInt(A) } })).toBeNull()
+    expect(await prisma.user.findUnique({ where: { tgId: BigInt(A) } })).toMatchObject({ pendingInput: 'none' })
+    expect(await prisma.focusSession.count()).toBe(0)
 
-    await bot.text(A, '/start')
+    await bot.textAs(A, '/start', {"text":"/start","route":"control","action":"start","value":null,"followUp":null})
     expect(bot.lastText(A)).toContain('У тебя сейчас 10:00, как в Москве?')
   })
 
   it('старая кнопка согласия не перезапускает пройденное знакомство', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
 
     await bot.press(A, 'consent::')
 

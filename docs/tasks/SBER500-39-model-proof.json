@@ -1,0 +1,364 @@
+{
+  "date": "2026-10-07",
+  "scope": "Synthetic provider+strict adapter only; no DB writes or Telegram sends; not human acceptance",
+  "cases": [
+    {
+      "text": "отдых 40 минут",
+      "expected": "break",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "value": {
+          "route": "break",
+          "text": "отдых 40 минут",
+          "followUp": null,
+          "minutes": 40,
+          "durationSource": "отдых 40 минут",
+          "durationBasis": "total"
+        }
+      }
+    },
+    {
+      "text": "Ещё 40 минут отдыха",
+      "expected": "break",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "value": {
+          "route": "break",
+          "text": "Ещё 40 минут отдыха",
+          "followUp": null,
+          "minutes": 40,
+          "durationSource": "Ещё 40 минут",
+          "durationBasis": "from_now"
+        }
+      }
+    },
+    {
+      "text": "Вернусь к работе через полчаса",
+      "expected": "break",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "value": {
+          "route": "break",
+          "text": "Вернусь к работе через полчаса",
+          "followUp": null,
+          "minutes": 30,
+          "durationSource": "через полчаса",
+          "durationBasis": "from_now"
+        }
+      }
+    },
+    {
+      "text": "Идиот!",
+      "expected": "feedback",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "value": {
+          "route": "feedback",
+          "text": "Идиот!",
+          "followUp": null
+        }
+      }
+    },
+    {
+      "text": "Отстань, я ещё отдыхаю",
+      "expected": "feedback",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "value": {
+          "route": "feedback",
+          "text": "Отстань, я ещё отдыхаю",
+          "followUp": null
+        }
+      }
+    },
+    {
+      "text": "На сегодня хватит",
+      "expected": "close_day",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "value": {
+          "route": "close_day",
+          "text": "На сегодня хватит",
+          "followUp": null
+        }
+      }
+    },
+    {
+      "text": "Продолжаю митинг",
+      "expected": "continue_same",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "value": {
+          "route": "continue_same",
+          "text": "Продолжаю митинг",
+          "followUp": null,
+          "minutes": null,
+          "durationSource": null
+        }
+      }
+    },
+    {
+      "text": "Статус",
+      "expected": "control",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "value": {
+          "route": "control",
+          "text": "Статус",
+          "followUp": null,
+          "action": "status",
+          "value": null
+        }
+      }
+    },
+    {
+      "text": "/status",
+      "expected": "control",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "value": {
+          "route": "control",
+          "text": "/status",
+          "followUp": null,
+          "action": "status",
+          "value": null
+        }
+      }
+    },
+    {
+      "text": "Написать отчёт",
+      "expected": "new_task",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "value": {
+          "route": "new_task",
+          "text": "Написать отчёт",
+          "followUp": null,
+          "minutes": null,
+          "durationSource": null,
+          "intent": {
+            "task": null,
+            "title": "Написать отчёт",
+            "scope": "step"
+          }
+        }
+      }
+    },
+    {
+      "text": "Отвлёкся на уведомления",
+      "expected": "session_help",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "value": {
+          "route": "session_help",
+          "text": "Отвлёкся на уведомления",
+          "followUp": null,
+          "help": {
+            "kind": "distracted",
+            "reply": "Вернитесь к митингу с командой или уточните следующий шаг.",
+            "action": "continue",
+            "task_title": null
+          }
+        }
+      }
+    },
+    {
+      "text": "Сделал, отдыхаю 5 минут",
+      "expected": "end_session",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "value": {
+          "route": "end_session",
+          "text": "Сделал, отдыхаю 5 минут",
+          "followUp": null,
+          "outcome": "done",
+          "outcomeSource": "Сделал",
+          "completedTask": null,
+          "completedTitle": null,
+          "completionSource": null,
+          "rest": true,
+          "minutes": 5,
+          "durationSource": "5 минут"
+        }
+      }
+    },
+    {
+      "text": "Не закончил, теперь отдыхаю",
+      "expected": "end_session",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "value": {
+          "route": "end_session",
+          "text": "Не закончил, теперь отдыхаю",
+          "followUp": null,
+          "outcome": "not_done",
+          "outcomeSource": "Не закончил",
+          "completedTask": null,
+          "completedTitle": null,
+          "completionSource": null,
+          "rest": true,
+          "minutes": null,
+          "durationSource": null
+        }
+      }
+    },
+    {
+      "text": "Митинг с командой закончил, отдыхаю",
+      "expected": "end_session",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "value": {
+          "route": "end_session",
+          "text": "Митинг с командой закончил, отдыхаю",
+          "followUp": null,
+          "outcome": "done",
+          "outcomeSource": "Митинг с командой закончил",
+          "completedTask": "t1",
+          "completedTitle": null,
+          "completionSource": "Митинг с командой закончил",
+          "rest": true,
+          "minutes": null,
+          "durationSource": null
+        }
+      }
+    },
+    {
+      "text": "10:00",
+      "expected": "answer_pending",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "value": {
+          "route": "answer_pending",
+          "text": "10:00",
+          "followUp": null,
+          "answer": {
+            "kind": "clock",
+            "hour": 10,
+            "minute": 0,
+            "day": "today"
+          }
+        }
+      }
+    },
+    {
+      "text": "налить воду",
+      "expected": "answer_pending",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "value": {
+          "route": "answer_pending",
+          "text": "налить воду",
+          "followUp": null,
+          "answer": {
+            "kind": "text",
+            "value": "налить воду"
+          }
+        }
+      }
+    },
+    {
+      "text": "/guide",
+      "expected": "control",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "value": {
+          "route": "control",
+          "text": "/guide",
+          "followUp": null,
+          "action": "guide",
+          "value": null
+        }
+      }
+    },
+    {
+      "text": "2",
+      "expected": "task_action",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "value": {
+          "route": "task_action",
+          "text": "2",
+          "followUp": null,
+          "action": "number",
+          "task": null,
+          "number": 2
+        }
+      }
+    },
+    {
+      "text": "составить план",
+      "expected": "intent_step",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "value": {
+          "route": "intent_step",
+          "text": "составить план",
+          "followUp": null,
+          "minutes": null,
+          "durationSource": null,
+          "title": "составить план"
+        }
+      }
+    },
+    {
+      "text": "релиз готов завтра надо будет тестировать начинаем завтра 8:30",
+      "expected": "report",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "value": {
+          "route": "report",
+          "text": "релиз готов",
+          "followUp": {
+            "route": "schedule_meeting",
+            "text": "начинаем завтра 8:30",
+            "hour": 8,
+            "minute": 30,
+            "day": "tomorrow",
+            "closeDay": false
+          },
+          "report": {
+            "route": "report",
+            "progress": "moved",
+            "next_step": "надо будет тестировать",
+            "continue_now": false,
+            "continue_minutes": null,
+            "allocations": [
+              {
+                "task": "t1",
+                "title": "Митинг с командой",
+                "minutes": null,
+                "remainder": false,
+                "source": "Митинг с командой"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "model": "gpt-5.4-mini",
+      "success": 20,
+      "total": 20
+    }
+  ]
+}

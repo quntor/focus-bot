@@ -131,7 +131,7 @@ docs            схема событий и метрики, развёртыв�
 - [docs/metrics.md](docs/metrics.md) — схема событий, как считаются DAU и обращения,
   гигиена начислений;
 - [docs/roadmap.md](docs/roadmap.md) — план по неделям до 15 октября.
-- [docs/llm.md](docs/llm.md) — границы модели, конфигурация, fallback и откат.
+- [docs/llm.md](docs/llm.md) — границы модели, конфигурация, отказ без изменений и откат.
 - [docs/voice-tasks.md](docs/voice-tasks.md) — голос/текст → список задач → выбор или переключение сессии.
 
 ## Права
@@ -139,10 +139,8 @@ docs            схема событий и метрики, развёртыв�
 Все права защищены. Код открыт для чтения, разрешения на использование,
 копирование или распространение не даётся.
 
-## SBER500-20: optional semantic routing
+## SBER500-39: единый LLM-вход
 
-`SEMANTIC_ROUTER_ENABLED=false` (default) keeps legacy routing unchanged. With an enabled LLM and this flag `true`, free text and transcribed voice go through one bounded semantic routing call before pending input. Commands, buttons and strictly formatted answers bypass it. Provider/schema/timeout errors fall back to legacy. No migrations required.
+Every text (including slash commands, reply-keyboard labels, onboarding answers, numbers and transcribed voice) goes through one bounded LLM routing call. Strict typed payloads are checked against the current owner's state. Feedback, uncertainty and provider/schema/timeout/budget failures do not change session/task/pending/timers. Callback buttons remain explicit user actions. The deprecated `SEMANTIC_ROUTER_ENABLED` input cannot enable legacy parsing; disabling the LLM makes text fail closed, while callbacks remain usable. No migrations required.
 
-Rollback: set `SEMANTIC_ROUTER_ENABLED=false` and restart/recreate the application with the updated environment; keep database and existing LLM configuration. Old semantic proposal buttons become inactive. This task does not authorize release or deployment.
-
-Before activation: perform team Telegram checks from `docs/tasks/SBER500-20.md`, measure real added p95 latency (target ≤2.5s), and obtain the requested pre-push review. Unit/provider mocks do not establish live latency or Telegram behavior.
+Rollback requires restoring the previous verified code release, not flipping a parser flag; preserve the database and credentials. This change does not authorize release/deployment.

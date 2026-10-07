@@ -24,13 +24,14 @@ const schema = z
     DATABASE_URL: z.string().min(1),
     PORT: z.coerce.number().default(3000),
     // Модель включается только полным набором. Пустые значения из скопированного
-    // .env.example считаются отсутствующими и сохраняют детерминированный режим.
+    // .env.example считаются отсутствующими: текст без модели не меняет состояние.
     LLM_API_KEY: optionalString,
     LLM_BASE_URL: optionalHttpsUrl,
     LLM_MODEL: optionalString,
     REMINDERS_ENABLED: z.enum(['true','false']).default('false').transform(value => value === 'true'),
     REMINDER_USER_IDS: z.string().default('').transform(value => value.split(',').map(x => x.trim()).filter(Boolean)).refine(value => value.every(x => /^\d+$/.test(x))),
-    SEMANTIC_ROUTER_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+    // Deprecated compatibility input: cannot restore legacy text parsing.
+    SEMANTIC_ROUTER_ENABLED: z.enum(['true', 'false']).default('true').transform(() => true),
     // STT использует те же ключ и base URL, но включается отдельно: голос не
     // должен неожиданно стать платным только из-за включённой текстовой модели.
     STT_MODEL: optionalString,

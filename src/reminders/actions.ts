@@ -18,7 +18,7 @@ export function quietKeyboard(user: Pick<User,'quietUntil'>,now: Date): Keyboard
     [{text:'Сегодня больше не беспокоить',data:cb('cycle',null,'stop')}],
     [{text:'Отключить уведомления',data:cb('cycle',null,'quiet')}]]
 }
-export async function onReminderAction(ctx: Ctx,user: User,id: string|null,arg: string, options: { restMinutes?: number; workMinutes?: number; guard?: (tx: Prisma.TransactionClient) => Promise<boolean> } = {}): Promise<void> {
+export async function onReminderAction(ctx: Ctx,user: User,id: string|null,arg: string, options: { restMinutes?: number; restBasis?: 'total' | 'from_now'; workMinutes?: number; guard?: (tx: Prisma.TransactionClient) => Promise<boolean> } = {}): Promise<void> {
   let start=false, text='Напоминания обновлены.', pauseId: string|null=null
   try {await currentInputTransaction(ctx,async tx=>{
     await lockUser(tx,user.id)
@@ -93,7 +93,15 @@ export async function onReminderAction(ctx: Ctx,user: User,id: string|null,arg: 
       text=options.workMinutes===undefined?'Продолжаем. Следующий вопрос — через полный рабочий интервал.':`Продолжаем. Следующий вопрос — через ${workMinutes} мин.`
     }else if(arg==='rest'){
       if(!chain||!['break','post_rest'].includes(chain.kind)) throw new StaleTransition()
-      await resetChain(tx,chain,now);text='Ещё отдыхаем. Начало перерыва не меняется.'
+      if(options.restMinutes!==undefined){
+        if(session.state!=='paused'||!session.pausedAt||chain.kind!=='break'||chain.sessionId!==session.id) throw new StaleTransition()
+        const due=new Date((options.restBasis==='from_now'?now:session.pausedAt).getTime()+options.restMinutes*MIN)
+        // A repeated duration confirms the existing timer, including a delivered one.
+        if(chain.firstDueAt.getTime()!==due.getTime()) await resetChain(tx,chain,now,options.restMinutes,due)
+        text=`Остаёмся на отдыхе. Перерыв — ${options.restMinutes} мин. ${options.restBasis==='from_now'?'сейчас':'от его начала'}. Напишу в ${hhmm(due,fresh.timezone)}.`
+      }else{
+        await resetChain(tx,chain,now);text='Ещё отдыхаем. Начало перерыва не меняется.'
+      }
     }else throw new StaleTransition()
     await tx.user.updateMany({where:{id:user.id,pendingInput:{in:['none',`session_end:${session.id}`]}},data:{pendingInput:'none'}})
   })}catch(e){if(e instanceof StaleTransition)return reply(ctx,user,'Эта кнопка уже неактуальна.');throw e}

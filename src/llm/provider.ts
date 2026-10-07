@@ -44,8 +44,8 @@ export class LlmCallError extends Error {
   }
 }
 
-// Без полного набора LLM_* все касания идут по детерминированному пути —
-// продукт должен работать без конкретного провайдера или модели.
+// Без полного набора LLM_* провайдер выключен. Unified text ingress
+// ничего не угадывает и сохраняет состояние; explicit callbacks доступны.
 export const disabledProvider: LlmProvider = {
   enabled: false,
   model: null,

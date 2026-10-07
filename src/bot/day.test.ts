@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { hasDb, prisma, resetDb } from '../test/db.js'
 import { makeBot } from '../test/bot.js'
+import { work } from '../test/semantic-provider.js'
 import { explicitMeetingAt } from './day-flow.js'
 
 const A = 6001
@@ -11,10 +12,10 @@ describe.skipIf(!hasDb)('граница дня — по поясу пользо�
   it('сессия в 04:30 по Владивостоку засчитывается в его день, а не в день сервера', async () => {
     // 18:00 UTC 22-го = 04:00 23-го во Владивостоке (UTC+10).
     const bot = makeBot({ now: new Date('2026-09-22T18:00:00Z') })
-    await bot.onboard(A, '04:00')
+    await bot.setupOnboarded(A, '04:00')
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     expect(user.timezone).toBe('Asia/Vladivostok')
-    await bot.text(A, 'глава, 30 минут')
+    await bot.textAs(A, 'глава, 30 минут', {"text":"глава, 30 минут","route":"new_task","intent":{"task":null,"title":"глава","scope":"step"},"minutes":30,"durationSource":"30 минут","followUp":null})
     const s = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id } })
     bot.advance(30)
     await bot.press(A, `out:${s.id}:done`)
@@ -27,9 +28,9 @@ describe.skipIf(!hasDb)('граница дня — по поясу пользо�
   it('сессия в 01:30 относится ко вчерашнему рабочему дню (сутки до 4:00), журнал — к календарному', async () => {
     // 15:00 UTC = 01:00 следующего дня во Владивостоке (UTC+10).
     const bot = makeBot({ now: new Date('2026-09-22T15:00:00Z') })
-    await bot.onboard(A, '01:00')
+    await bot.setupOnboarded(A, '01:00')
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
-    await bot.text(A, 'глава, 30 минут')
+    await bot.textAs(A, 'глава, 30 минут', {"text":"глава, 30 минут","route":"new_task","intent":{"task":null,"title":"глава","scope":"step"},"minutes":30,"durationSource":"30 минут","followUp":null})
     const s = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id } })
     bot.advance(30)
     await bot.press(A, `out:${s.id}:done`)
@@ -40,23 +41,23 @@ describe.skipIf(!hasDb)('граница дня — по поясу пользо�
 
   it('/today в 00:30 подводит итог вчерашнего рабочего дня', async () => {
     const bot = makeBot({ now: new Date('2026-09-22T20:00:00Z') }) // 23:00 по Москве
-    await bot.onboard(A, '23:00')
-    await bot.text(A, 'глава, 40 минут')
+    await bot.setupOnboarded(A, '23:00')
+    await bot.textAs(A, 'глава, 40 минут', {"text":"глава, 40 минут","route":"new_task","intent":{"task":null,"title":"глава","scope":"step"},"minutes":40,"durationSource":"40 минут","followUp":null})
     const s = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
     bot.advance(40)
     await bot.press(A, `out:${s.id}:done`)
     bot.advance(50) // 00:30
-    await bot.text(A, '/today')
-    expect(bot.lastText(A)).toContain('За сегодня: 1 сессия')
+    await bot.textAs(A, '/today', {"text":"/today","route":"close_day","followUp":null})
+    expect(bot.textsTo(A).some(t => t.includes('За сегодня: 1 сессия'))).toBe(true)
   })
 
   it('цель дня: очки один раз, когда её выполнила сессия', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.text(A, '/goal 2')
+    await bot.setupOnboarded(A)
+    await bot.textAs(A, '/goal 2', {"text":"/goal 2","route":"control","action":"goal","value":"2","followUp":null})
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     for (let i = 0; i < 3; i++) {
-      await bot.text(A, `шаг ${i}, 30 минут`)
+      await bot.textAs(A, `шаг ${i}, 30 минут`, work(`шаг ${i}, 30 минут`, `шаг ${i}`, 30, '30 минут'))
       const s = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })
       bot.advance(30)
       await bot.press(A, `out:${s.id}:done`)
@@ -73,14 +74,14 @@ describe.skipIf(!hasDb)('/delete_me', () => {
 
   it('удаляет пользователя и весь его текст по-настоящему, журнал обезличен', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.text(A, 'написать Кате про увольнение, 30 минут')
+    await bot.setupOnboarded(A)
+    await bot.textAs(A, 'написать Кате про увольнение, 30 минут', {"text":"написать Кате про увольнение, 30 минут","route":"new_task","intent":{"task":null,"title":"написать Кате про увольнение","scope":"step"},"minutes":30,"durationSource":"30 минут","followUp":null})
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     const s = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id } })
     bot.advance(30)
     await bot.press(A, `out:${s.id}:done`)
-    await bot.text(A, 'разобрал анализы')
-    await bot.text(A, '/delete_me')
+    await bot.textAs(A, 'разобрал анализы', {"text":"разобрал анализы","route":"answer_pending","answer":{"kind":"text","value":"разобрал анализы"},"followUp":null})
+    await bot.textAs(A, '/delete_me', {"text":"/delete_me","route":"control","action":"delete_me","value":null,"followUp":null})
     await bot.press(A, 'del::confirm')
 
     expect(await prisma.user.count()).toBe(0)
@@ -97,10 +98,10 @@ describe.skipIf(!hasDb)('/delete_me', () => {
 
   it('новый пользователь проходит настройку времени без согласия и не сохраняет её как задачу', async () => {
     const bot = makeBot()
-    await bot.text(A, '/start')
+    await bot.textAs(A, '/start', {"text":"/start","route":"control","action":"start","value":null,"followUp":null})
     expect(bot.lastText(A)).toContain('как в Москве?')
     expect(bot.lastText(A)).not.toContain('согласие')
-    await bot.text(A, '10:00')
+    await bot.textAs(A, '10:00', {"text":"10:00","route":"answer_pending","answer":{"kind":"clock","hour":10,"minute":0,"day":"next"},"followUp":null})
     expect(await prisma.focusSession.count()).toBe(0)
     expect(await prisma.task.count()).toBe(0)
   })
@@ -115,10 +116,10 @@ describe.skipIf(!hasDb)('/delete_me', () => {
 
   it('выходной, взятый в 01:00, не съедает рабочий день после него', async () => {
     const bot = makeBot({ now: new Date('2026-10-01T07:00:00Z') })
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     bot.setNow(new Date('2026-10-01T22:00:00Z'))
 
-    await bot.text(A, '/dayoff')
+    await bot.textAs(A, '/dayoff', {"text":"/dayoff","route":"control","action":"dayoff","value":null,"followUp":null})
 
     expect(await prisma.dayOff.findMany({ select: { dayKey: true } })).toEqual([{ dayKey: '2026-10-02' }])
     const meeting = await prisma.outboxMessage.findFirstOrThrow({ where: { kind: 'meeting', status: 'pending' } })
@@ -136,10 +137,10 @@ describe.skipIf(!hasDb)('/delete_me', () => {
 
   it('«Позже» у вопроса о цели — не отказ и не напоминание через полчаса', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const pendingBefore = await prisma.outboxMessage.findMany({ where: { kind: 'meeting', status: 'pending' }, select: { id: true } })
 
-    await bot.text(A, '/goal')
+    await bot.textAs(A, '/goal', {"text":"/goal","route":"control","action":"goal","value":null,"followUp":null})
     await bot.press(A, bot.lastButton(A, 'goal:', ':later'))
 
     expect(bot.lastText(A)).toContain('/goal')

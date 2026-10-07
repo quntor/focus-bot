@@ -17,9 +17,9 @@ describe.skipIf(!hasDb)('SBER500-35 day logic', () => {
     const bot = makeBot({ now: new Date(now) })
     bot.ctx.remindersEnabled = true
     if (migrated) bot.ctx.reminderUserIds = [String(A)]
-    await bot.onboard(A, '07:50')
+    await bot.setupOnboarded(A, '07:50')
     await prisma.user.updateMany({ where: { tgId: BigInt(A) }, data: { timezone: 'Europe/Moscow', morningTime: '08:30', eveningTime: '21:00' } })
-    await bot.text(A, 'Начать сессию')
+    await bot.textAs(A, 'Начать сессию', {"text":"Начать сессию","route":"control","action":"focus","value":null,"followUp":null})
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     const session = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })
     const task = await prisma.task.create({ data: { userId: user.id, title: 'Стратегия' } })
@@ -59,13 +59,13 @@ describe.skipIf(!hasDb)('SBER500-35 day logic', () => {
     expect(f.bot.lastText(A)).toContain('Фактически в работе: 40 мин.')
     expect(f.bot.lastText(A)).not.toMatch(/сегодня|идёт сейчас|Ещё одна/)
   })
-  it.each([true, false])('explicit 90-minute rest survives router invalid and restart, policy1=%s', async migrated => {
+  it.each([true, false])('explicit 90-minute rest survives restart and restart, policy1=%s', async migrated => {
     const { bot, user, session, task } = await setup(undefined, migrated)
     expect(session.startedAt).toEqual(bot.now()) // earlier than morning window
     bot.setNow(new Date('2026-10-06T05:32:49Z'))
     bot.ctx.semanticRouterEnabled = true
     bot.ctx.llm = { enabled: true, model: 'test', async complete() { return { text: 'invalid', usage: null } } }
-    await bot.text(A, 'Сейчас перерыв полтора часа')
+    await bot.textAs(A, 'Сейчас перерыв полтора часа', {"text":"Сейчас перерыв полтора часа","route":"break","minutes":90,"durationSource":"полтора часа","followUp":null})
     const paused = await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })
     expect(paused).toMatchObject({ state: 'paused', taskId: task.id, plannedRestMinutes: session.plannedRestMinutes, pausedAt: bot.now() })
     expect(bot.lastText(A)).toContain('90 мин')
@@ -78,7 +78,7 @@ describe.skipIf(!hasDb)('SBER500-35 day logic', () => {
     restart.advance(1)
     await runOutboxOnce(restart.ctx)
     expect(restart.tg.sent).toHaveLength(1)
-    await restart.text(A, 'Вернуться к работе')
+    await restart.textAs(A, 'Вернуться к работе', {"text":"Вернуться к работе","route":"continue_same","minutes":null,"durationSource":null,"followUp":null})
     const resumed = await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })
     expect(resumed).toMatchObject({ state: 'running', taskId: task.id })
     expect(resumed.plannedEndAt).toEqual(new Date(restart.now().getTime() + session.plannedMinutes! * MIN))
@@ -94,12 +94,12 @@ describe.skipIf(!hasDb)('SBER500-35 day logic', () => {
     const { bot, user, session, task } = await setup('2026-10-06T12:04:50Z', migrated)
     bot.advance(13)
     bot.ctx.semanticRouterEnabled = true
-    bot.ctx.llm = { enabled: true, model: 'test', async complete() { throw new Error('break must not call LLM') } }
+    bot.ctx.llm = { enabled: true, model: 'test', async complete() { return { text: JSON.stringify({ route: 'break', text: 'Перерыв 5 минут', minutes: 5, durationSource: '5 минут', followUp: null }), usage: null } } }
     if (via === 'voice') {
       bot.ctx.stt = { enabled: true, model: 'test', async transcribe() { return 'Перерыв 5 минут' } }
       bot.tg.downloads.set('short-break', new Uint8Array([1, 2, 3]))
       await bot.voice(A, { fileId: 'short-break', duration: 3, mimeType: 'audio/ogg' })
-    } else await bot.text(A, 'Перерыв 5 минут')
+    } else await bot.textAs(A, 'Перерыв 5 минут', {"text":"Перерыв 5 минут","route":"break","minutes":5,"durationSource":"5 минут","followUp":null})
     expect(bot.lastText(A)).toContain('5 мин')
     expect(bot.lastText(A)).toContain('15:22')
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).toMatchObject({
@@ -107,7 +107,7 @@ describe.skipIf(!hasDb)('SBER500-35 day logic', () => {
     })
     // A repeated break command must not move the original deadline.
     bot.advance(1)
-    await bot.text(A, 'Перерыв 5 минут')
+    await bot.textAs(A, 'Перерыв 5 минут', {"text":"Перерыв 5 минут","route":"break","minutes":5,"durationSource":"5 минут","followUp":null})
     const restart = makeBot({ now: new Date(bot.now().getTime() + 3 * MIN) })
     restart.ctx.remindersEnabled = true
     await reconcile(restart.ctx)
@@ -118,7 +118,7 @@ describe.skipIf(!hasDb)('SBER500-35 day logic', () => {
     expect(restart.tg.sent).toHaveLength(1)
     await runOutboxOnce(restart.ctx)
     expect(restart.tg.sent).toHaveLength(1)
-    await restart.text(A, 'Вернуться к работе')
+    await restart.textAs(A, 'Вернуться к работе', {"text":"Вернуться к работе","route":"continue_same","minutes":null,"durationSource":null,"followUp":null})
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).toMatchObject({
       state: 'running', taskId: task.id, plannedEndAt: new Date(restart.now().getTime() + session.plannedMinutes! * MIN),
     })
@@ -126,7 +126,7 @@ describe.skipIf(!hasDb)('SBER500-35 day logic', () => {
   })
   it.each([true, false])('break without duration keeps configured rest, policy1=%s', async migrated => {
     const { bot, session } = await setup('2026-10-06T12:04:50Z', migrated)
-    await bot.text(A, 'Перерыв')
+    await bot.textAs(A, 'Перерыв', {"text":"Перерыв","route":"break","minutes":null,"durationSource":null,"followUp":null})
     expect(bot.lastText(A)).toContain(`${session.plannedRestMinutes} мин`)
   })
   it.each([true, false])('semantic pause also preserves short rest, policy1=%s', async migrated => {
@@ -137,24 +137,18 @@ describe.skipIf(!hasDb)('SBER500-35 day logic', () => {
     expect(bot.lastText(A)).toContain('5 мин')
     expect(bot.lastText(A)).toContain('15:23')
   })
-  it.each(['disabled', 'error', 'voice'])('explicit rest is independent of LLM: %s', async mode => {
+  it.each(['disabled', 'error', 'voice'])('failed model cannot interpret rest: %s', async mode => {
     const { bot, user, session } = await setup('2026-10-06T07:00:00Z')
-    bot.ctx.semanticRouterEnabled = true
-    if (mode !== 'disabled') bot.ctx.llm = { enabled: true, model: 'test', async complete() { throw new Error('rest must not call LLM') } }
+    const before = await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })
+    const chain = await prisma.reminderChain.findFirstOrThrow({ where: { userId: user.id, status: 'active' } })
+    if (mode !== 'disabled') bot.ctx.llm = { enabled: true, model: 'test', async complete() { throw new Error('offline') } }
     if (mode === 'voice') {
       bot.ctx.stt = { enabled: true, model: 'test', async transcribe() { return 'Сейчас перерыв полтора часа' } }
       bot.tg.downloads.set('rest', new Uint8Array([1, 2, 3]))
       await bot.voice(A, { fileId: 'rest', duration: 3, mimeType: 'audio/ogg' })
     } else await bot.text(A, 'Сейчас перерыв полтора часа')
-    expect((await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).state).toBe('paused')
-    const chain = await prisma.reminderChain.findFirstOrThrow({ where: { userId: user.id, status: 'active' } })
-    expect(chain).toMatchObject({ kind: 'break', intervalMinutes: 90, firstDueAt: new Date(bot.now().getTime() + 90 * MIN) })
-    expect(await prisma.event.count({ where: { subjectId: user.subjectId, type: 'llm_fallback' } })).toBe(0)
-    const deadline = chain.firstDueAt
-    bot.advance(1)
-    await bot.text(A, 'Сейчас перерыв полтора часа')
-    expect((await prisma.reminderChain.findUniqueOrThrow({ where: { id: chain.id } })).firstDueAt).toEqual(deadline)
-    expect(await prisma.task.count({ where: { userId: user.id } })).toBe(1)
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).toEqual(before)
+    expect(await prisma.reminderChain.findUniqueOrThrow({ where: { id: chain.id } })).toEqual(chain)
   })
   it('late voice break cannot mutate pending or session after a newer arrival', async () => {
     const { bot, user, session } = await setup('2026-10-06T07:00:00Z')
@@ -176,7 +170,7 @@ describe.skipIf(!hasDb)('SBER500-35 day logic', () => {
   it.each(['running', 'paused', 'idle'])('stop today returns summary and no current-day reminder from %s', async state => {
     const { bot, user, session } = await setup('2026-10-06T07:00:00Z')
     bot.advance(15)
-    if (state === 'paused') await bot.text(A, 'Перерыв')
+    if (state === 'paused') await bot.textAs(A, 'Перерыв', {"text":"Перерыв","route":"break","minutes":null,"durationSource":null,"followUp":null})
     if (state === 'idle') await prisma.focusSession.update({ where: { id: session.id }, data: { state: 'cancelled', finishedAt: bot.now() } })
     await prisma.outboxMessage.create({ data: { userId: user.id, kind: 'summary', idempotencyKey: `summary:${user.id}:today`, sendAfter: new Date('2026-10-06T18:00:00Z'), payload: { dayKey: '2026-10-06' } } })
     await bot.press(A, 'cycle::stop')

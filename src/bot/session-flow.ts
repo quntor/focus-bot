@@ -1,8 +1,8 @@
 import { requireActiveTask } from './task-tree.js'
 import { onReminderAction, quietKeyboard } from '../reminders/actions.js'
-import { cancelPrimary } from '../reminders/store.js'
+import { cancelPrimary, lockUser } from '../reminders/store.js'
 import { closePeriod, projectAllocations } from '../reminders/accounting.js'
-import { inputTransaction, assertCurrentInput } from './input-lock.js'
+import { inputTransaction, currentInputTransaction, assertCurrentInput } from './input-lock.js'
 import { randomBytes } from 'node:crypto'
 import { Prisma, type FocusSession, type User } from '@prisma/client'
 import { logEvent } from '../analytics/log.js'
@@ -196,10 +196,11 @@ async function repeatRunningTaskChoice(ctx: Ctx, user: User, session: FocusSessi
   await reply(ctx, user, T.runningTaskChoice(session.pendingTaskTitle), runningTaskChoiceKeyboard(session.id, user.pendingInput.split(':')[2]!))
 }
 
-export async function onRunningTaskCandidate(ctx: Ctx, user: User, rawTitle: string): Promise<void> {
+export async function onRunningTaskCandidate(ctx: Ctx, user: User, rawTitle: string, prepared?: IntentResult): Promise<void> {
   const title = cleanTaskTitle(rawTitle)
   if (!title) return reply(ctx, user, T.stale)
   const nonce = randomBytes(4).toString('hex')
+  const suffix = prepared ? ':' + Buffer.from(JSON.stringify({ scope: prepared.scope, minutes: prepared.minutes ?? null })).toString('base64url') : ''
   let savedSessionId: string | null = null
   try {
     await inputTransaction(ctx, async (tx) => {
@@ -211,7 +212,7 @@ export async function onRunningTaskCandidate(ctx: Ctx, user: User, rawTitle: str
         data: { pendingTaskTitle: title },
       })
       if (changed.count !== 1) throw new StaleTransition()
-      await tx.user.update({ where: { id: user.id }, data: { pendingInput: `running_task_choice:${session.id}:${nonce}` } })
+      await tx.user.update({ where: { id: user.id }, data: { pendingInput: `running_task_choice:${session.id}:${nonce}${suffix}` } })
       savedSessionId = session.id
     })
   } catch (error) {
@@ -253,7 +254,11 @@ export async function onRunningTaskChoice(
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
       const freshUser = await tx.user.findUnique({ where: { id: user.id }, select: { pendingInput: true } })
       const session = await tx.focusSession.findFirst({ where: { id: sessionId, userId: user.id, state: 'running', taskId: null } })
-      if (!session?.pendingTaskTitle || freshUser?.pendingInput !== `running_task_choice:${sessionId}:${nonce}`) throw new StaleTransition()
+      const prefix = `running_task_choice:${sessionId}:${nonce}`
+      if (!session?.pendingTaskTitle || !(freshUser?.pendingInput === prefix || freshUser?.pendingInput.startsWith(prefix + ':'))) throw new StaleTransition()
+      const encoded = freshUser.pendingInput.split(':')[3]
+      const payload: { scope: 'step' | 'multi_session'; minutes: number | null } = encoded ? JSON.parse(Buffer.from(encoded, 'base64url').toString()) : { scope: 'step', minutes: null }
+      if (!['step','multi_session'].includes(payload.scope) || (payload.minutes !== null && (!Number.isInteger(payload.minutes) || payload.minutes < 10 || payload.minutes > 240))) throw new StaleTransition()
       title = session.pendingTaskTitle
 
       if (choice === 'new') {
@@ -261,9 +266,10 @@ export async function onRunningTaskChoice(
         taskTitle = task.title
         const changed = await tx.focusSession.updateMany({
           where: { id: session.id, userId: user.id, state: 'running', taskId: null, pendingTaskTitle: title },
-          data: { taskId: task.id, intentText: task.title, scope: 'step', pendingTaskTitle: null },
+          data: { taskId: task.id, intentText: task.title, scope: payload.scope, pendingTaskTitle: null },
         })
         if (changed.count !== 1) throw new StaleTransition()
+        if (payload.minutes !== null) await applyNamedWorkDuration(tx, user, session, payload.minutes, ctx.now())
         await tx.task.updateMany({
           where: { id: task.id, userId: user.id, status: 'active' },
           data: { sessionsCount: { increment: 1 }, lastSessionAt: ctx.now() },
@@ -284,7 +290,7 @@ export async function onRunningTaskChoice(
         if (changed.count !== 1) throw new StaleTransition()
       }
       const released = await tx.user.updateMany({
-        where: { id: user.id, pendingInput: `running_task_choice:${sessionId}:${nonce}` },
+        where: { id: user.id, pendingInput: freshUser.pendingInput },
         data: { pendingInput: 'none' },
       })
       if (released.count !== 1) throw new StaleTransition()
@@ -378,6 +384,56 @@ export async function onRunningFreeText(
   if (ctx.semanticRouterEnabled && ctx.isCurrentInput && !ctx.isCurrentInput()) return true
   await reply(ctx, user, parsed.result.reply, sessionHelpKeyboard(session.id, parsed.result.action))
   return true
+}
+
+// Explicit human claims interpreted by the router, not an inferred outcome.
+export async function onSemanticEnd(ctx: Ctx, user: User, sessionId: string, route: Extract<import('../llm/router.js').SemanticRoute, { route: 'end_session' }>, guard: (tx: Prisma.TransactionClient) => Promise<boolean>, completedTaskId: string | null): Promise<void> {
+  if (route.outcome === null) return onDone(ctx, user)
+  const now = ctx.now()
+  let due: Date | null = null
+  let completedTitle: string | null = null
+  try {
+    await inputTransaction(ctx, async tx => {
+      if (!await guard(tx)) throw new StaleTransition()
+      const current = await tx.focusSession.findFirst({ where: { id: sessionId, userId: user.id, state: 'running' } })
+      if (!current?.startedAt) throw new StaleTransition()
+      const elapsedMinutes = Math.floor(activeElapsedMs(current, now) / MIN)
+      const counted = isCounted('finished', elapsedMinutes)
+      let completedId = completedTaskId
+      if (route.completedTitle !== null) {
+        if (current.taskId !== null) throw new StaleTransition()
+        completedId = (await findOrCreateTask(tx, { userId: user.id, title: route.completedTitle, now })).id
+      }
+      if (completedId) {
+        const task = await tx.task.findFirst({ where: { id: completedId, userId: user.id, status: 'active' } })
+        if (!task) throw new StaleTransition()
+        completedTitle = task.title
+        if (current.taskId === null) {
+          await tx.focusSession.update({ where: { id: current.id }, data: { taskId: task.id, intentText: task.title } })
+          await logEvent(tx, user.id, 'task_selected', { task_id: task.id, from_period_start: true }, { at: now, sessionId })
+        }
+        await tx.task.update({ where: { id: task.id }, data: { status: 'done', lastProgressAt: now, sessionsSinceProgress: 0, ...(current.taskId === null ? { sessionsCount: { increment: 1 }, lastSessionAt: now } : {}) } })
+        await logEvent(tx, user.id, 'task_completed', { task_id: task.id, source: 'text' }, { at: now, sessionId })
+      }
+      await transition(tx, { sessionId, userId: user.id }, 'running', 'finished', { outcome: route.outcome!, finishedAt: now, counted, progress: null, restChoice: route.rest ? 'rest' : null, ...(route.rest && route.minutes !== null ? { plannedRestMinutes: route.minutes } : {}) })
+      await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `ping:${sessionId}` } })
+      await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `session_end:${sessionId}` } })
+      if (route.rest) {
+        const minutes = route.minutes ?? current.plannedRestMinutes ?? restFor(current.plannedMinutes)
+        due = new Date(now.getTime() + minutes * MIN)
+        await enqueue(tx, { userId: user.id, kind: 'rest_over', key: `rest_over:${sessionId}`, sendAfter: due, payload: { sessionId } })
+        await logEvent(tx, user.id, 'rest_chosen', { session_id: sessionId, choice: 'rest', rest_minutes: minutes }, { at: now, sessionId })
+      }
+      await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'report_text' } })
+      await logEvent(tx, user.id, 'session_completed', { session_id: sessionId, outcome: route.outcome!, elapsed_minutes: elapsedMinutes, early: current.plannedEndAt !== null && now < current.plannedEndAt, counted }, { at: now, sessionId })
+      if (counted) await creditCountedSession(tx, { userId: user.id, sessionId, dayKey: workDayKey(now, user.timezone), at: now })
+    })
+  } catch (error) {
+    if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
+    throw error
+  }
+  const restDue = due as Date | null
+  await reply(ctx, user, [completedTitle ? T.taskCompleted(completedTitle) : 'Сессия завершена.', restDue ? T.restStarted(hhmm(restDue, user.timezone)) : null, T.askReport].filter(Boolean).join('\n'), [[{ text: T.skip, data: cb('skiprep', sessionId) }]])
 }
 
 async function completeTaskAndRest(
@@ -690,10 +746,16 @@ function intentDisplayTitle(text: string, parsedTitle: string, task: { title: st
   return parsedTitle.replace(/\s+/g, ' ').trim().slice(0, 80)
 }
 
+export async function onIntentStep(ctx: Ctx, user: User, title: string, minutes: number | null): Promise<void> {
+  const active = await activeSession(ctx, user.id)
+  if (!active || active.state !== 'collecting_intent' || !active.taskId || !active.intentText) return reply(ctx, user, T.stale)
+  return handleIntent(ctx, user, active, title, { taskId: active.taskId, title, scope: active.scope === 'multi_session' ? 'multi_session' : 'step', minutes, llmUsed: true })
+}
+
 async function handleIntent(ctx: Ctx, user: User, session: FocusSession, text: string, prepared?: IntentResult): Promise<void> {
   const now = ctx.now()
   const technique: Technique = isTechnique(user.technique) ? user.technique : 'auto'
-  const named = parseNamedMinutes(text)
+  const named = prepared ? prepared.minutes ?? null : parseNamedMinutes(text)
   // Уточнение большого намерения: задача и масштаб уже известны, модель второй
   // раз не зовём — меняется только формулировка шага.
   const refining = session.intentText !== null
@@ -704,7 +766,7 @@ async function handleIntent(ctx: Ctx, user: User, session: FocusSession, text: s
   let llmUsed = false
   let failure: 'disabled' | 'budget' | 'error' | 'timeout' | 'invalid' | null = null
 
-  if (!refining) {
+  if (!refining || prepared) {
     // В промт уходят задачи только этого пользователя — выборка по userId.
     const tasks = await ctx.db.task.findMany({
       where: { userId: user.id, status: 'active' },
@@ -715,10 +777,11 @@ async function handleIntent(ctx: Ctx, user: User, session: FocusSession, text: s
     const parsed = prepared ? { result: prepared, failure: null } : await parseIntent(ctx.llm, { text, tasks, profile: user.profileText }, llmMeter(ctx, user.id, 'intent', session.id))
     const pinned = session.taskId ? tasks.find((task) => task.id === session.taskId) ?? null : null
     const exact = tasks.find((task) => normalizeWorkTitle(task.title) === normalizeWorkTitle(text)) ?? null
-    const proposed = parsed.result.taskId ? tasks.find((task) => task.id === parsed.result.taskId) ?? null : null
-    const matched = pinned ?? exact ?? (proposed && explicitlyReferencesTask(text, proposed.title) ? proposed : null)
+    const proposed = parsed.result.taskId ? (prepared ? await ctx.db.task.findFirst({ where: { id: parsed.result.taskId, userId: user.id, status: 'active' }, select: { id: true, title: true } }) : tasks.find((task) => task.id === parsed.result.taskId) ?? null) : null
+    if (prepared?.taskId && !proposed) return reply(ctx, user, T.stale)
+    const matched = prepared ? proposed : pinned ?? exact ?? (proposed && explicitlyReferencesTask(text, proposed.title) ? proposed : null)
     taskId = matched?.id ?? null
-    title = intentDisplayTitle(text, parsed.result.title, matched)
+    title = prepared ? parsed.result.title : intentDisplayTitle(text, parsed.result.title, matched)
     scope = parsed.result.scope
     llmUsed = parsed.result.llmUsed
     failure = parsed.failure && !parsed.failure.ok ? parsed.failure.reason : null
@@ -936,7 +999,16 @@ export async function onRunningEdit(
   await reply(ctx, user, field === 'work' ? T.askRunningWork : T.askRunningDuration)
 }
 
-export async function onRunningWorkText(ctx: Ctx, user: User, sessionId: string, raw: string): Promise<void> {
+// The model supplies only a validated work interval; scheduling stays in the same owner transaction.
+async function applyNamedWorkDuration(tx: Prisma.TransactionClient, user: User, session: FocusSession, minutes: number, now: Date): Promise<void> {
+  const due = new Date(now.getTime() + minutes * MIN)
+  await tx.focusSession.update({ where: { id: session.id }, data: { plannedMinutes: minutes, minutesSource: 'user', plannedRestMinutes: restFor(minutes), plannedEndAt: due, pingAt: null } })
+  await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `session_end:${session.id}` } })
+  await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `ping:${session.id}` } })
+  if (session.reminderPolicy !== 1) await enqueue(tx, { userId: user.id, kind: 'session_end', key: `session_end:${session.id}:semantic:${now.getTime()}`, sendAfter: due, payload: { sessionId: session.id } })
+}
+
+export async function onRunningWorkText(ctx: Ctx, user: User, sessionId: string, raw: string, prepared?: IntentResult): Promise<void> {
   const text = raw.trim().slice(0, INTENT_MAX)
   if (!text) return reply(ctx, user, T.askRunningWork)
   const session = await ownedSession(ctx, user.id, sessionId)
@@ -951,12 +1023,13 @@ export async function onRunningWorkText(ctx: Ctx, user: User, sessionId: string,
     take: 20,
     select: { id: true, title: true },
   })
-  const parsed = await parseIntent(ctx.llm, { text, tasks, profile: user.profileText }, llmMeter(ctx, user.id, 'intent', session.id))
+  const parsed = prepared ? { result: prepared, failure: null } : await parseIntent(ctx.llm, { text, tasks, profile: user.profileText }, llmMeter(ctx, user.id, 'intent', session.id))
   const failure = parsed.failure && !parsed.failure.ok ? parsed.failure.reason : null
   const exact = tasks.find((task) => normalizeWorkTitle(task.title) === normalizeWorkTitle(text)) ?? null
-  const proposed = parsed.result.taskId ? tasks.find((task) => task.id === parsed.result.taskId) ?? null : null
-  const matched = exact ?? (proposed && explicitlyReferencesTask(text, proposed.title) ? proposed : null)
-  const workTitle = intentDisplayTitle(text, parsed.result.title, matched)
+  const proposed = parsed.result.taskId ? (prepared ? await ctx.db.task.findFirst({ where: { id: parsed.result.taskId, userId: user.id, status: 'active' }, select: { id: true, title: true } }) : tasks.find((task) => task.id === parsed.result.taskId) ?? null) : null
+    if (prepared?.taskId && !proposed) return reply(ctx, user, T.stale)
+  const matched = prepared ? proposed : exact ?? (proposed && explicitlyReferencesTask(text, proposed.title) ? proposed : null)
+  const workTitle = prepared ? parsed.result.title : intentDisplayTitle(text, parsed.result.title, matched)
 
   try {
     await inputTransaction(ctx, async (tx) => {
@@ -979,6 +1052,7 @@ export async function onRunningWorkText(ctx: Ctx, user: User, sessionId: string,
         data: { intentText: workTitle, taskId, scope: parsed.result.scope },
       })
       if (changed.count !== 1) throw new StaleTransition()
+      if (prepared?.minutes != null) await applyNamedWorkDuration(tx, user, session, prepared.minutes, ctx.now())
       if (taskId !== session.taskId) {
         if (session.taskId) {
           await tx.task.updateMany({
@@ -1018,8 +1092,8 @@ export async function onRunningWorkText(ctx: Ctx, user: User, sessionId: string,
   await reply(ctx, user, T.runningWorkUpdated(workTitle), runningEditKeyboard(session.id))
 }
 
-export async function onRunningDurationText(ctx: Ctx, user: User, sessionId: string, text: string, options: { fromNow?: boolean } = {}): Promise<void> {
-  const minutes = parseNamedMinutes(text)
+export async function onRunningDurationText(ctx: Ctx, user: User, sessionId: string, text: string, options: { fromNow?: boolean; minutes?: number | null } = {}): Promise<void> {
+  const minutes = options.minutes === undefined ? parseNamedMinutes(text) : options.minutes
   if (minutes === null) return reply(ctx, user, T.badRunningDuration)
   const now = ctx.now()
   const session = await ownedSession(ctx, user.id, sessionId)
@@ -1288,7 +1362,7 @@ export async function releaseReportPending(ctx: Ctx, user: User, sessionId: stri
     if (released.count !== 1) return false
     if (((await pendingReportSession(tx, user.id, ctx.now()))?.id ?? null) !== sessionId) throw new StaleTransition()
     return true
-  }).catch((error: unknown) => {
+  }, { syncReminders: false }).catch((error: unknown) => {
     if (error instanceof StaleTransition) return false
     throw error
   })
@@ -1298,10 +1372,11 @@ export async function onReportText(
   ctx: Ctx,
   user: User,
   text: string,
-  options: { endDay?: boolean; confirmedReport?: boolean; semantic?: { result: ReportResult; tasks: { id: string; title: string; label: string }[] }; suppressContinuation?: boolean } = {},
+  options: { endDay?: boolean; confirmedReport?: boolean; semantic?: { result: ReportResult; tasks: { id: string; title: string; label: string }[]; expectedSessionId?: string }; suppressContinuation?: boolean } = {},
 ): Promise<{ kind: 'saved' | 'handled' | 'new_action'; sessionId: string | null }> {
   const session = await pendingReportSession(ctx.db, user.id, ctx.now())
   if (!session) return { kind: 'new_action', sessionId: null }
+  if (options.semantic?.expectedSessionId && options.semantic.expectedSessionId !== session.id) { await reply(ctx, user, T.stale); return { kind: 'handled', sessionId: null } }
   if (!options.semantic && !options.confirmedReport && explicitNewWork(text)) return { kind: 'new_action', sessionId: session.id }
   const report = text.trim().slice(0, REPORT_MAX)
   const prepared = options.semantic ? { labelledTasks: options.semantic.tasks, parsed: { result: options.semantic.result, failure: null } } : await prepareReport(ctx, user, session, report)
@@ -1623,7 +1698,7 @@ export async function onContinueChoice(
   user: User,
   sessionId: string,
   choice: ContinueChoice,
-  next: { change: () => Promise<void> },
+  next: { change: () => Promise<void>; minutes?: number },
 ): Promise<void> {
   const session = await ownedSession(ctx, user.id, sessionId)
   if (!session || session.state !== 'finished' || session.restChoice !== null || !session.continueSuggested) {
@@ -1636,8 +1711,8 @@ export async function onContinueChoice(
   if (await activeSession(ctx, user.id)) return reply(ctx, user, T.stale)
 
   const now = ctx.now()
-  const continuationMinutes = session.continueMinutes ?? session.plannedMinutes
-  const hasExplicitContinuationMinutes = session.continueMinutes !== null
+  const continuationMinutes = next.minutes ?? session.continueMinutes ?? session.plannedMinutes
+  const hasExplicitContinuationMinutes = next.minutes !== undefined || session.continueMinutes !== null
   let collectingId: string | null = null
   try {
     const claimed = await inputTransaction(ctx, async (tx) => {
@@ -1741,7 +1816,7 @@ export async function onRest(
 
 // «Перерыв» завершает текущий рабочий период, но не логическую сессию. При
 // возврате начинается новый полный период той же настроенной длительности.
-export async function onBreak(ctx: Ctx, user: User, restMinutes?: number): Promise<void> {
+export async function onBreak(ctx: Ctx, user: User, restMinutes?: number, basis: 'total' | 'from_now' = 'total'): Promise<void> {
   const now = ctx.now()
   const session = await activeSession(ctx, user.id)
   if (!session) return reply(ctx, user, T.restingIdle)
@@ -1753,9 +1828,45 @@ export async function onBreak(ctx: Ctx, user: User, restMinutes?: number): Promi
     })
     return reply(ctx, user, T.restingIdle)
   }
-  if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
+  if (session.state === 'paused') {
+    if (restMinutes === undefined) return reply(ctx, user, T.breakChoice)
+    if (session.reminderPolicy === 1) return onReminderAction(ctx, user, null, 'rest', { restMinutes, restBasis: basis })
+    return correctLegacyBreakDuration(ctx, user, session, restMinutes, basis)
+  }
   if (session.reminderPolicy === 1) return onReminderAction(ctx,user,null,'break', { restMinutes })
   return pauseForBreak(ctx, user, session, now, false, restMinutes)
+}
+
+// Change only the durable deadline, never pause start, work settings or accounting.
+async function correctLegacyBreakDuration(ctx: Ctx, user: User, session: FocusSession, minutes: number, basis: 'total' | 'from_now'): Promise<void> {
+  let due: Date
+  try {
+    due = await currentInputTransaction(ctx, async tx => {
+      await lockUser(tx, user.id)
+      const fresh = await tx.focusSession.findFirst({ where: { id: session.id, userId: user.id, state: 'paused' } })
+      if (!fresh?.pausedAt || fresh.pausedAt.getTime() !== session.pausedAt?.getTime()) throw new StaleTransition()
+      const deadline = new Date((basis === 'from_now' ? ctx.now() : fresh.pausedAt).getTime() + minutes * MIN)
+      const prefix = `break_over:${fresh.id}:${fresh.pausedAt.getTime()}`
+      const current = await tx.outboxMessage.findFirst({ where: {
+        userId: user.id, kind: 'break_over', idempotencyKey: { startsWith: prefix },
+        status: { in: ['pending', 'paused', 'sending', 'sent'] },
+      }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
+      if (current?.sendAfter.getTime() === deadline.getTime()) return deadline
+      await tx.outboxMessage.updateMany({ where: {
+        userId: user.id, kind: 'break_over', idempotencyKey: { startsWith: prefix },
+        status: { in: ['pending', 'paused', 'sending'] },
+      }, data: { status: 'canceled' } })
+      await enqueue(tx, { userId: user.id, kind: 'break_over',
+        key: `${prefix}:duration:${deadline.getTime()}:${ctx.now().getTime()}`, sendAfter: deadline,
+        payload: { sessionId: fresh.id, pausedAt: fresh.pausedAt.getTime() },
+      })
+      return deadline
+    })
+  } catch (error) {
+    if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
+    throw error
+  }
+  await reply(ctx, user, `Остаёмся на отдыхе. Перерыв — ${minutes} мин. ${basis === 'from_now' ? 'сейчас' : 'от его начала'}. Напишу в ${hhmm(due, user.timezone)}.`)
 }
 
 async function pauseForBreak(ctx: Ctx, user: User, session: FocusSession, now: Date, askOutcome = false, restMinutes?: number): Promise<void> {

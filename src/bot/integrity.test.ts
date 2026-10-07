@@ -14,9 +14,9 @@ describe.skipIf(!hasDb)('целостность учёта', () => {
 
   it('повторный update_id не создаёт второй сессии, начисления и сообщения', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.text(A, 'глава, 30 минут', 900_000)
-    await bot.text(A, 'глава, 30 минут', 900_000)
+    await bot.setupOnboarded(A)
+    await bot.textAs(A, 'глава, 30 минут', {"text":"глава, 30 минут","route":"new_task","intent":{"task":null,"title":"глава","scope":"step"},"minutes":30,"durationSource":"30 минут","followUp":null}, 900_000)
+    await bot.textAs(A, 'глава, 30 минут', {"text":"глава, 30 минут","route":"new_task","intent":{"task":null,"title":"глава","scope":"step"},"minutes":30,"durationSource":"30 минут","followUp":null}, 900_000)
     const user = await userOf(A)
     expect(await prisma.focusSession.count({ where: { userId: user.id } })).toBe(1)
 
@@ -31,8 +31,14 @@ describe.skipIf(!hasDb)('целостность учёта', () => {
 
   it('две параллельные /focus создают одну сессию', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await Promise.all([bot.text(A, '/focus'), bot.text(A, '/focus'), bot.text(A, 'глава'), bot.text(A, 'введение')])
+    await bot.setupOnboarded(A)
+    const responses: Record<string, object> = {
+      '/focus': {route:'control',text:'/focus',action:'focus',value:null,followUp:null},
+      'глава': {route:'new_task',text:'глава',intent:{task:null,title:'глава',scope:'step'},minutes:null,durationSource:null,followUp:null},
+      'введение': {route:'new_task',text:'введение',intent:{task:null,title:'введение',scope:'step'},minutes:null,durationSource:null,followUp:null},
+    }
+    bot.ctx.llm = {enabled:true,model:'concurrency-test',async complete(request){return {text:JSON.stringify(responses[JSON.parse(request.input).text]),usage:null}}}
+    await Promise.all([bot.text(A,'/focus'),bot.text(A,'/focus'),bot.text(A,'глава'),bot.text(A,'введение')])
     const user = await userOf(A)
     const active = await prisma.focusSession.count({ where: { userId: user.id, state: { in: ['collecting_intent', 'running'] } } })
     expect(active).toBe(1)
@@ -40,8 +46,8 @@ describe.skipIf(!hasDb)('целостность учёта', () => {
 
   it('повторное нажатие исхода на другой доставке не начисляет второй раз', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.text(A, 'глава, 30 минут')
+    await bot.setupOnboarded(A)
+    await bot.textAs(A, 'глава, 30 минут', {"text":"глава, 30 минут","route":"new_task","intent":{"task":null,"title":"глава","scope":"step"},"minutes":30,"durationSource":"30 минут","followUp":null})
     const user = await userOf(A)
     const s = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id } })
     bot.advance(30)
@@ -53,11 +59,11 @@ describe.skipIf(!hasDb)('целостность учёта', () => {
 
   it('/stop не даёт очков, а таймаут засчитывает время до планового конца', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.text(A, 'глава, 30 минут')
+    await bot.setupOnboarded(A)
+    await bot.textAs(A, 'глава, 30 минут', {"text":"глава, 30 минут","route":"new_task","intent":{"task":null,"title":"глава","scope":"step"},"minutes":30,"durationSource":"30 минут","followUp":null})
     bot.advance(25)
-    await bot.text(A, '/stop')
-    await bot.text(A, 'введение, 30 минут')
+    await bot.textAs(A, '/stop', {"text":"/stop","route":"control","action":"stop","value":null,"followUp":null})
+    await bot.textAs(A, 'введение, 30 минут', {"text":"введение, 30 минут","route":"new_task","intent":{"task":null,"title":"введение","scope":"step"},"minutes":30,"durationSource":"30 минут","followUp":null})
     bot.advance(30 + 61)
     await sweepOnce(bot.ctx)
     const user = await userOf(A)
@@ -70,8 +76,8 @@ describe.skipIf(!hasDb)('целостность учёта', () => {
 
   it('короткая сессия (меньше 10 минут) закрывается, но очков и серии не даёт', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.text(A, 'глава, 30 минут')
+    await bot.setupOnboarded(A)
+    await bot.textAs(A, 'глава, 30 минут', {"text":"глава, 30 минут","route":"new_task","intent":{"task":null,"title":"глава","scope":"step"},"minutes":30,"durationSource":"30 минут","followUp":null})
     const user = await userOf(A)
     const s = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id } })
     bot.advance(3)
@@ -84,13 +90,13 @@ describe.skipIf(!hasDb)('целостность учёта', () => {
 
   it('в журнал не попадает ни намерение, ни отчёт', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.text(A, 'написать Кате про увольнение, 30 минут')
+    await bot.setupOnboarded(A)
+    await bot.textAs(A, 'написать Кате про увольнение, 30 минут', {"text":"написать Кате про увольнение, 30 минут","route":"new_task","intent":{"task":null,"title":"написать Кате про увольнение","scope":"step"},"minutes":30,"durationSource":"30 минут","followUp":null})
     const user = await userOf(A)
     const s = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id } })
     bot.advance(30)
     await bot.press(A, `out:${s.id}:other`)
-    await bot.text(A, 'разобрал анализы вместо этого')
+    await bot.textAs(A, 'разобрал анализы вместо этого', {"text":"разобрал анализы вместо этого","route":"answer_pending","answer":{"kind":"text","value":"разобрал анализы вместо этого"},"followUp":null})
     const dump = JSON.stringify(await prisma.event.findMany(), (_k, v) => (typeof v === 'bigint' ? v.toString() : v))
     expect(dump).not.toContain('Кате')
     expect(dump).not.toContain('анализы')

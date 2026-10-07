@@ -29,7 +29,7 @@ export async function syncReminderState(tx: Prisma.TransactionClient,userId: str
       if(phase==='work'&&before?.state==='paused'){
         await tx.workPeriod.updateMany({where:{sessionId:active.id,endedAt:null},data:{startedAt:now}})
       }
-    }else if(before?.id===active.id&&before.plannedMinutes!==active.plannedMinutes&&phase==='work'){
+    }else if(before?.id===active.id&&(before.plannedMinutes!==active.plannedMinutes||before.plannedEndAt?.getTime()!==active.plannedEndAt?.getTime())&&phase==='work'){
       await resetChain(tx,c,now,interval)
       await tx.focusSession.update({where:{id:active.id},data:{plannedEndAt:new Date(now.getTime()+interval*MIN)}})
     }

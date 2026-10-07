@@ -11,15 +11,18 @@ function provider(reply: (req: LlmRequest) => Promise<LlmReply>): LlmProvider {
   return { enabled: true, model: 'test-model', complete: reply }
 }
 
-const tasksOk = JSON.stringify({ kind: 'session_intent', new_tasks: [], start_title: null })
-const intentOk = JSON.stringify({ task: null, title: 'план главы', scope: 'step' })
-const reportOk = JSON.stringify({ progress: 'moved', next_step: 'дописать введение' })
 const okReply = (text: string): LlmReply => ({ text, usage: { inputTokens: 120, outputTokens: 30 } })
 const happyReply = async (req: LlmRequest): Promise<LlmReply> => {
-  if (req.system.includes('сообщение пользователя фокус-боту')) return okReply(tasksOk)
-  if (req.system.includes('намерение пользователя перед рабочей сессией')) return okReply(intentOk)
-  if (req.system.includes('короткий отчёт пользователя')) return okReply(reportOk)
-  throw new Error('unexpected LLM call')
+  const { text } = JSON.parse(req.input)
+  const replies: Record<string, object> = {
+    'набросать план главы, 30 минут': { route: 'new_task', text, intent: { task: null, title: 'план главы', scope: 'step' }, minutes: 30, durationSource: '30 минут', followUp: null },
+    'план главы, 30 минут': { route: 'new_task', text, intent: { task: null, title: 'план главы', scope: 'step' }, minutes: 30, durationSource: '30 минут', followUp: null },
+    'секретный проект Альфа, 30 минут': { route: 'new_task', text, intent: { task: null, title: 'секретный проект Альфа', scope: 'step' }, minutes: 30, durationSource: '30 минут', followUp: null },
+    'план готов, осталось введение': { route: 'report', text, report: { route: 'report', progress: 'moved', next_step: 'введение', continue_now: false, continue_minutes: null, allocations: [] }, followUp: null },
+    'застрял': { route: 'clarify', text, question: 'С чем нужна помощь?', followUp: null },
+  }
+  if (!replies[text]) throw new Error('unexpected model input')
+  return okReply(JSON.stringify(replies[text]))
 }
 
 describe.skipIf(!hasDb)('журнал вызовов компонентов', () => {
@@ -27,7 +30,7 @@ describe.skipIf(!hasDb)('журнал вызовов компонентов', ()
 
   it('каждый реальный вызов модели — строка с касанием, skill, статусом и токенами', async () => {
     const bot = makeBot({ llm: provider(happyReply) })
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     await bot.text(A, 'набросать план главы, 30 минут')
     const s = await prisma.focusSession.findFirstOrThrow()
     bot.advance(30)
@@ -37,23 +40,22 @@ describe.skipIf(!hasDb)('журнал вызовов компонентов', ()
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     const calls = await prisma.componentCall.findMany({ orderBy: { id: 'asc' } })
     expect(calls.map((c) => [c.component, c.name, c.skill, c.status, c.errorCode, c.inputTokens, c.outputTokens])).toEqual([
-      ['llm', 'tasks', 'tasks', 'ok', null, 120, 30],
-      ['llm', 'intent', 'intent', 'ok', null, 120, 30],
-      ['llm', 'report', 'report', 'ok', null, 120, 30],
+      ['llm', 'semantic_router', 'semantic_router', 'ok', null, 120, 30],
+      ['llm', 'semantic_router', 'semantic_router', 'ok', null, 120, 30],
     ])
-    expect(calls.every((c) => c.subjectId === user.subjectId && c.sessionId === s.id && c.model === 'test-model')).toBe(true)
+    expect(calls.every((c) => c.subjectId === user.subjectId && (c.sessionId === null || c.sessionId === s.id) && c.model === 'test-model')).toBe(true)
   })
 
   it('текст пользователя в журнал вызовов не попадает', async () => {
     const bot = makeBot({ llm: provider(happyReply) })
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     await bot.text(A, 'секретный проект Альфа, 30 минут')
     const rows = await prisma.$queryRaw<Record<string, unknown>[]>`SELECT * FROM component_calls`
-    expect(rows).toHaveLength(2)
+    expect(rows).toHaveLength(1)
     expect(JSON.stringify(rows, (_k, v) => (typeof v === 'bigint' ? Number(v) : v))).not.toContain('Альфа')
   })
 
-  it('отказы пишутся со статусом и машинным кодом, fallback работает', async () => {
+  it('отказы пишутся со статусом и машинным кодом, состояние не изменяется', async () => {
     const cases: [() => Promise<LlmReply>, string, string][] = [
       [async () => ({ text: 'не JSON', usage: null }), 'invalid', 'not_json'],
       [async () => ({ text: JSON.stringify({ task: null, title: 'x', scope: 'step', points: 1000 }), usage: null }), 'invalid', 'schema'],
@@ -64,26 +66,27 @@ describe.skipIf(!hasDb)('журнал вызовов компонентов', ()
     for (const [failure, status, code] of cases) {
       await resetDb()
       const bot = makeBot({
-        llm: provider(async (req) => req.system.includes('сообщение пользователя фокус-боту') ? okReply(tasksOk) : failure()),
+        llm: provider(failure),
       })
-      await bot.onboard(++tg)
+      await bot.setupOnboarded(++tg)
       await bot.text(tg, 'план главы, 30 минут')
-      const call = await prisma.componentCall.findFirstOrThrow({ where: { name: 'intent' } })
+      const call = await prisma.componentCall.findFirstOrThrow({ where: { name: 'semantic_router' } })
       expect([call.status, call.errorCode]).toEqual([status, code])
-      expect((await prisma.focusSession.findFirstOrThrow()).state).toBe('running')
+      expect(await prisma.focusSession.count({ where: { state: { in: ['running','paused','finished'] } } })).toBe(0)
+      expect(await prisma.pointsEntry.count()).toBe(0)
     }
   })
 
   it('выключенная модель вызова не делает — и строки нет', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     await bot.text(A, 'план главы, 30 минут')
     expect(await prisma.componentCall.count()).toBe(0)
   })
 
   it('журнал вызовов только на дозапись', async () => {
     const bot = makeBot({ llm: provider(happyReply) })
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     await bot.text(A, 'план главы, 30 минут')
     await expect(prisma.componentCall.updateMany({ data: { status: 'ok' } })).rejects.toThrow()
     await expect(prisma.componentCall.deleteMany()).rejects.toThrow()
@@ -135,7 +138,7 @@ describe.skipIf(!hasDb)('зачётное представление', () => {
     ])
   })
 
-  it('сверх дневного лимита модель не зовётся: бот на шаблонах, событие — раз в сутки', async () => {
+  it('сверх дневного лимита модель не зовётся: действия не выполняются, событие — раз в сутки', async () => {
     let calls = 0
     const bot = makeBot({
       llm: provider(async (req) => {
@@ -144,7 +147,7 @@ describe.skipIf(!hasDb)('зачётное представление', () => {
       }),
       stt: { enabled: true, model: 'test-stt', async transcribe() { return 'план главы' } },
     })
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     await prisma.componentCall.createMany({
       data: Array.from({ length: LLM_CALLS_PER_DAY }, () => ({
@@ -160,7 +163,7 @@ describe.skipIf(!hasDb)('зачётное представление', () => {
 
     expect(calls).toBe(0)
     expect(await prisma.componentCall.count()).toBe(LLM_CALLS_PER_DAY)
-    expect(await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id } })).toMatchObject({ state: 'running' })
+    expect(await prisma.focusSession.count({ where: { userId: user.id, state: { in: ['running','paused','finished'] } } })).toBe(0)
     expect(await prisma.event.count({ where: { type: 'llm_budget_exceeded' } })).toBe(1)
     expect(bot.lastText(A)).toContain('напиши текстом')
 

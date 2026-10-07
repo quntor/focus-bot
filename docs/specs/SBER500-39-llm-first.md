@@ -1,0 +1,10 @@
+# SBER500-39: единый LLM ingress
+Решение Антона 07.10.2026: каждый текст сначала интерпретирует LLM; code не классифицирует намерение regex/keywords. User-authored текст данных не исполняется как системная инструкция.
+## Контракт
+Все message.text (slash/reply-keyboard/onboarding/pending/numeric/retro/first) и STT transcript → snapshot → LLM → strict schema → freshness/ownership/state guards → typed dispatcher. Callback_query остаются конкретным выбором пользователя. Source attribution /start — технические метаданные, не действие. Read/feedback/clarify/failure сохраняют pending/tasks/session/timer/accounting. Error/timeout/disabled/budget/invalid не передают текст legacy обработчику. Model сообщает duration как minutes + точную source; диапазоны валидируются без повторного языкового разбора. Break в paused уточняет тот же перерыв от pausedAt (total) либо задаёт дополнительные минуты от now (from_now); continue явно возобновляет. Неоднозначность вызывает уточнение, не угадывание.
+## Поддержанные действия
+Справка/status/tasks/settings/profile; знакомство; старт/название/смена/продолжение работы; отдых/уточнение начала; отчёт; отвлечение/застревание/вопрос; жалоба; завершение/остановка/конец дня; dayoff/goal; сохранение/edit/split задач; типизированные ответы на pending. Модель получает bounded context и task labels, не DB IDs. Удаление данных только существующим подтверждением.
+## Изменения
+webhook убирает все текстовые bypass; router schema/context/prompt; semantic dispatcher fail-closed; prepared values в session/tasks/account/day/reminder helpers без повторной intent-классификации. Runtime не выключает router в пользу legacy.
+## Проверки
+Ingress spy всех входов; break40/90 running/paused policy0/1 text/voice; feedback vs distraction; pending сохранение; полный product snapshot при failures; foreign label/stale/concurrent; callback регрессия и человеческий сценарий. Mock проверяет исполнение выбранного route, не качество понимания реальной модели. После fresh проверок отдельный релиз по команде администратора, затем приёмка Антоном; эта версия production не обновляла.

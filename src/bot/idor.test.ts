@@ -1,3 +1,4 @@
+import { work } from '../test/semantic-provider.js'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { hasDb, prisma, resetDb } from '../test/db.js'
 import { makeBot } from '../test/bot.js'
@@ -13,18 +14,18 @@ describe.skipIf(!hasDb)('IDOR: чужие идентификаторы во вс
 
   it('пользователь A, подставляя id пользователя B, не получает ни байта чужих данных и ничего не меняет', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.onboard(B)
+    await bot.setupOnboarded(A)
+    await bot.setupOnboarded(B)
 
     // У B — одна завершённая сессия с отчётом и одна идущая.
-    await bot.text(B, `${SECRET_INTENT}, 30 минут`)
+    await bot.textAs(B, `${SECRET_INTENT}, 30 минут`, work(`${SECRET_INTENT}, 30 минут`, SECRET_INTENT, 30, '30 минут'))
     const bUser = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(B) } })
     const bFirst = await prisma.focusSession.findFirstOrThrow({ where: { userId: bUser.id } })
     bot.advance(30)
     await bot.press(B, `out:${bFirst.id}:done`)
-    await bot.text(B, SECRET_REPORT)
+    await bot.textAs(B, SECRET_REPORT, { route: 'report', text: SECRET_REPORT, report: { route: 'report', progress: 'stuck', next_step: null, continue_now: false, continue_minutes: null, allocations: [] }, followUp: null })
     await bot.press(B, `rest:${bFirst.id}:continue`)
-    await bot.text(B, `${SECRET_INTENT} — второй заход, 20 минут`)
+    await bot.textAs(B, `${SECRET_INTENT} — второй заход, 20 минут`, work(`${SECRET_INTENT} — второй заход, 20 минут`, SECRET_INTENT, 20, '20 минут', 't1'))
     const bSessions = await prisma.focusSession.findMany({ where: { userId: bUser.id }, orderBy: { createdAt: 'asc' } })
     const bTask = await prisma.task.findFirstOrThrow({ where: { userId: bUser.id } })
 
@@ -46,7 +47,7 @@ describe.skipIf(!hasDb)('IDOR: чужие идентификаторы во вс
     }
     const say = async (t: string) => {
       tick()
-      await bot.text(A, t)
+      await bot.textAs(A, t, { route: 'task_action', text: t, action: 'complete', task: bTask.id, number: null, followUp: null })
     }
     const args = ['ok', 'up', 'down', 'cancel', 'work', 'duration', 'here', 'back', 'done', 'not_done', 'other', 'rest', 'continue', 'same', 'step', 'change', 'later', 'day_end', 'confirm']
     // del проверяется отдельно: он удаляет самого нажавшего, и дальше проверки
@@ -90,8 +91,8 @@ describe.skipIf(!hasDb)('IDOR: чужие идентификаторы во вс
   }, 180_000)
   it('del с чужим id удаляет только нажавшего, а не владельца id', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.onboard(B)
+    await bot.setupOnboarded(A)
+    await bot.setupOnboarded(B)
     const bUser = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(B) } })
     await bot.press(A, `del:${bUser.id}:confirm`)
     expect(await prisma.user.count({ where: { tgId: BigInt(B) } })).toBe(1)

@@ -25,7 +25,7 @@ describe.skipIf(!hasDb)('бот не замолкает', () => {
 
   it('пропущенное утро — назавтра утро снова ставится', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     await morningNow(bot)
     expect(bot.lastText(A)).toContain('Пора работать')
 
@@ -36,7 +36,7 @@ describe.skipIf(!hasDb)('бот не замолкает', () => {
 
   it('«Третий раз откладываем» без ответа — утро остаётся', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     for (let i = 0; i < 3; i++) {
       await morningNow(bot)
       bot.advance(60)
@@ -48,7 +48,7 @@ describe.skipIf(!hasDb)('бот не замолкает', () => {
 
   it('выключить и включить «писать первым» — утро появляется сразу', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     await bot.press(A, 'set::proactive')
     expect(await pendingMeetings()).toHaveLength(0)
     await bot.press(A, 'set::proactive')
@@ -57,8 +57,8 @@ describe.skipIf(!hasDb)('бот не замолкает', () => {
 
   it('страховка: тем, у кого нет ни одного будущего сообщения, ставится утро', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.text(A, '/stop')
+    await bot.setupOnboarded(A)
+    await bot.textAs(A, '/stop', {"text":"/stop","route":"control","action":"stop","value":null,"followUp":null})
     expect(await pendingMeetings()).toHaveLength(0)
 
     await sweepOnce(bot.ctx)
@@ -68,9 +68,9 @@ describe.skipIf(!hasDb)('бот не замолкает', () => {
 
   it('выходной, потом «На сегодня всё» — бот не пишет в сам выходной', async () => {
     const bot = makeBot() // вторник, 10:00 по Москве
-    await bot.onboard(A)
-    await bot.text(A, '/dayoff')
-    await bot.text(A, '/today')
+    await bot.setupOnboarded(A)
+    await bot.textAs(A, '/dayoff', {"text":"/dayoff","route":"control","action":"dayoff","value":null,"followUp":null})
+    await bot.textAs(A, '/today', {"text":"/today","route":"close_day","followUp":null})
 
     const next = await pendingMeetings()
     expect(next).toHaveLength(1)
@@ -80,12 +80,12 @@ describe.skipIf(!hasDb)('бот не замолкает', () => {
 
   it('смена времени утра переставляет уже поставленную утреннюю встречу', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.text(A, '/today')
+    await bot.setupOnboarded(A)
+    await bot.textAs(A, '/today', {"text":"/today","route":"close_day","followUp":null})
     expect((await pendingMeetings())[0]!.sendAfter).toEqual(new Date('2026-09-23T07:00:00Z'))
 
     await bot.press(A, 'set::morning')
-    await bot.text(A, '8:00')
+    await bot.textAs(A, '8:00', {"text":"8:00","route":"answer_pending","answer":{"kind":"clock","hour":8,"minute":0,"day":"next"},"followUp":null})
 
     const next = await pendingMeetings()
     expect(next).toHaveLength(1)
@@ -94,10 +94,10 @@ describe.skipIf(!hasDb)('бот не замолкает', () => {
 
   it('смена пояса переставляет утреннюю встречу на местное утро', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.text(A, '/today')
+    await bot.setupOnboarded(A)
+    await bot.textAs(A, '/today', {"text":"/today","route":"close_day","followUp":null})
     await bot.press(A, 'set::timezone')
-    await bot.text(A, '14:00') // UTC+7
+    await bot.textAs(A, '14:00', {"text":"14:00","route":"answer_pending","answer":{"kind":"clock","hour":14,"minute":0,"day":"next"},"followUp":null}) // UTC+7
 
     const next = await pendingMeetings()
     expect(next).toHaveLength(1)
@@ -106,7 +106,7 @@ describe.skipIf(!hasDb)('бот не замолкает', () => {
 
   it('сбой сети при отправке не засчитывает одно молчание дважды', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     await morningNow(bot)
     bot.advance(60)
     const u = await user()

@@ -9,8 +9,8 @@ import { DeliveryError, TelegramError } from '../tg/client.js'
 const A = 4001
 
 async function runningSession(bot: ReturnType<typeof makeBot>) {
-  await bot.onboard(A)
-  await bot.text(A, 'глава, 40 минут')
+  await bot.setupOnboarded(A)
+  await bot.textAs(A, 'глава, 40 минут', {"text":"глава, 40 минут","route":"new_task","intent":{"task":null,"title":"глава","scope":"step"},"minutes":40,"durationSource":"40 минут","followUp":null})
   return prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
 }
 
@@ -19,7 +19,7 @@ describe.skipIf(!hasDb)('outbox', () => {
 
   it('утром показывает активные задачи и запускает выбранную одним нажатием', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     await prisma.user.update({ where: { id: user.id }, data: { pendingInput: 'meeting_time' } })
     const first = await prisma.task.create({ data: { userId: user.id, title: 'Подготовить отчёт' } })
@@ -60,7 +60,7 @@ describe.skipIf(!hasDb)('outbox', () => {
 
   it('утренняя цель остаётся необязательным действием после списка задач', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     const task = await prisma.task.create({ data: { userId: user.id, title: 'Сделать план дня' } })
     await enqueue(prisma, {
@@ -86,7 +86,7 @@ describe.skipIf(!hasDb)('outbox', () => {
 
   it('утром без задач позволяет одним нажатием начать период без задачи', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     await enqueue(prisma, {
       userId: user.id,
@@ -110,7 +110,7 @@ describe.skipIf(!hasDb)('outbox', () => {
 
   it('после полудня по местному времени здоровается без «доброго утра»', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     bot.advance(5 * 60) // 15:00 по Москве
     await enqueue(prisma, {

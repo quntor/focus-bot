@@ -13,8 +13,8 @@ describe.skipIf(!hasDb)('cascade delete through Telegram', () => {
   beforeEach(resetDb)
   it('drops active descendants through inactive nodes and restores only this operation', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.onboard(B)
+    await bot.setupOnboarded(A)
+    await bot.setupOnboarded(B)
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     const root = await prisma.task.create({ data: { userId: user.id, title: 'Презентация', sessionsCount: 3 } })
     const done = await prisma.task.create({ data: { userId: user.id, title: 'Тема', status: 'done', parentId: root.id } })
@@ -44,7 +44,7 @@ describe.skipIf(!hasDb)('cascade delete through Telegram', () => {
   })
   it.each(['collecting_intent', 'running', 'paused'] as const)('blocks the whole tree when a deep descendant is %s', async state => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     const root = await prisma.task.create({ data: { userId: user.id, title: 'Родитель' } })
     const middle = await prisma.task.create({ data: { userId: user.id, title: 'Закрытый шаг', parentId: root.id, status: 'done' } })
@@ -58,7 +58,7 @@ describe.skipIf(!hasDb)('cascade delete through Telegram', () => {
   })
   it('preserves paused reminder accounting for busy, successful delete, undo and legacy restore', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     const root = await prisma.task.create({ data: { userId: user.id, title: 'Родитель' } })
     const leaf = await prisma.task.create({ data: { userId: user.id, title: 'Шаг', parentId: root.id } })
@@ -85,13 +85,13 @@ describe.skipIf(!hasDb)('cascade delete through Telegram', () => {
   })
   it('keeps legacy restore, owner boundaries and three-level listing', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.onboard(B)
+    await bot.setupOnboarded(A)
+    await bot.setupOnboarded(B)
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     const root = await prisma.task.create({ data: { userId: user.id, title: 'Родитель' } })
     const child = await prisma.task.create({ data: { userId: user.id, title: 'Ребёнок', parentId: root.id } })
     const leaf = await prisma.task.create({ data: { userId: user.id, title: 'Внук', parentId: child.id } })
-    await bot.text(A, '/tasks')
+    await bot.textAs(A, '/tasks', {"text":"/tasks","route":"control","action":"tasks","value":null,"followUp":null})
     expect(bot.lastText(A)).toContain('Внук')
     await bot.press(B, `task:${root.id}:drop`)
     expect(await prisma.task.count({ where: { userId: user.id, status: 'active' } })).toBe(3)
@@ -101,7 +101,7 @@ describe.skipIf(!hasDb)('cascade delete through Telegram', () => {
   })
   it.each(['delete', 'start'] as const)('serializes real DB delete/start with %s winning the lock', async winner => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     const root = await prisma.task.create({ data: { userId: user.id, title: 'Родитель' } })
     const leaf = await prisma.task.create({ data: { userId: user.id, title: 'Шаг', parentId: root.id } })
@@ -144,7 +144,7 @@ describe.skipIf(!hasDb)('cascade delete through Telegram', () => {
       entered(); await gate
       return { text: JSON.stringify({ steps: ['Открыть файл', 'Написать текст'] }), usage: null }
     } } })
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     let user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     const root = await prisma.task.create({ data: { userId: user.id, title: 'Родитель' } })
     user = await prisma.user.update({ where: { id: user.id }, data: { pendingInput: `task_split:${root.id}` } })

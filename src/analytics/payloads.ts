@@ -54,8 +54,8 @@ export const PAYLOADS = {
   }),
   voice_transcribed: z.strictObject({ duration_seconds: z.int().min(0).max(180), length_chars: z.int().min(0) }),
   semantic_routed: z.strictObject({
-    route: z.enum(['report', 'new_task', 'continue_same', 'session_help', 'capture', 'answer_pending', 'close_day', 'unclear']),
-    pending: z.enum(['none', 'report_text', 'session_end', 'running_work', 'running_duration', 'running_task_choice', 'task_add', 'task_edit', 'task_split', 'task_split_manual', 'timezone', 'settings_timezone', 'start_time', 'ritual', 'profile_ritual', 'meeting_time', 'meeting_time_soft', 'morning_time', 'profile', 'other']),
+    route: z.enum(['report', 'new_task', 'continue_same', 'session_help', 'capture', 'answer_pending', 'close_day', 'feedback', 'break', 'end_session', 'intent_step', 'schedule_meeting', 'control', 'task_action', 'clarify', 'unclear']),
+    pending: z.enum(['retro', 'task_split_clarify', 'none', 'report_text', 'session_end', 'running_work', 'running_duration', 'running_task_choice', 'task_add', 'task_edit', 'task_split', 'task_split_manual', 'timezone', 'settings_timezone', 'start_time', 'ritual', 'profile_ritual', 'meeting_time', 'meeting_time_soft', 'morning_time', 'profile', 'other']),
     intercepted: z.boolean(),
   }),
   tasks_parsed: z.strictObject({

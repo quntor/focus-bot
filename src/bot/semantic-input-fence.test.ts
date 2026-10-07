@@ -39,7 +39,7 @@ describe.skipIf(!hasDb)('semantic mutation arrival fence across DB awaits', () =
   beforeEach(resetDb)
   async function ready() {
     const bot = makeBot()
-    await bot.onboard(50301)
+    await bot.setupOnboarded(50301)
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: 50301n } })
     await prisma.focusSession.deleteMany({ where: { userId: user.id } })
     return { bot, user }
@@ -47,14 +47,14 @@ describe.skipIf(!hasDb)('semantic mutation arrival fence across DB awaits', () =
   it('collecting creation rolls back when superseded during INSERT', async () => {
     const { bot, user } = await ready()
     const ctx = invalidateAfter(bot.ctx, 'focusSession', 'create')
-    await expect(onIntentText(ctx, user, 'Письма за 15 минут', { taskId: null, title: 'Письма', scope: 'step', llmUsed: true })).rejects.toThrow()
+    await expect(onIntentText(ctx, user, 'Письма за 15 минут', { taskId: null, title: 'Письма', scope: 'step', minutes: 15, llmUsed: true })).rejects.toThrow()
     expect(await prisma.focusSession.count()).toBe(0)
     expect(await prisma.task.count()).toBe(0)
   })
   it('intent and named timer do not commit when superseded during UPDATE', async () => {
     const { bot, user } = await ready()
     const session = await prisma.focusSession.create({ data: { userId: user.id, state: 'collecting_intent' } })
-    await onIntentText(invalidateAfter(bot.ctx, 'focusSession', 'updateMany'), user, 'Письма за 15 минут', { taskId: null, title: 'Письма', scope: 'step', llmUsed: true })
+    await onIntentText(invalidateAfter(bot.ctx, 'focusSession', 'updateMany'), user, 'Письма за 15 минут', { taskId: null, title: 'Письма', scope: 'step', minutes: 15, llmUsed: true })
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).toMatchObject({ state: 'collecting_intent', intentText: null, plannedMinutes: null })
     expect(await prisma.task.count()).toBe(0)
     expect(await prisma.outboxMessage.count({ where: { kind: 'session_end' } })).toBe(0)
@@ -78,14 +78,14 @@ describe.skipIf(!hasDb)('semantic mutation arrival fence across DB awaits', () =
     const { bot, user } = await ready()
     const ctx = invalidateAfter(bot.ctx, 'task', 'create')
     ctx.llm = { enabled: true, model: 'test', complete: async () => ({ text: JSON.stringify({ route: 'capture', text: 'Запиши письма', titles: ['Письма'], followUp: null }), usage: null }) }
-    await routeSemanticInput(ctx, user, 'Запиши письма', 'text', null, async () => {}, async () => {})
+    await routeSemanticInput(ctx, user, 'Запиши письма', 'text', null, async () => {})
     expect(await prisma.task.count()).toBe(0)
   })
   it('day close rolls back summary and pending when superseded during writes', async () => {
     const { bot, user } = await ready()
     const ctx = invalidateAfter(bot.ctx, 'dailyGoal', 'upsert')
     ctx.llm = { enabled: true, model: 'test', complete: async () => ({ text: JSON.stringify({ route: 'close_day', text: 'Всё на сегодня', followUp: null }), usage: null }) }
-    await routeSemanticInput(ctx, user, 'Всё на сегодня', 'text', null, async () => {}, async () => {})
+    await routeSemanticInput(ctx, user, 'Всё на сегодня', 'text', null, async () => {})
     expect(await prisma.dailyGoal.count({ where: { summarySentAt: { not: null } } })).toBe(0)
     expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ pendingInput: user.pendingInput })
   })
@@ -95,7 +95,7 @@ describe.skipIf(!hasDb)('semantic mutation arrival fence across DB awaits', () =
     const fresh = await prisma.user.findUniqueOrThrow({ where: { id: user.id } })
     const ctx = invalidateAfter(bot.ctx, 'user', 'updateMany')
     ctx.llm = { enabled: true, model: 'test', complete: async () => ({ text: JSON.stringify({ route: 'capture', text: 'Запиши письма', titles: ['Письма'], followUp: null }), usage: null }) }
-    await routeSemanticInput(ctx, fresh, 'Запиши письма', 'text', null, async () => {}, async () => {})
+    await routeSemanticInput(ctx, fresh, 'Запиши письма', 'text', null, async () => {})
     expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ pendingInput: 'profile' })
     expect(await prisma.task.count()).toBe(0)
   })
@@ -140,14 +140,14 @@ describe.skipIf(!hasDb)('semantic mutation arrival fence across DB awaits', () =
   it('flag-off ignores arrival fencing and preserves named-time legacy start', async () => {
     const { bot, user } = await ready()
     const ctx = { ...invalidateAfter(bot.ctx, 'focusSession', 'updateMany'), semanticRouterEnabled: false }
-    await onIntentText(ctx, user, 'Письма за 15 минут', { taskId: null, title: 'Письма', scope: 'step', llmUsed: true })
+    await onIntentText(ctx, user, 'Письма за 15 минут', { taskId: null, title: 'Письма', scope: 'step', minutes: 15, llmUsed: true })
     expect(await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id } })).toMatchObject({ state: 'running', intentText: 'Письма', plannedMinutes: 15 })
   })
   it('capture rechecks arrival after the transaction snapshot await', async () => {
     const { bot, user } = await ready()
     const ctx = invalidateAfter(bot.ctx, 'task', 'findMany')
     ctx.llm = { enabled: true, model: 'test', complete: async () => ({ text: JSON.stringify({ route: 'capture', text: 'Запиши письма', titles: ['Письма'], followUp: null }), usage: null }) }
-    await routeSemanticInput(ctx, user, 'Запиши письма', 'text', null, async () => {}, async () => {})
+    await routeSemanticInput(ctx, user, 'Запиши письма', 'text', null, async () => {})
     expect(await prisma.task.count()).toBe(0)
   })
 })

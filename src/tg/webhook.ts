@@ -1,6 +1,8 @@
+import type { PendingAnswer } from '../llm/router.js'
+import { localDateTime, nextLocalTime } from '../lib/time.js'
+import { addDays, dayKey } from '../lib/day.js'
 import { onReminderAction, onRetro } from '../reminders/actions.js'
 import { beginInput, withUserInputLock, currentInputTransaction, assertCurrentInput } from '../bot/input-lock.js'
-import { explicitBreakMinutes } from '../session/break-intent.js'
 import { routeSemanticInput, onSemanticChoice, onRestoreReport, invalidateSemanticChoices } from '../bot/semantic-routing.js'
 import { z } from 'zod'
 import type { User } from '@prisma/client'
@@ -95,6 +97,7 @@ async function loadUser(ctx: Ctx, tgId: bigint, startArgs: string | null): Promi
 export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
   const parsed = updateSchema.safeParse(raw)
   if (!parsed.success) return
+  ctx = { ...ctx, semanticRouterEnabled: true }
   const update = parsed.data
   if (!(await claimUpdate(ctx.db, update.update_id))) return
 
@@ -108,8 +111,7 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
 
   const tgId = BigInt(sender.id)
   const command = parseCommand(msg?.text)
-  const statusRequest = command?.command === 'status' || msg?.text?.trim() === T.statusButton
-  if (ctx.semanticRouterEnabled && !statusRequest) ctx = { ...ctx, isCurrentInput: beginInput(String(tgId)) }
+  ctx = { ...ctx, isCurrentInput: beginInput(String(tgId)) }
   const count = await countInWindow(ctx, tgId)
   if (count > RATE_LIMIT_PER_MINUTE) {
     // Молчание выглядит как сломанный бот. Но отвечать на каждое сообщение
@@ -120,32 +122,8 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
     return
   }
 
-  // Справочное чтение не отменяет выбор, ожидаемый ответ или текущий LLM-ввод.
-  if (statusRequest) {
-    try {
-      const statusUser = await ctx.db.user.findUnique({ where: { tgId } })
-      if (statusUser) await showStatus(ctx, statusUser)
-      else await ctx.tg.send(tgId, T.statusIdle)
-    } catch (error) {
-      log.error('status_failed', error)
-      await ctx.tg.send(tgId, T.error).catch(() => {})
-    }
-    return
-  }
-  // Инструкция доступна даже до /start и не должна сбрасывать ожидаемый ввод:
-  // это справка, а не новое действие внутри пользовательского сценария.
-  if (command?.command === 'guide') {
-    const guideUser = await ctx.db.user.findUnique({ where: { tgId }, select: { id: true } })
-    if (guideUser) invalidateSemanticChoices(guideUser.id)
-    await ctx.db.user.updateMany({ where: { tgId, blockedAt: { not: null } }, data: { blockedAt: null } })
-    await ctx.tg.send(tgId, T.guide)
-    return
-  }
   let { user, created } = await loadUser(ctx, tgId, command?.command === 'start' ? command.args : null)
-  ctx = { ...ctx, inputUserId: user.id }
-  if (ctx.remindersEnabled && ctx.reminderUserIds?.includes(String(user.tgId)) && user.reminderPolicy !== 1) {
-    user = await ctx.db.user.update({where:{id:user.id},data:{reminderPolicy:1}})
-  }
+  ctx = { ...ctx, inputUserId: user.id, inputUserCreated: created }
   const callback = cq ? parseCallback(cq.data) : null
   if (callback?.action !== 'sroute') invalidateSemanticChoices(user.id)
   const contextEventId = msg?.voice ? rememberConversationContext(user.id, 'user', '[voice]', ctx.now()) : msg?.text
@@ -163,17 +141,15 @@ export async function handleUpdate(ctx: Ctx, raw: unknown): Promise<void> {
     }
     try {
       if (cq) await onCallback(ctx, user, cq.id, cq.data, cq.message?.message_id)
-      else if (command) await onCommand(ctx, user, command.command, command.args, created)
       else if (msg?.voice) {
-        if (created) await account.beginOnboarding(ctx, user)
-        else {
+        {
           const text = await tasks.transcribeVoice(ctx, user, msg.voice)
           if (!text) return
           const voiceContextEventId = rememberConversationContext(user.id, 'user', text, ctx.now())
           await routeInput(ctx, user, text, 'voice', voiceContextEventId)
         }
       }
-      else if (msg?.text) await onText(ctx, user, msg.text, created, contextEventId)
+      else if (msg?.text) await routeInput(ctx, user, msg.text, 'text', contextEventId)
       // Фото, стикер, кружок, файл: разобрать не можем, но и молчать нельзя.
       else if (msg) {
         if (created) await account.beginOnboarding(ctx, user)
@@ -196,8 +172,8 @@ async function onCommand(ctx: Ctx, user: User, command: string, args: string, cr
   if (!(command === 'start' && ONBOARDING_INPUTS.includes(user.pendingInput))) user = await releasePending(ctx, user)
   if (command === 'start') {
     await logEvent(ctx.db, user.id, 'bot_started', { source: user.source, returning: !created }, { at: now })
-    if (created) return account.beginOnboarding(ctx, user)
     if (['timezone', 'start_time', 'ritual'].includes(user.pendingInput)) return account.resumeOnboarding(ctx, user)
+    if (created || await ctx.db.focusSession.count({ where: { userId: user.id } }) === 0) return account.beginOnboarding(ctx, user)
     return session.askIntent(ctx, user, { prefix: T.welcomeBack })
   }
   if (command === 'delete_me') return account.askDelete(ctx, user)
@@ -230,22 +206,6 @@ async function onCommand(ctx: Ctx, user: User, command: string, args: string, cr
   }
 }
 
-async function onText(ctx: Ctx, user: User, text: string, created: boolean, contextEventId: number | null): Promise<void> {
-  if (created) return account.beginOnboarding(ctx, user)
-  const button = KEYBOARD_ACTIONS[text]
-  if (button) { invalidateSemanticChoices(user.id); return button(ctx, await releasePending(ctx, user)) }
-  await routeInput(ctx, user, text, 'text', contextEventId)
-}
-
-// Кнопки постоянной клавиатуры — это новое действие, а не ответ на вопрос бота.
-const KEYBOARD_ACTIONS: Record<string, (ctx: Ctx, user: User) => Promise<void>> = {
-  [T.sessionStartButton]: (ctx, user) => tasks.onSessionStart(ctx, user),
-  [T.tasksButton]: (ctx, user) => tasks.showTasks(ctx, user),
-  [T.sessionBreakButton]: (ctx, user) => session.onBreak(ctx, user),
-  [T.sessionResumeButton]: (ctx, user) => session.onResume(ctx, user),
-  [T.sessionNewButton]: (ctx, user) => session.onNewAfterBreak(ctx, user, () => tasks.onSessionStart(ctx, user)),
-}
-
 // Бот ждёт не больше одного ответа (pendingInput). Команда или кнопка
 // клавиатуры — другое действие: ожидание снимается, иначе следующая фраза
 // человека ушла бы в старый вопрос (профиль, отчёт, время встречи). Знакомство
@@ -256,7 +216,7 @@ const ONBOARDING_INPUTS = ['timezone', 'start_time', 'ritual']
 export async function releasePending(ctx: Ctx, user: User, fenced = false): Promise<User> {
   if (user.pendingInput === 'none' || ONBOARDING_INPUTS.includes(user.pendingInput) || user.pendingInput.startsWith('session_end:')) return user
   if (fenced) assertCurrentInput(ctx)
-  const runningTaskChoice = /^running_task_choice:([0-9a-f-]{36}):([0-9a-f]{8})$/.exec(user.pendingInput)
+  const runningTaskChoice = /^running_task_choice:([0-9a-f-]{36}):([0-9a-f]{8})(?::[A-Za-z0-9_-]+)?$/.exec(user.pendingInput)
   const release = async (tx: import('@prisma/client').Prisma.TransactionClient) => {
     if (runningTaskChoice?.[1]) {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`
@@ -273,121 +233,59 @@ export async function releasePending(ctx: Ctx, user: User, fenced = false): Prom
   return { ...user, pendingInput: 'none' }
 }
 
-// Commands/buttons are deterministic; free text/voice goes through the same router.
+// Every textual input, including reply-keyboard and slash commands, is interpreted by the LLM.
 async function routeInput(ctx: Ctx, user: User, text: string, via: 'text' | 'voice', contextEventId: number | null): Promise<void> {
   assertCurrentInput(ctx)
-  const rest = explicitBreakMinutes(text)
-  if (rest !== undefined && !['timezone','start_time','ritual'].includes(user.pendingInput)) {
-    const active = await session.activeSession(ctx, user.id)
-    assertCurrentInput(ctx)
-    if (active?.state === 'running' || active?.state === 'paused') {
-      invalidateSemanticChoices(user.id)
-      const released = await releasePending(ctx, user, true)
-      assertCurrentInput(ctx)
-      return session.onBreak(ctx, released, rest ?? undefined)
+  return routeSemanticInput(ctx, user, text, via, contextEventId, routePendingInput, onSemanticControl)
+}
+async function onSemanticControl(ctx: Ctx, user: User, action: string, value: string | null): Promise<void> {
+  if (action === 'status') return showStatus(ctx, user)
+  if (action === 'tasks') return tasks.showTasks(ctx, user)
+  if (action === 'settings') return account.sendSettings(ctx, user)
+  if (action === 'profile') return account.sendProfile(ctx, user)
+  if (action === 'guide') return reply(ctx, user, T.guide, undefined, { informational: true })
+  if (action === 'help') return reply(ctx, user, T.help, undefined, { informational: true })
+  if (action === 'new_session') return session.onNewAfterBreak(ctx, user, () => tasks.onSessionStart(ctx, user))
+  return onCommand(ctx, user, action, value ?? '', ctx.inputUserCreated ?? false)
+}
+
+async function routePendingInput(ctx: Ctx, user: User, text: string, via: 'text' | 'voice', contextEventId: number | null, answer?: PendingAnswer): Promise<void> {
+  const pending = user.pendingInput
+  const reject = () => reply(ctx, user, T.cannotInterpret, undefined, { informational: true })
+  if (!answer) return reject()
+  if (answer.kind === 'clock') {
+    const value = `${String(answer.hour).padStart(2, '0')}:${String(answer.minute).padStart(2, '0')}`
+    if (pending === 'timezone' || pending === 'settings_timezone') return account.onTimezoneText(ctx, user, value)
+    if (pending === 'start_time') return account.onStartTimeText(ctx, user, value)
+    if (pending === 'morning_time') return account.onMorningText(ctx, user, value)
+    if (pending === 'meeting_time' || pending === 'meeting_time_soft') {
+      const clock = { h: answer.hour, m: answer.minute }
+      const at = answer.day === 'next' ? nextLocalTime(user.timezone, clock, ctx.now()) : localDateTime(user.timezone, addDays(dayKey(ctx.now(), user.timezone), answer.day === 'tomorrow' ? 1 : 0), clock)
+      if (at <= ctx.now()) return reject()
+      return day.scheduleMeeting(ctx, user, at, 'custom')
     }
+  } else if (answer.kind === 'text') {
+    if (pending === 'ritual' || pending === 'profile_ritual') return account.onRitualText(ctx, user, answer.value)
+    if (pending === 'profile') return account.onProfileText(ctx, user, answer.value)
+    const split = TASK_SPLIT.exec(pending)
+    if (split?.[1] && !pending.startsWith('task_split_manual:')) return tasks.onTaskBreakdownAnswer(ctx, user, split[1], answer.value, via, contextEventId)
+    const edit = /^task_edit:([0-9a-f-]{36})$/.exec(pending)
+    if (edit?.[1]) return tasks.onTaskEditText(ctx, user, edit[1], answer.value)
+  } else if (answer.kind === 'duration') {
+    const edit = /^running_duration:([0-9a-f-]{36})$/.exec(pending)
+    if (edit?.[1]) return session.onRunningDurationText(ctx, user, edit[1], '', { minutes: answer.minutes })
+  } else if (answer.kind === 'retro') {
+    if (pending.startsWith('retro:')) return onRetro(ctx, user, pending.split(':')[1]!, `m${answer.minutesAgo}`)
+  } else if (answer.kind === 'choice') {
+    if (answer.value === 'skip' && pending === 'start_time') return account.onOnboardingButton(ctx, user, 'st_skip')
+    if (answer.value === 'skip' && (pending === 'ritual' || pending === 'profile_ritual')) return account.onRitualText(ctx, user, null)
+    const choice = /^running_task_choice:([0-9a-f-]{36}):([0-9a-f]{8})(?::[A-Za-z0-9_-]+)?$/.exec(pending)
+    if (choice?.[1] && choice[2] && answer.value !== 'skip') return session.onRunningTaskChoice(ctx, user, choice[1], answer.value, { existing: () => tasks.showTaskPicker(ctx, user, T.tasksPick) }, choice[2])
+  } else if (answer.kind === 'steps') {
+    const split = TASK_SPLIT.exec(pending)
+    if (split?.[1]) return tasks.onTaskBreakdownAnswer(ctx, user, split[1], text, via, contextEventId, answer.titles)
   }
-  if (await tasks.onTaskNumber(ctx, user, text)) return
-  if(user.pendingInput.startsWith('retro:'))return onRetro(ctx,user,user.pendingInput.split(':')[1]!,text)
-  return routeSemanticInput(ctx, user, text, via, contextEventId, routeLegacyInput, routePendingInput)
-}
-async function routePendingInput(ctx: Ctx, user: User, text: string, via: 'text' | 'voice', contextEventId: number | null): Promise<void> {
-  const pending = user.pendingInput
-  const runningTaskChoice = /^running_task_choice:([0-9a-f-]{36}):([0-9a-f]{8})$/.exec(pending)
-  if (runningTaskChoice?.[1]) {
-    return session.onRunningTaskChoiceText(ctx, user, runningTaskChoice[1], text, {
-      existing: () => tasks.showTaskPicker(ctx, user, T.tasksPick),
-    })
-  }
-  const runningEdit = /^running_(work|duration):([0-9a-f-]{36})$/.exec(pending)
-  if (runningEdit?.[1] === 'work' && runningEdit[2]) return session.onRunningWorkText(ctx, user, runningEdit[2], text)
-  if (runningEdit?.[1] === 'duration' && runningEdit[2]) return session.onRunningDurationText(ctx, user, runningEdit[2], text)
-  const taskEdit = /^task_edit:([0-9a-f-]{36})$/.exec(pending)
-  if (taskEdit?.[1]) return tasks.onTaskEditText(ctx, user, taskEdit[1], text)
-  const taskSplit = TASK_SPLIT.exec(pending)
-  if (taskSplit?.[1]) return tasks.onTaskBreakdownAnswer(ctx, user, taskSplit[1], text, via, contextEventId)
-  switch (pending) {
-    case 'task_add':
-      return tasks.onTaskAddText(ctx, user, text, via)
-    case 'timezone':
-    case 'settings_timezone':
-      return account.onTimezoneText(ctx, user, text)
-    case 'start_time':
-      return account.onStartTimeText(ctx, user, text)
-    case 'ritual':
-    case 'profile_ritual':
-      return account.onRitualText(ctx, user, text)
-    case 'meeting_time':
-    case 'meeting_time_soft':
-      if (await day.onMeetingTimeText(ctx, user, text, { soft: pending === 'meeting_time_soft' })) return
-      return reply(ctx, user, T.stale)
-    case 'morning_time':
-      return account.onMorningText(ctx, user, text)
-    case 'profile':
-      return account.onProfileText(ctx, user, text)
-  }
-  return reply(ctx, user, T.stale)
-}
-
-async function routeLegacyInput(ctx: Ctx, user: User, text: string, via: 'text' | 'voice', contextEventId: number | null): Promise<void> {
-  const pending = user.pendingInput
-  const runningTaskChoice = /^running_task_choice:([0-9a-f-]{36}):([0-9a-f]{8})$/.exec(pending)
-  if (runningTaskChoice?.[1]) {
-    return session.onRunningTaskChoiceText(ctx, user, runningTaskChoice[1], text, {
-      existing: () => tasks.showTaskPicker(ctx, user, T.tasksPick),
-    })
-  }
-  const runningEdit = /^running_(work|duration):([0-9a-f-]{36})$/.exec(pending)
-  if (runningEdit?.[1] === 'work' && runningEdit[2]) return session.onRunningWorkText(ctx, user, runningEdit[2], text)
-  if (runningEdit?.[1] === 'duration' && runningEdit[2]) return session.onRunningDurationText(ctx, user, runningEdit[2], text)
-  const taskEdit = /^task_edit:([0-9a-f-]{36})$/.exec(pending)
-  if (taskEdit?.[1]) return tasks.onTaskEditText(ctx, user, taskEdit[1], text)
-  const taskSplit = TASK_SPLIT.exec(pending)
-  if (taskSplit?.[1]) return tasks.onTaskBreakdownAnswer(ctx, user, taskSplit[1], text, via, contextEventId)
-  switch (pending) {
-    case 'task_add':
-      return tasks.onTaskAddText(ctx, user, text, via)
-    case 'timezone':
-    case 'settings_timezone':
-      return account.onTimezoneText(ctx, user, text)
-    case 'start_time':
-      return account.onStartTimeText(ctx, user, text)
-    case 'ritual':
-    case 'profile_ritual':
-      return account.onRitualText(ctx, user, text)
-    case 'meeting_time':
-    case 'meeting_time_soft':
-      if (await day.onMeetingTimeText(ctx, user, text, { soft: pending === 'meeting_time_soft' })) return
-      user = { ...user, pendingInput: 'none' }
-      break
-    case 'morning_time':
-      return account.onMorningText(ctx, user, text)
-    case 'profile':
-      return account.onProfileText(ctx, user, text)
-    case 'report_text':
-      const reportRoute = await onPendingReport(ctx, user, text, via)
-      if (reportRoute.kind !== 'new_action') return
-      // Новое действие снимает только ещё актуальное ожидание старого отчёта.
-      const released = await session.releaseReportPending(ctx, user, reportRoute.sessionId)
-      if (!released) return reply(ctx, user, T.stale)
-      user = { ...user, pendingInput: 'none' }
-      break
-  }
-  if (await session.onRunningFreeText(ctx, user, text, contextEventId)) return
-  const outcome = await tasks.onTaskMessage(ctx, user, text, via, contextEventId)
-  if (outcome === 'session_intent') {
-    const current = await session.activeSession(ctx, user.id)
-    if (current?.state === 'running' && current.taskId === null) return session.onRunningTaskCandidate(ctx, user, text)
-    return session.onIntentText(ctx, user, text)
-  }
-  if (outcome === 'close_day') return day.closeDay(ctx, user, via)
-}
-
-async function onPendingReport(ctx: Ctx, user: User, text: string, via: 'text' | 'voice') {
-  const meetingAt = day.explicitMeetingAt(text, user, ctx.now())
-  const result = await session.onReportText(ctx, user, text, { endDay: meetingAt !== null })
-  if (result.kind === 'saved' && meetingAt) await day.closeDay(ctx, user, via, { meetingAt })
-  return result
+  return reject()
 }
 
 async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string | undefined, messageId: number | undefined): Promise<void> {
@@ -400,7 +298,7 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
   if (!parsed) return reply(ctx, user, T.stale)
   const { action, id, arg } = parsed
 
-  if (action === 'sroute' && id && arg) return onSemanticChoice(ctx, user, id, arg, routeLegacyInput)
+  if (action === 'sroute' && id && arg) return onSemanticChoice(ctx, user, id, arg)
   invalidateSemanticChoices(user.id)
   if (action === 'report') return id && !arg ? onRestoreReport(ctx, user, id) : reply(ctx, user, T.stale)
 
@@ -432,7 +330,7 @@ async function onCallback(ctx: Ctx, user: User, callbackId: string, data: string
         if (id && (arg === 'continue' || arg === 'step' || arg === 'finish')) return await session.onSessionHelpAction(ctx, user, id, arg)
         break
       case 'rtask': {
-        const choice = /^(new|list|cancel)_([0-9a-f]{8})$/.exec(arg ?? '')
+        const choice = /^(new|list|cancel)_([0-9a-f]{8})(?::[A-Za-z0-9_-]+)?$/.exec(arg ?? '')
         if (id && choice) {
           return await session.onRunningTaskChoice(ctx, user, id, choice[1] === 'list' ? 'existing' : choice[1] as 'new' | 'cancel', {
             existing: () => tasks.showTaskPicker(ctx, user, T.tasksPick),

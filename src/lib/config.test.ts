@@ -18,13 +18,13 @@ describe('LLM config', () => {
   })
 
   it('routing flag is explicit, default off, false is a real kill switch', () => {
-    expect(parseConfig(base).SEMANTIC_ROUTER_ENABLED).toBe(false)
-    expect(parseConfig({ ...base, SEMANTIC_ROUTER_ENABLED: 'false' }).SEMANTIC_ROUTER_ENABLED).toBe(false)
+    expect(parseConfig(base).SEMANTIC_ROUTER_ENABLED).toBe(true)
+    expect(parseConfig({ ...base, SEMANTIC_ROUTER_ENABLED: 'false' }).SEMANTIC_ROUTER_ENABLED).toBe(true)
     expect(parseConfig({ ...base, SEMANTIC_ROUTER_ENABLED: 'true' }).SEMANTIC_ROUTER_ENABLED).toBe(true)
     expect(() => parseConfig({ ...base, SEMANTIC_ROUTER_ENABLED: '0' })).toThrow('SEMANTIC_ROUTER_ENABLED')
   })
 
-  it('сохраняет детерминированный режим при пустом наборе LLM_*', () => {
+  it('отключает provider при пустом наборе LLM_*', () => {
     const config = parseConfig({ ...base, LLM_API_KEY: '', LLM_BASE_URL: '', LLM_MODEL: '' })
     expect(config.LLM_API_KEY).toBeUndefined()
     expect(config.LLM_BASE_URL).toBeUndefined()

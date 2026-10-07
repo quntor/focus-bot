@@ -17,7 +17,7 @@ function provider(value: unknown | ((req: LlmRequest) => Promise<unknown>)): Llm
 async function ready(value: unknown | ((req: LlmRequest) => Promise<unknown>)) {
   const llm = provider(value)
   const bot = makeBot({ llm })
-  await bot.onboard(A)
+  await bot.setupOnboarded(A)
   bot.ctx.semanticRouterEnabled = true
   const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
   await prisma.focusSession.deleteMany({ where: { userId: user.id } })
@@ -40,7 +40,7 @@ describe.skipIf(!hasDb)('semantic routing: реальные регрессии �
     const { bot, llm, user } = await ready(async (req: LlmRequest) => {
       if (!req.system.includes('семантический маршрутизатор')) return { text: 'Продолжишь или передохнёшь?', taskId: null }
       const input = JSON.parse(req.input)
-      return { route: input.allowedRoutes.includes('continue_same') ? 'continue_same' : 'unclear', text, followUp: null }
+      return { route: input.allowedRoutes.includes('continue_same') ? 'continue_same' : 'unclear', text, minutes: text === 'еще 15 минут поработаю' ? 15 : null, durationSource: text === 'еще 15 минут поработаю' ? '15 минут' : null, followUp: null }
     })
     bot.ctx.remindersEnabled = true
     const now = bot.ctx.now()
@@ -76,7 +76,7 @@ describe.skipIf(!hasDb)('semantic routing: реальные регрессии �
   })
   it('legacy: ещё 15 минут — от момента ответа, не от начала сорокаминутной работы', async () => {
     const text = 'еще 15 минут поработаю'
-    const { bot, user } = await ready({ route: 'continue_same', text, followUp: null })
+    const { bot, user } = await ready({ route: 'continue_same', text, minutes: 15, durationSource: '15 минут', followUp: null })
     const now = bot.ctx.now()
     const active = await prisma.focusSession.create({ data: { userId: user.id, state: 'running', startedAt: new Date(now.getTime() - 40 * 60_000), plannedMinutes: 40, plannedEndAt: now } })
     await prisma.user.update({ where: { id: user.id }, data: { pendingInput: `session_end:${active.id}` } })
@@ -108,7 +108,7 @@ describe.skipIf(!hasDb)('semantic routing: реальные регрессии �
   })
   it('составная фраза сохраняет только первый отчёт; второе — одна кнопка, replay не пишет', async () => {
     const text = 'доделал отчёт, теперь письма'
-    const { bot, llm, user } = await ready(reportAction('доделал отчёт', { route: 'new_task', text: 'письма' }))
+    const { bot, llm, user } = await ready(reportAction('доделал отчёт', { route: 'new_task', text: 'письма', intent: { task: null, title: 'письма', scope: 'step' }, minutes: null, durationSource: null }))
     const { old } = await past(user.id, bot.ctx.now())
     await bot.text(A, text)
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ reportText: 'доделал отчёт', outcome: 'done' })
@@ -141,14 +141,15 @@ describe.skipIf(!hasDb)('semantic routing: реальные регрессии �
     expect(keyboard).toHaveLength(2)
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ reportText: null, progress: null })
     bot.ctx.semanticRouterEnabled = false
-    await bot.onboard(B)
+    await bot.setupOnboarded(B)
     await prisma.focusSession.deleteMany({ where: { user: { tgId: BigInt(B) } } })
     bot.ctx.semanticRouterEnabled = true
     const button = bot.lastButton(A, 'sroute:', ':new')
     await bot.press(B, button)
     expect(await prisma.focusSession.count({ where: { state: 'collecting_intent' } })).toBe(0)
     await bot.press(A, button)
-    expect(await prisma.focusSession.count({ where: { state: 'collecting_intent' } })).toBe(1)
+    expect(await prisma.focusSession.count({ where: { state: 'collecting_intent' } })).toBe(0)
+    expect(bot.lastText(A)).toContain('какую работу')
   })
   it.each(['pending', 'session', 'task'])('изменившийся %s во время модели отбрасывает ответ', async (kind) => {
     let change!: () => Promise<unknown>
@@ -163,26 +164,20 @@ describe.skipIf(!hasDb)('semantic routing: реальные регрессии �
     expect(await prisma.focusSession.count({ where: { state: 'collecting_intent' } })).toBe(0)
     expect(await prisma.event.count({ where: { type: 'route_stale' } })).toBe(1)
   })
-  it('выключатель обходит маршрутизатор и отключает старую proposal кнопку', async () => {
-    const { bot, llm } = await ready({ route: 'unclear', text: 'что дальше', followUp: null })
-    await bot.text(A, 'что дальше')
-    const button = bot.lastButton(A, 'sroute:', ':new')
+  it('старый флаг false не возвращает text bypass', async () => {
+    const { bot, llm } = await ready({ route: 'control', text: '/help', action: 'help', value: null, followUp: null })
     bot.ctx.semanticRouterEnabled = false
-    await bot.press(A, button)
-    expect(await prisma.focusSession.count()).toBe(0)
-    vi.mocked(llm.complete).mockClear()
     await bot.text(A, '/help')
-    expect(llm.complete).not.toHaveBeenCalled()
-    await bot.text(A, 'новая работа')
-    expect(vi.mocked(llm.complete).mock.calls.some(([req]) => req.system.includes('семантический маршрутизатор'))).toBe(false)
+    expect(llm.complete).toHaveBeenCalledTimes(1)
   })
   it('новая реплика инвалидирует прежнюю кнопку даже без смены DB состояния', async () => {
     const { bot } = await ready({ route: 'unclear', text: 'что дальше', followUp: null })
+    await past((await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })).id, bot.now())
     await bot.text(A, 'что дальше')
     const oldButton = bot.lastButton(A, 'sroute:', ':new')
     await bot.text(A, 'что дальше')
     await bot.press(A, oldButton)
-    expect(await prisma.focusSession.count()).toBe(0)
+    expect(await prisma.focusSession.count({ where: { state: { in: ['running', 'collecting_intent'] } } })).toBe(0)
   })
   it('вернуться к отчёту: ownership, window и активная сессия проверяются', async () => {
     const { bot, user } = await ready(newAction('фокус-бот'))
@@ -197,14 +192,14 @@ describe.skipIf(!hasDb)('semantic routing: реальные регрессии �
   })
   it('session_help завершение требует outcome, не угадывает результат', async () => {
     const text = 'сделал, иду отдыхать'
-    const { bot, llm, user } = await ready({ route: 'session_help', text, help: { kind: 'complete_and_rest', reply: null, action: null, task_title: null }, followUp: null })
+    const { bot, llm, user } = await ready({ route: 'control', text, action: 'done', value: null, followUp: null })
     const running = await prisma.focusSession.create({ data: { userId: user.id, state: 'running', startedAt: bot.ctx.now(), intentText: 'Отчёт' } })
     await bot.text(A, text)
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: running.id } })).toMatchObject({ state: 'running', outcome: null })
     expect(bot.lastButton(A, 'out:', ':done')).toBe(`out:${running.id}:done`)
     expect(llm.complete).toHaveBeenCalledTimes(1)
   })
-  it.each(['invalid', 'error'])('provider %s возвращает исходный legacy путь', async (reason) => {
+  it.each(['invalid', 'error'])('provider %s не запускает legacy путь', async (reason) => {
     const text = 'Начинаю делать фокус-бот.'
     const { bot, llm, user } = await ready(async (req: Parameters<LlmProvider['complete']>[0]) => {
       if (req.system.includes('семантический маршрутизатор')) {
@@ -217,7 +212,8 @@ describe.skipIf(!hasDb)('semantic routing: реальные регрессии �
     const { old } = await past(user.id, bot.ctx.now())
     await bot.text(A, text)
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ reportText: null })
-    expect(await prisma.focusSession.findFirstOrThrow({ where: { state: 'collecting_intent' } })).toMatchObject({ intentText: 'Фокус-бот' })
+    expect(await prisma.focusSession.count({ where: { state: 'collecting_intent' } })).toBe(0)
+    expect(bot.lastText(A)).toContain('Ничего не меняю')
     expect(await prisma.event.findFirstOrThrow({ where: { type: 'llm_fallback', payload: { path: ['stage'], equals: 'semantic_router' } } })).toMatchObject({ payload: { stage: 'semantic_router', reason } })
     expect(vi.mocked(llm.complete).mock.calls.filter(([req]) => req.system.includes('семантический маршрутизатор'))).toHaveLength(1)
   })
@@ -233,17 +229,21 @@ describe.skipIf(!hasDb)('semantic routing: реальные регрессии �
     expect(llm.complete).toHaveBeenCalledTimes(1)
     expect((await prisma.componentCall.findMany()).map((call) => call.name).sort()).toEqual(['semantic_router', 'voice_transcription'])
   })
-  it('formatted timezone answer и команды/кнопки обходят модель', async () => {
-    const { bot, llm, user } = await ready(newAction('не должно вызываться'))
+  it('formatted timezone и команда идут через модель, callback — нет', async () => {
+    const { bot, llm, user } = await ready(async (req: LlmRequest) => {
+      const text = JSON.parse(req.input).text
+      return text === '10:00' ? { route: 'answer_pending', text, answer: { kind: 'clock', hour: 10, minute: 0, day: 'next' }, followUp: null }
+        : { route: 'control', text, action: 'help', value: null, followUp: null }
+    })
     await prisma.user.update({ where: { id: user.id }, data: { pendingInput: 'settings_timezone' } })
     await bot.text(A, '10:00')
     await bot.text(A, '/help')
     await bot.press(A, 'skip::ritual')
-    expect(llm.complete).not.toHaveBeenCalled()
+    expect(llm.complete).toHaveBeenCalledTimes(2)
   })
   it('answer_pending — конкретный profile handler, а не повторный классификатор', async () => {
     const text = 'Работаю над проектом'
-    const { bot, llm, user } = await ready({ route: 'answer_pending', text, followUp: null })
+    const { bot, llm, user } = await ready({ route: 'answer_pending', text, answer: { kind: 'text', value: text }, followUp: null })
     await prisma.user.update({ where: { id: user.id }, data: { pendingInput: 'profile' } })
     await bot.text(A, text)
     expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ profileText: text, pendingInput: 'none' })
@@ -251,7 +251,7 @@ describe.skipIf(!hasDb)('semantic routing: реальные регрессии �
     expect(await prisma.focusSession.count()).toBe(0)
   })
   it('одновременный replay одной compound кнопки не создаёт вторую сессию', async () => {
-    const { bot, user } = await ready(reportAction('доделал отчёт', { route: 'new_task', text: 'письма' }))
+    const { bot, user } = await ready(reportAction('доделал отчёт', { route: 'new_task', text: 'письма', intent: { task: null, title: 'письма', scope: 'step' }, minutes: null, durationSource: null }))
     await past(user.id, bot.ctx.now())
     await bot.text(A, 'доделал отчёт, теперь письма')
     const button = bot.lastButton(A, 'sroute:', ':next')
@@ -289,8 +289,10 @@ describe.skipIf(!hasDb)('semantic routing: реальные регрессии �
     const spy = vi.spyOn(prisma.event, 'create').mockImplementation(((async (args: any) => {
       const result = await original(args)
       if (args.data.type === 'semantic_routed') {
-        if (next === '/guide') await bot.text(A, next)
+        const previous = latestInputId(user.id, bot.now())
+        if (next === '/guide') void bot.text(A, next)
         else void handleUpdate(bot.ctx, { update_id: 99100, message: { message_id: 99100, from: { id: A, is_bot: false, first_name: 'A' }, chat: { id: A, type: 'private' }, date: 1, sticker: {} } })
+        await vi.waitFor(() => expect(latestInputId(user.id, bot.now())).not.toBe(previous))
       }
       return result
     }) as unknown) as typeof prisma.event.create)
@@ -326,8 +328,10 @@ describe.skipIf(!hasDb)('semantic routing: реальные регрессии �
     await bot.text(A, text)
     const confirmation = bot.press(A, bot.lastButton(A, 'sroute:', ':report'))
     await began
-    await bot.text(A, '/guide')
-    release(); await confirmation
+    const previous = latestInputId(user.id, bot.now())
+    const next = bot.text(A, '/guide')
+    await vi.waitFor(() => expect(latestInputId(user.id, bot.now())).not.toBe(previous))
+    release(); await Promise.all([confirmation, next])
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ reportText: null, progress: null, outcome: 'done' })
   })
 

@@ -7,8 +7,8 @@ const A = 27001
 
 async function beginBreak() {
   const bot = makeBot()
-  await bot.onboard(A)
-  await bot.text(A, 'отчёт, 40 минут')
+  await bot.setupOnboarded(A)
+  await bot.textAs(A, 'отчёт, 40 минут', {"text":"отчёт, 40 минут","route":"new_task","intent":{"task":null,"title":"отчёт","scope":"step"},"minutes":40,"durationSource":"40 минут","followUp":null})
   const session = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
   bot.advance(40)
   await runOutboxOnce(bot.ctx)
@@ -65,7 +65,7 @@ describe.skipIf(!hasDb)('перерыв после дедлайна не зав�
   it('возврат к работе отменяет применимость старого напоминания', async () => {
     const { bot, session } = await beginBreak()
     bot.advance(2)
-    await bot.text(A, 'Вернуться к работе')
+    await bot.textAs(A, 'Вернуться к работе', {"text":"Вернуться к работе","route":"continue_same","minutes":null,"durationSource":null,"followUp":null})
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).toMatchObject({ state: 'running', pausedSeconds: 120 })
     bot.advance(8)
     await runOutboxOnce(bot.ctx)
@@ -75,7 +75,7 @@ describe.skipIf(!hasDb)('перерыв после дедлайна не зав�
   it('новая работа после исхода не получает напоминание старого отдыха', async () => {
     const { bot, session } = await beginBreak()
     await bot.press(A, `out:${session.id}:done`)
-    await bot.text(A, 'Начать новую сессию')
+    await bot.textAs(A, 'Начать новую сессию', {"text":"Начать новую сессию","route":"control","action":"new_session","value":null,"followUp":null})
     expect(await prisma.focusSession.count({ where: { userId: session.userId, state: 'running' } })).toBe(1)
     bot.advance(10)
     await runOutboxOnce(bot.ctx)
@@ -93,9 +93,9 @@ describe.skipIf(!hasDb)('перерыв после дедлайна не зав�
   it('старый перерыв не воскресает после нового перерыва и исхода', async () => {
     const { bot, session } = await beginBreak()
     bot.advance(2)
-    await bot.text(A, 'Вернуться к работе')
+    await bot.textAs(A, 'Вернуться к работе', {"text":"Вернуться к работе","route":"continue_same","minutes":null,"durationSource":null,"followUp":null})
     bot.advance(2)
-    await bot.text(A, 'Перерыв')
+    await bot.textAs(A, 'Перерыв', {"text":"Перерыв","route":"break","minutes":null,"durationSource":null,"followUp":null})
     await bot.press(A, `out:${session.id}:not_done`)
     bot.advance(6)
     await runOutboxOnce(bot.ctx)

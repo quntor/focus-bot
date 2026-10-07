@@ -53,7 +53,13 @@ export async function inputTransaction<T>(ctx: Ctx, work: (tx: Prisma.Transactio
       if (options.syncReminders !== false && !before) before = await tx.focusSession.findFirst({where:{userId:ctx.inputUserId},orderBy:{createdAt:'desc'}})
     }
     const result = await work(tx)
-    if (ctx.inputUserId && options.syncReminders !== false) await syncReminderState(tx,ctx.inputUserId,before,ctx.now(),ctx.remindersEnabled===true)
+    // Adopt the enabled cohort only inside an authorized mutation, never while
+    // merely loading a user for feedback, read-only text or a failed model call.
+    const existingUser = ctx.inputUserId ? await tx.user.findUnique({ where: { id: ctx.inputUserId } }) : null
+    if (options.syncReminders !== false && existingUser && ctx.remindersEnabled && ctx.reminderUserIds?.includes(String(existingUser.tgId))) {
+      await tx.user.updateMany({ where: { id: ctx.inputUserId, reminderPolicy: 0 }, data: { reminderPolicy: 1 } })
+    }
+    if (existingUser && ctx.inputUserId && options.syncReminders !== false) await syncReminderState(tx,ctx.inputUserId,before,ctx.now(),ctx.remindersEnabled===true)
     assertCurrentInput(ctx)
     return result
   })

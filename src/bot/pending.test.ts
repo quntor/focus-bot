@@ -1,3 +1,4 @@
+import { work, pending } from '../test/semantic-provider.js'
 import { beforeEach, describe, expect, it } from 'vitest'
 import type { LlmProvider } from '../llm/provider.js'
 import { makeBot } from '../test/bot.js'
@@ -15,51 +16,51 @@ describe.skipIf(!hasDb)('ожидание ответа не залипает', (
 
   it('«Изменить профиль», потом «Начать сессию» — следующая фраза не затирает профиль', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     await bot.press(A, 'prof::edit')
     expect((await user()).pendingInput).toBe('profile')
 
-    await bot.text(A, 'Начать сессию')
+    await bot.textAs(A, 'Начать сессию', {"text":"Начать сессию","route":"control","action":"focus","value":null,"followUp":null})
     expect((await user()).pendingInput).toBe('none')
-    await bot.text(A, 'застрял на отчёте')
+    await bot.textAs(A, 'застрял на отчёте', {"text":"застрял на отчёте","route":"session_help","help":{"kind":"stuck","reply":null,"action":"change_step","task_title":null},"followUp":null})
 
     expect((await user()).profileText).toBeNull()
   })
 
-  it('команда снимает ожидание профиля', async () => {
+  it('просмотр задач сохраняет ожидание профиля', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     await bot.press(A, 'prof::edit')
-    await bot.text(A, '/tasks')
-    expect((await user()).pendingInput).toBe('none')
+    await bot.textAs(A, '/tasks', {"text":"/tasks","route":"control","action":"tasks","value":null,"followUp":null})
+    expect((await user()).pendingInput).toBe('profile')
   })
 
   it('непрописанный отчёт не перехватывает текст новой сессии', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.text(A, 'глава, 40 минут')
+    await bot.setupOnboarded(A)
+    await bot.textAs(A, 'глава, 40 минут', {"text":"глава, 40 минут","route":"new_task","intent":{"task":null,"title":"глава","scope":"step"},"minutes":40,"durationSource":"40 минут","followUp":null})
     const first = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
     bot.advance(40)
     await bot.press(A, `out:${first.id}:done`)
     expect((await user()).pendingInput).toBe('report_text')
 
-    await bot.text(A, 'Начать сессию')
+    await bot.textAs(A, 'Начать сессию', {"text":"Начать сессию","route":"control","action":"focus","value":null,"followUp":null})
     expect((await user()).pendingInput).toBe('none')
-    await bot.text(A, 'отвлёкся')
+    await bot.textAs(A, 'отвлёкся', {"text":"отвлёкся","route":"session_help","help":{"kind":"distracted","reply":null,"action":"continue","task_title":null},"followUp":null})
 
     expect((await prisma.focusSession.findUniqueOrThrow({ where: { id: first.id } })).reportText).toBeNull()
   })
 
   it.each([0, 47])('явный старт через %i минут не становится старым отчётом', async (delay) => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.text(A, 'глава, 40 минут')
+    await bot.setupOnboarded(A)
+    await bot.textAs(A, 'глава, 40 минут', {"text":"глава, 40 минут","route":"new_task","intent":{"task":null,"title":"глава","scope":"step"},"minutes":40,"durationSource":"40 минут","followUp":null})
     const first = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
     bot.advance(40)
     await bot.press(A, `out:${first.id}:not_done`)
     bot.advance(delay)
 
-    await bot.text(A, 'Начинаю делать фокус-бот.')
+    await bot.textAs(A, 'Начинаю делать фокус-бот.', {"text":"Начинаю делать фокус-бот.","route":"new_task","intent":{"task":null,"title":"фокус-бот","scope":"step"},"minutes":null,"durationSource":null,"followUp":null})
 
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: first.id } })).toMatchObject({ reportText: null, progress: null })
     expect(await prisma.focusSession.count({ where: { state: { in: ['collecting_intent', 'running'] } } })).toBe(1)
@@ -69,11 +70,11 @@ describe.skipIf(!hasDb)('ожидание ответа не залипает', (
 
   it('после итога дня бот принимает только явное время, остальное — как обычно', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.text(A, '/today')
+    await bot.setupOnboarded(A)
+    await bot.textAs(A, '/today', {"text":"/today","route":"close_day","followUp":null})
     expect((await user()).pendingInput).toBe('meeting_time_soft')
 
-    await bot.text(A, 'созвон в 9 с Петей')
+    await bot.textAs(A, 'созвон в 9 с Петей', work('созвон в 9 с Петей','созвон с Петей'))
     expect(bot.lastText(A)).not.toContain('Напиши время')
     expect((await user()).pendingInput).toBe('none')
     expect(await prisma.outboxMessage.findFirst({ where: { kind: 'meeting', status: 'pending', payload: { path: ['morning'], equals: false } } })).toBeNull()
@@ -81,10 +82,10 @@ describe.skipIf(!hasDb)('ожидание ответа не залипает', (
 
   it('после итога дня «в 9» ставит встречу', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.text(A, '/today')
+    await bot.setupOnboarded(A)
+    await bot.textAs(A, '/today', {"text":"/today","route":"close_day","followUp":null})
 
-    await bot.text(A, 'завтра в 9')
+    await bot.textAs(A, 'завтра в 9', {"text":"завтра в 9","route":"answer_pending","answer":{"kind":"clock","hour":9,"minute":0,"day":"tomorrow"},"followUp":null})
 
     expect(bot.lastText(A)).toBe('Договорились: завтра в 09:00.')
     expect((await user()).pendingInput).toBe('none')
@@ -92,16 +93,16 @@ describe.skipIf(!hasDb)('ожидание ответа не залипает', (
 
   it('«Своё время» ждёт время строго', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     await bot.press(A, 'meet::custom')
-    await bot.text(A, 'не знаю')
+    await bot.textAs(A, 'не знаю', {route:'clarify',text:'не знаю',question:'Напиши время, например 18:30.',followUp:null})
     expect(bot.lastText(A)).toBe('Напиши время, например 18:30.')
     expect((await user()).pendingInput).toBe('meeting_time')
   })
 
   it('«Добавить задачу», потом старт задачи — фраза в сессии не становится задачей', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const u = await user()
     const task = await prisma.task.create({ data: { userId: u.id, title: 'Отчёт' } })
     await bot.press(A, 'tasks::add')
@@ -113,9 +114,9 @@ describe.skipIf(!hasDb)('ожидание ответа не залипает', (
 
   it('пояс из настроек не перезапускает знакомство', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     await bot.press(A, 'set::timezone')
-    await bot.text(A, '12:00')
+    await bot.textAs(A, '12:00', {"text":"12:00","route":"answer_pending","answer":{"kind":"clock","hour":12,"minute":0,"day":"next"},"followUp":null})
 
     expect(bot.lastText(A)).toBe('Понял, у тебя 12:00.')
     expect(await user()).toMatchObject({ timezone: 'Asia/Yekaterinburg', pendingInput: 'none' })
@@ -123,7 +124,7 @@ describe.skipIf(!hasDb)('ожидание ответа не залипает', (
 
   it('старая кнопка «Пропустить» ритуал не сбивает чужое ожидание', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     await bot.press(A, 'prof::edit')
     await bot.press(A, 'skip::ritual')
 
@@ -133,18 +134,18 @@ describe.skipIf(!hasDb)('ожидание ответа не залипает', (
 
   it('на шагах знакомства постоянная клавиатура убирается', async () => {
     const bot = makeBot()
-    await bot.text(A, '/start')
-    await bot.text(A, '14:00')
+    await bot.textAs(A, '/start', {"text":"/start","route":"control","action":"start","value":null,"followUp":null})
+    await bot.textAs(A, '14:00', {"text":"14:00","route":"answer_pending","answer":{"kind":"clock","hour":14,"minute":0,"day":"next"},"followUp":null})
 
     const echo = bot.tg.sent.find((s) => s.text.startsWith('Понял, у тебя'))
     expect(echo?.replyKeyboard).toBe('remove')
   })
 
   it('голосом можно ответить на «Изменить профиль»', async () => {
-    const off: LlmProvider = { enabled: false, model: null, async complete() { throw new Error('не должно вызываться') } }
+    const off: LlmProvider = { enabled: true, model: 'profile-test', async complete() { return {text:JSON.stringify(pending('работаю по утрам',{kind:'text',value:'работаю по утрам'})),usage:null} } }
     const bot = makeBot({ llm: off, stt: { enabled: true, model: 'test-stt', async transcribe() { return 'работаю по утрам' } } })
     bot.tg.downloads.set('voice-profile', new Uint8Array([1, 2, 3]))
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     await bot.press(A, 'prof::edit')
 
     await bot.voice(A, { fileId: 'voice-profile', duration: 3, mimeType: 'audio/ogg', fileSize: 3 })
@@ -160,7 +161,7 @@ describe.skipIf(!hasDb)('добровольный отчёт: смысл и го
   beforeEach(async () => { A++; await resetDb() })
 
   async function waiting(bot: ReturnType<typeof makeBot>) {
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const u = await user()
     await prisma.focusSession.deleteMany({ where: { userId: u.id, state: 'collecting_intent' } })
     const session = await prisma.focusSession.create({ data: {
@@ -171,7 +172,7 @@ describe.skipIf(!hasDb)('добровольный отчёт: смысл и го
     return session
   }
 
-  it('голосовой явный старт обходит даже ошибочный report-ответ', async () => {
+  it('голосовой явный старт не обходит ошибочный ответ модели', async () => {
     let reports = 0
     const llm: LlmProvider = { enabled: true, model: 'test', async complete(req) {
       if (req.system.includes('короткий отчёт')) { reports++; return { text: '{"progress":"moved","next_step":null}', usage: null } }
@@ -184,7 +185,8 @@ describe.skipIf(!hasDb)('добровольный отчёт: смысл и го
     await bot.voice(A, { fileId: 'new-work', duration: 3, fileSize: 1 })
     expect(reports).toBe(0)
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: previous.id } })).toMatchObject({ reportText: null, progress: null })
-    expect(await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })).toMatchObject({ intentText: 'Фокус-бот' })
+    expect(await prisma.focusSession.count({ where: { state: 'running' } })).toBe(0)
+    expect((await user()).pendingInput).toBe('report_text')
     expect(await prisma.taskTimeAllocation.count({ where: { sessionId: previous.id } })).toBe(0)
   })
 
@@ -197,9 +199,9 @@ describe.skipIf(!hasDb)('добровольный отчёт: смысл и го
     } }
     const bot = makeBot({ llm })
     const previous = await waiting(bot)
-    await bot.text(A, 'Письма')
+    await bot.textAs(A, 'Письма', route === 'new_action' ? work('Письма','Письма') : {route:'unclear',text:'Письма',followUp:null})
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: previous.id } })).toMatchObject({ reportText: null, progress: null })
-    expect(taskParses).toBe(route === 'new_action' ? 1 : 0)
+    expect(taskParses).toBe(0)
     expect((await user()).pendingInput).toBe(route === 'new_action' ? 'none' : 'report_text')
   })
 
@@ -215,9 +217,10 @@ describe.skipIf(!hasDb)('добровольный отчёт: смысл и го
     const previous = await waiting(bot)
     const response = bot.text(A, 'Письма')
     await ready
-    await bot.press(A, 'prof::edit')
-    resolve({ text: JSON.stringify({ route, progress: 'moved', next_step: null }), usage: null })
+    const editing = bot.press(A, 'prof::edit')
+    resolve({ text: JSON.stringify(route === 'new_action' ? work('Письма','Письма') : {route:'report',text:'Письма',report:{route:'report',progress:'moved',next_step:null,continue_now:false,continue_minutes:null,allocations:[]},followUp:null}), usage: null })
     await response
+    await editing
     expect((await user()).pendingInput).toBe('profile')
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: previous.id } })).toMatchObject({ reportText: null, progress: null })
     expect(await prisma.focusSession.count({ where: { state: 'running' } })).toBe(0)
@@ -228,7 +231,7 @@ describe.skipIf(!hasDb)('добровольный отчёт: смысл и го
       return { text: '{"route":"unclear","progress":null,"next_step":null}', usage: null }
     } } })
     const previous = await waiting(bot)
-    await bot.text(A, 'завтра в 9')
+    await bot.textAs(A, 'завтра в 9', {"text":"завтра в 9","route":"answer_pending","answer":{"kind":"clock","hour":9,"minute":0,"day":"tomorrow"},"followUp":null})
     expect((await user()).pendingInput).toBe('report_text')
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: previous.id } })).toMatchObject({ reportText: null, restChoice: null })
     expect(await prisma.outboxMessage.count({ where: { kind: 'meeting' } })).toBe(0)
@@ -249,7 +252,7 @@ describe.skipIf(!hasDb)('добровольный отчёт: смысл и го
     const next = await prisma.focusSession.create({ data: {
       userId: u.id, state: 'finished', outcome: 'done', finishedAt: new Date(bot.now().getTime() + 1),
     } })
-    resolve({ text: JSON.stringify({ route, progress: 'moved', next_step: null }), usage: null })
+    resolve({ text: JSON.stringify(route === 'new_action' ? work('Результат, завтра в 9','Новая работа') : {route:'report',text:'Результат, завтра в 9',report:{route:'report',progress:'moved',next_step:null,continue_now:false,continue_minutes:null,allocations:[]},followUp:null}), usage: null })
     await response
     expect((await user()).pendingInput).toBe('report_text')
     for (const id of [previous.id, next.id]) expect(await prisma.focusSession.findUniqueOrThrow({ where: { id } })).toMatchObject({ reportText: null, progress: null, restChoice: null })

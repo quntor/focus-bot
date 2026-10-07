@@ -325,8 +325,8 @@ export async function onTaskAddRequested(ctx: Ctx, user: User): Promise<void> {
 
 const ADD_MAX = 10
 
-export async function onTaskAddText(ctx: Ctx, user: User, text: string, source: TaskInputSource): Promise<void> {
-  const lines = splitLines(text)
+export async function onTaskAddText(ctx: Ctx, user: User, text: string, source: TaskInputSource, preparedTitles?: string[]): Promise<void> {
+  const lines = preparedTitles ?? splitLines(text)
   if (!lines.length) return reply(ctx, user, T.taskAddAsk)
   const claimed = await inputTransaction(ctx, (tx) => tx.user.updateMany({ where: { id: user.id, pendingInput: 'task_add' }, data: { pendingInput: 'none' } }))
   if (claimed.count !== 1) return reply(ctx, user, T.stale)
@@ -374,6 +374,7 @@ export async function onTaskBreakdownAnswer(
   answer: string | null,
   source: TaskInputSource,
   contextEventId: number | null = null,
+  preparedSteps?: string[],
 ): Promise<void> {
   const firstRound = user.pendingInput === `task_split:${taskId}`
   const clarifying = user.pendingInput === `task_split_clarify:${taskId}`
@@ -394,7 +395,11 @@ export async function onTaskBreakdownAnswer(
   let steps: string[]
   let mode: 'answered' | 'auto' | 'manual'
   let llmUsed = false
-  if (manual) {
+  if (preparedSteps) {
+    steps = preparedSteps
+    mode = manual ? 'manual' : 'answered'
+    llmUsed = true
+  } else if (manual) {
     if (text === null) return reply(ctx, user, T.breakdownManual)
     steps = splitManualSteps(text)
     mode = 'manual'

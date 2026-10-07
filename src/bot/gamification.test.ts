@@ -1,12 +1,13 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { hasDb, prisma, resetDb } from '../test/db.js'
+import { work } from '../test/semantic-provider.js'
 import { makeBot } from '../test/bot.js'
 
 const A = 7001
 const DAY = 24 * 60
 
 async function session(bot: ReturnType<typeof makeBot>, text = 'шаг, 30 минут') {
-  await bot.text(A, text)
+  await bot.textAs(A, text, work(text, text.split(',')[0]!, 30, '30 минут'))
   const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
   const s = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })
   bot.advance(30)
@@ -22,15 +23,15 @@ describe.skipIf(!hasDb)('геймификация в сообщениях', () =
 
   it('после сессии — прогресс к цели', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.text(A, '/goal 3')
+    await bot.setupOnboarded(A)
+    await bot.textAs(A, '/goal 3', {"text":"/goal 3","route":"control","action":"goal","value":"3","followUp":null})
     const { afterOutcome } = await session(bot)
     expect(afterOutcome).toContain('1 из 3 — осталось 2 захода.')
   })
 
   it('пропуск закрыт заморозкой — об этом сказано; возвращение после одного дня — бонус', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const { user } = await session(bot)
     bot.advance(2 * DAY)
     const { afterOutcome } = await session(bot)
@@ -42,7 +43,7 @@ describe.skipIf(!hasDb)('геймификация в сообщениях', () =
 
   it('разрыв без вины, потом починка двумя заходами', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     await session(bot)
     bot.advance(DAY)
     await session(bot)
@@ -56,16 +57,16 @@ describe.skipIf(!hasDb)('геймификация в сообщениях', () =
   it('выходной: не больше одного в неделю, серию не рвёт', async () => {
     // Вторник, 10:00 по Москве.
     const bot = makeBot({ now: new Date('2026-09-22T07:00:00Z') })
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const { user } = await session(bot)
-    await bot.text(A, '/dayoff')
+    await bot.textAs(A, '/dayoff', {"text":"/dayoff","route":"control","action":"dayoff","value":null,"followUp":null})
     expect(bot.lastText(A)).toContain('Завтра выходной — серия не прервётся')
     // Повторно в тот же день — это тот же выходной, а не второй.
-    await bot.text(A, '/dayoff')
+    await bot.textAs(A, '/dayoff', {"text":"/dayoff","route":"control","action":"dayoff","value":null,"followUp":null})
     expect(bot.lastText(A)).toContain('Завтра и так выходной')
     // В сам выходной (среда) взять ещё один на четверг нельзя.
     bot.advance(DAY)
-    await bot.text(A, '/dayoff')
+    await bot.textAs(A, '/dayoff', {"text":"/dayoff","route":"control","action":"dayoff","value":null,"followUp":null})
     expect(bot.lastText(A)).toContain('выходной уже был')
     bot.advance(DAY)
     await session(bot)
@@ -77,12 +78,12 @@ describe.skipIf(!hasDb)('геймификация в сообщениях', () =
 
   it('сводка: неделя к неделе и активные дни из 7', async () => {
     const bot = makeBot({ now: new Date('2026-09-15T07:00:00Z') })
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     await session(bot) // вторник прошлой недели: 10 очков
     bot.advance(7 * DAY)
     await session(bot)
     await session(bot) // вторник этой недели: 20 за сессии + 5 за возвращение
-    await bot.text(A, '/today')
+    await bot.textAs(A, '/today', {"text":"/today","route":"close_day","followUp":null})
     const text = bot.lastText(A)
     expect(text).toContain('За неделю: 25 очков — на 15 больше, чем к этому дню прошлой недели. Лучшая неделя!')
     expect(text).toContain('Активных дней за последние 7: 1 из 7.')

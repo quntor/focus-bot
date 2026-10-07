@@ -14,6 +14,7 @@ export type IntentResult = {
   taskId: string | null
   title: string
   scope: 'step' | 'multi_session'
+  minutes?: number | null
   llmUsed: boolean
 }
 

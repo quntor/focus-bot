@@ -1,3 +1,4 @@
+import { work, pending } from '../test/semantic-provider.js'
 import { beforeEach, describe, expect, it } from 'vitest'
 import type { LlmProvider } from '../llm/provider.js'
 import { makeBot } from '../test/bot.js'
@@ -30,11 +31,11 @@ describe.skipIf(!hasDb)('задачи — одна модель', () => {
 
   it('старт с тем же названием не создаёт дубль', async () => {
     const bot = makeBot({ llm: llm({ tasks: () => intentOnly, intent: () => '{"task":null,"title":"Сделать слайды","scope":"step"}' }) })
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const u = await user()
     await prisma.task.create({ data: { userId: u.id, title: 'Сделать слайды' } })
 
-    await bot.text(A, 'поработаю над слайдами')
+    await bot.textAs(A, 'поработаю над слайдами', work('поработаю над слайдами', 'Сделать слайды', null, null, 't1'))
     await bot.press(A, bot.lastButton(A, 'len:', ':ok'))
 
     expect(await prisma.task.count({ where: { userId: u.id } })).toBe(1)
@@ -42,12 +43,12 @@ describe.skipIf(!hasDb)('задачи — одна модель', () => {
 
   it('большая задача сохраняется, а сессия — её первый шаг', async () => {
     const bot = makeBot({ llm: llm({ tasks: () => intentOnly, intent: () => '{"task":null,"title":"Написать диплом","scope":"multi_session"}' }) })
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const u = await user()
 
-    await bot.text(A, 'написать диплом')
+    await bot.textAs(A, 'написать диплом', { ...work('написать диплом', 'Написать диплом'), intent: { task: null, title: 'Написать диплом', scope: 'multi_session' } })
     expect(bot.lastText(A)).toContain('на несколько заходов')
-    await bot.text(A, 'составить план')
+    await bot.textAs(A, 'составить план', { route: 'intent_step', text: 'составить план', title: 'составить план', minutes: null, durationSource: null, followUp: null })
     await bot.press(A, bot.lastButton(A, 'len:', ':ok'))
 
     const tasks = await prisma.task.findMany({ where: { userId: u.id } })
@@ -57,21 +58,21 @@ describe.skipIf(!hasDb)('задачи — одна модель', () => {
 
   it('«Начать сессию» после написанного намерения — это «Ок», а не стирание', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
-    await bot.text(A, 'отчёт')
+    await bot.setupOnboarded(A)
+    await bot.textAs(A, 'отчёт', work('отчёт', 'отчёт'))
     expect(bot.lastText(A)).toContain('Давай')
 
-    await bot.text(A, 'Начать сессию')
+    await bot.textAs(A, 'Начать сессию', {"text":"Начать сессию","route":"control","action":"focus","value":null,"followUp":null})
 
     expect(await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })).toMatchObject({ intentText: 'отчёт' })
   })
 
   it('обещанные «10 минут» после «не получается начать» действуют и при выборе задачи кнопкой', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const u = await user()
     const task = await prisma.task.create({ data: { userId: u.id, title: 'Эссе' } })
-    await bot.text(A, '/stop')
+    await bot.textAs(A, '/stop', {"text":"/stop","route":"control","action":"stop","value":null,"followUp":null})
     await bot.press(A, 'dec::stuck')
 
     await bot.press(A, `task:${task.id}:start`)
@@ -81,7 +82,7 @@ describe.skipIf(!hasDb)('задачи — одна модель', () => {
 
   it('после «Готово» можно закрыть задачу целиком одной кнопкой', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const u = await user()
     const task = await prisma.task.create({ data: { userId: u.id, title: 'Эссе' } })
     await bot.press(A, `task:${task.id}:start`)
@@ -97,7 +98,7 @@ describe.skipIf(!hasDb)('задачи — одна модель', () => {
 
   it('«эту закончил» после конца сессии закрывает задачу этой сессии', async () => {
     const bot = makeBot({ llm: llm({ tasks: () => '{"kind":"complete_task","new_tasks":[],"start_title":null,"complete_title":null}' }) })
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const u = await user()
     const task = await prisma.task.create({ data: { userId: u.id, title: 'Эссе' } })
     await bot.press(A, `task:${task.id}:start`)
@@ -107,7 +108,7 @@ describe.skipIf(!hasDb)('задачи — одна модель', () => {
     await bot.press(A, `skiprep:${s.id}:`)
     await bot.press(A, `rest:${s.id}:rest`)
 
-    await bot.text(A, 'эту закончил')
+    await bot.textAs(A, 'эту закончил', { route: 'task_action', text: 'эту закончил', action: 'complete', task: 't1', number: null, followUp: null })
 
     expect(await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).toMatchObject({ status: 'done' })
     expect(bot.lastText(A)).not.toContain('Не понял')
@@ -120,14 +121,14 @@ describe.skipIf(!hasDb)('шаги разбора связаны с исходн�
   it('в списке шаги под исходной; повторный разбор заменяет незакрытые; после последнего — закрыть исходную', async () => {
     let steps = ['Открыть черновик', 'Выписать тезисы']
     const bot = makeBot({ llm: llm({ breakdown: () => JSON.stringify({ steps }) }) })
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const u = await user()
     const parent = await prisma.task.create({ data: { userId: u.id, title: 'Курсовая', createdAt: new Date('2026-09-20T10:00:00Z') } })
     await prisma.task.create({ data: { userId: u.id, title: 'Позвонить маме', createdAt: new Date('2026-09-20T11:00:00Z') } })
 
     await bot.press(A, `task:${parent.id}:split`)
     await bot.press(A, `task:${parent.id}:splitauto`)
-    await bot.text(A, '/tasks')
+    await bot.textAs(A, '/tasks', {"text":"/tasks","route":"control","action":"tasks","value":null,"followUp":null})
     expect(bot.lastText(A)).toContain(['1. Курсовая', '2. ↳ Открыть черновик (шаг 1 из 2)', '3. ↳ Выписать тезисы (шаг 2 из 2)', '4. Позвонить маме'].join('\n'))
 
     steps = ['Найти три источника']
@@ -144,14 +145,14 @@ describe.skipIf(!hasDb)('шаги разбора связаны с исходн�
 
   it('«Добавить задачу»: больше 10 строк — говорит, что записал первые 10; повтор — «уже есть»', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     await bot.press(A, 'tasks::add')
-    await bot.text(A, Array.from({ length: 12 }, (_, i) => `Задача ${i + 1}`).join('\n'))
+    await bot.textAs(A, Array.from({ length: 12 }, (_, i) => `Задача ${i + 1}`).join('\n'), { route: 'capture', text: Array.from({ length: 12 }, (_, i) => `Задача ${i + 1}`).join('\n'), titles: Array.from({ length: 12 }, (_, i) => `Задача ${i + 1}`), followUp: null })
     expect(await prisma.task.count({ where: { userId: (await user()).id } })).toBe(10)
     expect(bot.lastText(A)).toContain('Записал первые 10')
 
     await bot.press(A, 'tasks::add')
-    await bot.text(A, 'Задача 1')
+    await bot.textAs(A, 'Задача 1', {route:'capture',text:'Задача 1',titles:['Задача 1'],followUp:null})
     expect(bot.lastText(A)).toContain('«Задача 1» уже есть в списке.')
   })
 })
@@ -161,10 +162,10 @@ describe.skipIf(!hasDb)('тексты совпадают с поведением
 
   it('«Сменить задачу» после отчёта не говорит «Таймер уже идёт» и запускает выбранную', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     const u = await user()
     const task = await prisma.task.create({ data: { userId: u.id, title: 'Эссе' } })
-    await bot.text(A, 'глава, 40 минут')
+    await bot.textAs(A, 'глава, 40 минут', {"text":"глава, 40 минут","route":"new_task","intent":{"task":null,"title":"глава","scope":"step"},"minutes":40,"durationSource":"40 минут","followUp":null})
     const s = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
     bot.advance(40)
     await bot.press(A, `out:${s.id}:done`)
@@ -181,9 +182,9 @@ describe.skipIf(!hasDb)('тексты совпадают с поведением
 
   it('свободная техника: без «Короче/Длиннее» и без обещания заглянуть при выключенных пингах', async () => {
     const bot = makeBot()
-    await bot.onboard(A)
+    await bot.setupOnboarded(A)
     await prisma.user.update({ where: { id: (await user()).id }, data: { technique: 'free', pingsEnabled: false } })
-    await bot.text(A, 'глава')
+    await bot.textAs(A, 'глава', {"text":"глава","route":"new_task","intent":{"task":null,"title":"глава","scope":"step"},"minutes":null,"durationSource":null,"followUp":null})
     expect(bot.lastText(A)).toBe('Без таймера. Начинаем? Закончишь — /done.')
     expect(bot.buttons(A).some((b) => b.data.endsWith(':down'))).toBe(false)
   })

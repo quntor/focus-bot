@@ -29,10 +29,10 @@ export async function replaceChain(tx: Prisma.TransactionClient, user: User, kin
   await logEvent(tx,user.id,'reminder_chain_changed',{chain_id:chain.id,kind,revision:chain.revision,reason:'start',interval_minutes:interval,next_due_ms:first.getTime()},{at:now,sessionId:session?.id??undefined})
   return chain
 }
-export async function resetChain(tx: Prisma.TransactionClient, chain: ReminderChain, now: Date, interval=chain.intervalMinutes): Promise<ReminderChain> {
+export async function resetChain(tx: Prisma.TransactionClient, chain: ReminderChain, now: Date, interval=chain.intervalMinutes, due=new Date(now.getTime()+interval*MIN)): Promise<ReminderChain> {
   await tx.outboxMessage.updateMany({where:{chainId:chain.id,status:{in:['pending','paused','sending']}},data:{status:'canceled'}})
   const next = await tx.reminderChain.update({where:{id:chain.id},data:{revision:{increment:1},ordinal:0,restStep:0,intervalMinutes:interval,
-    firstDueAt:new Date(now.getTime()+interval*MIN),nextDueAt:new Date(now.getTime()+interval*MIN)}})
+    firstDueAt:due,nextDueAt:due}})
   await slot(tx,next);await logEvent(tx,chain.userId,'reminder_chain_changed',{chain_id:next.id,kind:next.kind as Phase,revision:next.revision,reason:'cadence',interval_minutes:interval,next_due_ms:next.nextDueAt.getTime()},{at:now,sessionId:next.sessionId??undefined});return next
 }
 export async function advance(tx: Prisma.TransactionClient, chain: ReminderChain, anchor: Date): Promise<void> {

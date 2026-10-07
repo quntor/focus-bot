@@ -19,6 +19,7 @@ export type Ctx = {
   stt: SttProvider
   remindersEnabled?: boolean
   reminderUserIds?: readonly string[]
+  inputUserCreated?: boolean
   inputUserId?: string
   semanticRouterEnabled?: boolean
   isCurrentInput?: () => boolean

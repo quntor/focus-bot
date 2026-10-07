@@ -6,6 +6,7 @@ import { disabledSttProvider } from '../stt/provider.js'
 import type { Keyboard, ReplyKeyboard, Telegram } from '../tg/client.js'
 import { handleUpdate } from '../tg/webhook.js'
 import { prisma } from './db.js'
+import * as account from '../bot/account.js'
 
 export type Sent = { chatId: bigint; text: string; keyboard?: Keyboard | undefined; replyKeyboard?: ReplyKeyboard | undefined }
 
@@ -85,6 +86,16 @@ export function makeBot(opts: { now?: Date; llm?: LlmProvider; stt?: SttProvider
       },
     })
 
+  // Explicit model result, never an interpreter for test inputs.
+  async function textAs(tgId: number, input: string, response: object, id?: number) {
+    const previous = ctx.llm
+    ctx.llm = { enabled: true, model: 'explicit-test', async complete(request) {
+      if (JSON.parse(request.input).text !== input) throw new Error('unexpected model input')
+      return { text: JSON.stringify(response), usage: null }
+    } }
+    try { await text(tgId, input, id) } finally { ctx.llm = previous }
+  }
+
   // Все кнопки, показанные пользователю, — чтобы нажимать «как человек».
   const buttons = (tgId: number) =>
     tg.sent.filter((s) => s.chatId === BigInt(tgId)).flatMap((s) => s.keyboard?.flat() ?? [])
@@ -96,26 +107,29 @@ export function makeBot(opts: { now?: Date; llm?: LlmProvider; stt?: SttProvider
   const lastText = (tgId: number) => tg.sent.filter((s) => s.chatId === BigInt(tgId)).at(-1)?.text ?? ''
   const textsTo = (tgId: number) => tg.sent.filter((s) => s.chatId === BigInt(tgId)).map((s) => s.text)
 
-  // Пройти знакомство: /start, пояс (сейчас 10:00 в Москве), время старта
-  // «по-разному», без ритуала.
-  async function onboard(tgId: number, localTime = '10:00') {
-    await text(tgId, '/start')
-    await text(tgId, localTime)
-    await press(tgId, 'onb::st_skip')
-    await press(tgId, 'skip::ritual')
+  // Backend fixtures are not evidence that the LLM understood onboarding.
+  // Real onboarding ingress is tested separately with explicit model responses.
+  async function setupOnboarded(tgId: number, localTime = '10:00') {
+    const user = await prisma.user.upsert({ where: { tgId: BigInt(tgId) }, create: { tgId: BigInt(tgId), createdAt: now }, update: {} })
+    const setup = { ...ctx, inputUserId: user.id, semanticRouterEnabled: true }
+    await account.beginOnboarding(setup, user)
+    await account.onTimezoneText(setup, { ...user, pendingInput: 'timezone' }, localTime)
+    await account.onOnboardingButton(setup, await prisma.user.findUniqueOrThrow({ where: { id: user.id } }), 'st_skip')
+    await account.onRitualText(setup, await prisma.user.findUniqueOrThrow({ where: { id: user.id } }), null)
   }
 
   return {
     ctx,
     tg,
     text,
+    textAs,
     press,
     voice,
     buttons,
     lastButton,
     lastText,
     textsTo,
-    onboard,
+    setupOnboarded,
     advance: (minutes: number) => {
       now = new Date(now.getTime() + minutes * 60_000)
     },
