@@ -47,7 +47,7 @@ async function snapshot(ctx: Ctx, userId: string, db: Ctx['db'] | Prisma.Transac
   const ownedTasks = [...relevant.sort((a, b) => relevantIds.indexOf(a.id) - relevantIds.indexOf(b.id)), ...pool.filter(t => !relevantIds.includes(t.id))].slice(0, 20)
   const labelledTasks = ownedTasks.map((task, i) => ({ ...task, label: `t${i + 1}` }))
   // Whole persisted state stays local. The model sees only a bounded projection.
-  const fingerprint = JSON.stringify({ user: user && { pendingInput: user.pendingInput, timezone: user.timezone, technique: user.technique, profileText: user.profileText }, active, last, report, ownedTasks })
+  const fingerprint = JSON.stringify({ user: user && { pendingInput: user.pendingInput, timezone: user.timezone, technique: user.technique, profileText: user.profileText, idleRestAt: user.idleRestAt, quietUntil: user.quietUntil }, active, last, report, ownedTasks })
   return { user, active, last, report, labelledTasks, fingerprint }
 }
 type Snapshot = Awaited<ReturnType<typeof snapshot>>
@@ -60,7 +60,9 @@ function allowedRoutes(s: Snapshot): SemanticRouteName[] {
   routes.push('break')
   if (s.active?.state === 'running') routes.push('session_help', 'end_session')
   if (s.active?.state === 'collecting_intent' && s.active.intentText && s.active.taskId) routes.push('intent_step')
-  if (s.active?.state === 'running' || s.active?.state === 'paused' || (!s.active && s.last?.intentText) || (s.active?.state === 'collecting_intent' && s.active.taskId)) routes.push('continue_same')
+  // Work intent is always available after onboarding, including an unnamed
+  // session that ended with the day. The model, not task presence, chooses it.
+  routes.push('continue_same')
   return routes
 }
 function sessionProjection(value: Snapshot['active'], pending: string, labelledTasks: Snapshot['labelledTasks']) {
@@ -81,7 +83,7 @@ export async function routeSemanticInput(ctx: Ctx, user: User, text: string, via
   const numbers = await taskNumberPrompt(ctx, user.id)
   const question = questionContext(user.id, before.user.pendingInput, ctx.now())
   const out = await parseSemanticRoute(ctx.llm, {
-    text, now: ctx.now().toISOString(), timezone: before.user.timezone, taskNumbers: numbers?.choices.flatMap(c => { const task = before.labelledTasks.find(t => t.id === c.task_id); return task ? [{ number: c.number, task: task.label, mode: c.mode }] : [] }), pending: pendingType(before.user.pendingInput), pendingAgeSeconds: question.ageSeconds,
+    text, now: ctx.now().toISOString(), timezone: before.user.timezone, idleRestAt: before.user.idleRestAt?.toISOString() ?? null, quietUntil: before.user.quietUntil?.toISOString() ?? null, taskNumbers: numbers?.choices.flatMap(c => { const task = before.labelledTasks.find(t => t.id === c.task_id); return task ? [{ number: c.number, task: task.label, mode: c.mode }] : [] }), pending: pendingType(before.user.pendingInput), pendingAgeSeconds: question.ageSeconds,
     session: sessionProjection(before.active, before.user.pendingInput, before.labelledTasks), lastSession: sessionProjection(before.last, before.user.pendingInput, before.labelledTasks), reportSession: sessionProjection(before.report, before.user.pendingInput, before.labelledTasks), lastQuestion: question.type,
     recentContext: recentConversationContext(user.id, ctx.now(), { beforeEventId: contextEventId }),
     tasks: before.labelledTasks.map(({ label, title, status }) => ({ label, title, status: status as 'active' | 'done' })),
@@ -261,7 +263,7 @@ async function dispatchRoute(ctx: Ctx, s: Snapshot, route: SemanticRoute, via: '
     } else {
       const source = s.active?.state === 'collecting_intent' ? s.active : s.last
       const task = s.labelledTasks.find((t) => t.id === source?.taskId && t.status === 'active')
-      if (!source?.intentText && !task) return reply(ctx, user, T.stale)
+      if (!source?.intentText && !task) return session.startUnassigned(ctx, user, { minutes: minutes ?? undefined, guard })
       await session.onIntentText(ctx, user, task?.title ?? source!.intentText!, { taskId: task?.id ?? null, title: task?.title ?? source!.intentText!, scope: source?.scope === 'multi_session' ? 'multi_session' : 'step', minutes, llmUsed: true })
     }
   }

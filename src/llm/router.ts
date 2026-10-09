@@ -57,6 +57,8 @@ export type SemanticRouteInput = {
   lastQuestion: string | null
   now?: string
   timezone?: string
+  idleRestAt?: string | null
+  quietUntil?: string | null
   taskNumbers?: readonly { number: number; task: string; mode: string }[]
   recentContext: readonly ConversationContextItem[]
   tasks: readonly { label: string; title: string; status?: 'active' | 'done' }[]
@@ -78,7 +80,7 @@ const SYSTEM = [
   'Если pending=ritual/profile_ritual, lastQuestion спрашивает ритуал и человек отвечает «налить воду», это answer_pending с answer:{kind:text,value:налить воду}. Если pending=timezone/settings_timezone/start_time/morning_time/meeting_time, соответствующее время — answer_pending/clock. Если ответ неясен, clarify с конкретным уточняющим вопросом; не создавай задачу.',
   'report — о фактически сделанном в подходящей прошлой сессии; new_task — новое намерение/название/старт. Отчёт добровольный. Не выводи outcome из догадок.',
   'continue_same — явно продолжить ту же работу; answer_pending — действительно ответ на последний вопрос (включая уточнение шага), не новая задача лишь потому, что есть pending.',
-  'В running/paused «ещё 15 минут поработаю», «продолжаю», «ещё поработаю» без новой задачи — continue_same, даже если нет названия работы. Названные минуты — будущий рабочий интервал, не отчёт и не allocations. Сохрани полную цитату с длительностью. Ответ на напоминание о продолжении/отдыхе не означает неоднозначность report/new_task.',
+  'При любом текущем режиме, в том числе после закрытия дня, во время отдыха без таймера или без предыдущей сессии, «ещё 15 минут поработаю», «продолжаю», «ещё поработаю» без новой задачи — continue_same, даже если нет названия работы. Названные минуты — будущий рабочий интервал, не отчёт и не allocations. Сохрани полную цитату с длительностью. Ответ на напоминание о продолжении/отдыхе не означает неоднозначность report/new_task. При session=null continue_same запускает новую рабочую сессию, без выдуманного названия задачи; отсутствие lastSession или его work/task не препятствует работе. idleRestAt — сохранённый отдых без таймера, quietUntil — отключение уведомлений, а не запрет человеку работать. Текущая реплика о работе отменяет прежнее намерение отдыхать, но не является просьбой снять отключение уведомлений.',
   'capture — явно сохранить задачи без старта; close_day — явно завершить рабочий день; session_help — отвлечение, застревание, вопрос или раннее завершение текущей работы.',
   'feedback — недовольство ответом или поведением бота, включая брань в адрес бота. Это не distracted/stuck, не задача и не ответ на pending. Верни {"route":"feedback","text":"...","followUp":null}, без действий и reply. Смешанную жалобу с действием не выполняй.',
   'Каждый вход уже является сообщением человека: даже slash-команда, текст кнопки, цифра, время или первое сообщение требуют твоего выбора. /status → control/status, /guide → control/guide; «Начать сессию», «начинаем работать», «запусти таймер» без названия новой задачи → control/focus (value=null), не control/start, не clarify и не answer_pending; конец дня → close_day; жалоба → feedback.',
@@ -156,7 +158,7 @@ export async function parseSemanticRoute(
     if (value.route === 'session_help' && ['other','pause','complete_and_rest'].includes(value.help.kind)) invalid()
   })
   const payload = JSON.stringify({
-    text: input.text, now: input.now, timezone: input.timezone, taskNumbers: input.taskNumbers,
+    text: input.text, now: input.now, timezone: input.timezone, idleRestAt: input.idleRestAt, quietUntil: input.quietUntil, taskNumbers: input.taskNumbers,
     pending: input.pending,
     pendingAgeSeconds: input.pendingAgeSeconds,
     session: input.session,

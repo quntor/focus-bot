@@ -578,8 +578,14 @@ export async function onStartButton(ctx: Ctx, user: User): Promise<void> {
 // Явный быстрый старт не наследует прошлую задачу: человек может сначала
 // включить обычный помидор, а назвать работу позже или распределить время в
 // отчёте. Общий таймер при этом запускается по обычным настройкам.
-export async function startUnassigned(ctx: Ctx, user: User): Promise<void> {
-  const session = await openCollecting(ctx, user.id)
+export async function startUnassigned(ctx: Ctx, user: User, options: { minutes?: number; guard?: (tx: Prisma.TransactionClient) => Promise<boolean> } = {}): Promise<void> {
+  // A model-selected start must recheck its no-active-work snapshot under the
+  // same owner lock as creation; stale replies cannot open a parallel session.
+  const session = options.guard ? await inputTransaction({ ...ctx, inputUserId: user.id }, async tx => {
+    if (!await options.guard!(tx)) throw new StaleTransition()
+    const existing = await tx.focusSession.findFirst({ where: { userId: user.id, state: { in: [...ACTIVE_STATES] } } })
+    return existing ?? tx.focusSession.create({ data: { userId: user.id, state: 'collecting_intent', createdAt: ctx.now() } })
+  }) : await openCollecting(ctx, user.id)
   if (session.state === 'running') return reply(ctx, user, T.alreadyRunning(endText(ctx, user, session)),session.reminderPolicy===1?quietKeyboard(user,ctx.now()):undefined)
   if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
   // Намерение уже написано и длина предложена — «Начать сессию» значит «Ок»,
@@ -588,7 +594,7 @@ export async function startUnassigned(ctx: Ctx, user: User): Promise<void> {
 
   const technique: Technique = isTechnique(user.technique) ? user.technique : 'auto'
   const minutes =
-    session.plannedMinutes ?? (technique === 'auto' ? proposeMinutes(await sessionHistory(ctx, user.id)) : PRESETS[technique].minutes)
+    options.minutes ?? session.plannedMinutes ?? (technique === 'auto' ? proposeMinutes(await sessionHistory(ctx, user.id)) : PRESETS[technique].minutes)
   const rest = technique === 'auto' ? restFor(minutes) : PRESETS[technique].rest
   const updated = await inputTransaction(ctx, (tx) => tx.focusSession.updateMany({
     where: { id: session.id, userId: user.id, state: 'collecting_intent' },
@@ -597,7 +603,7 @@ export async function startUnassigned(ctx: Ctx, user: User): Promise<void> {
       taskId: null,
       scope: 'step',
       plannedMinutes: minutes,
-      minutesSource: 'bot',
+      minutesSource: options.minutes === undefined ? 'bot' : 'user',
       plannedRestMinutes: rest,
       technique,
     },
@@ -979,8 +985,8 @@ export async function startRunning(ctx: Ctx, user: User, sessionId: string): Pro
   await reply(
     ctx,
     user,
-    T.started(minutes, rest, plannedEndAt ? hhmm(plannedEndAt, user.timezone) : null, session.intentText),
-    runningEditKeyboard(session.id),
+    T.started(minutes, rest, plannedEndAt ? hhmm(plannedEndAt, user.timezone) : null, session.intentText, user.quietUntil && user.quietUntil > now ? hhmm(user.quietUntil, user.timezone) : null),
+    user.quietUntil && user.quietUntil > now ? [...runningEditKeyboard(session.id), ...quietKeyboard(user, now)] : runningEditKeyboard(session.id),
   )
 }
 

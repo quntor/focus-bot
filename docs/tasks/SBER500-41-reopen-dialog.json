@@ -1,0 +1,39 @@
+{
+  "scenario": "stop day → work 30min without task",
+  "scope": "observed real webhook/DB execution, synthetic user/disposable DB/fakeTelegram/explicit validated model response; real-model recognition separately in model-proof",
+  "steps": [
+    {
+      "input": "Начать сессию",
+      "at": "2026-10-09T13:30:00.000Z",
+      "messages": [
+        "Сессия началась. 25 минут работы, потом 5 отдыха. Поехали — напишу в 16:55."
+      ]
+    },
+    {
+      "input": "Сегодня больше не беспокоить (кнопка)",
+      "at": "2026-10-09T15:00:00.000Z",
+      "messages": [
+        "За сегодня: 1 сессия.\nФактически в работе: 90 мин. Без привязки к задаче: 90 мин.\nСерия: 0 дней. Очки за сегодня: 0.\nЗа неделю: 0 очков.\nАктивных дней за последние 7: 0 из 7.\n\nНа сегодня остановились. Время сохранено без отметки о результате; напоминания выключены до полуночи."
+      ]
+    },
+    {
+      "input": "Ещё полчаса поработаю",
+      "at": "2026-10-09T15:00:00.000Z",
+      "messages": [
+        "Сессия началась. 30 минут работы, потом 5 отдыха. Таймер до 18:30; напоминания остаются выключены до 00:00."
+      ]
+    }
+  ],
+  "verified": {
+    "previousWorkMinutes": 90,
+    "previousWorkUnchanged": true,
+    "newWorkMinutes": 30,
+    "newEndAt": "2026-10-09T15:30:00.000Z",
+    "taskCount": 0,
+    "quietUntil": "2026-10-09T21:00:00.000Z",
+    "reminderChain": "work",
+    "firstDueAt": "2026-10-09T15:30:00.000Z"
+  },
+  "productionMutated": false,
+  "humanAcceptance": false
+}

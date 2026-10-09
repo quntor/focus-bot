@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeBot } from '../test/bot.js'
 import { hasDb, prisma, resetDb } from '../test/db.js'
 import { T } from './texts.js'
+import { cb } from './callbacks.js'
 import { routeSemanticInput } from './semantic-routing.js'
 import type { LlmRequest } from '../llm/provider.js'
 import type { Prisma } from '@prisma/client'
@@ -89,6 +90,74 @@ describe.skipIf(!hasDb)('every text is LLM-first', () => {
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).toMatchObject({ taskId: parent.id, intentText: 'Составить план', scope: 'multi_session', plannedMinutes: minutes, minutesSource: 'user' })
     expect(await prisma.task.count({ where: { userId: user.id } })).toBe(43)
     expect(await prisma.task.findUniqueOrThrow({ where: { id: parent.id } })).toMatchObject({ title: parent.title, sessionsCount: state === 'running' ? 1 : 0 })
+  })
+  it.each([
+    { history: 'unassigned', idle: false, minutes: 30, source: 'полчаса' },
+    { history: 'unassigned', idle: false, minutes: null, source: null },
+    { history: 'old', idle: false, minutes: 30, source: 'полчаса' },
+    { history: 'none', idle: true, minutes: 30, source: 'полчаса' },
+    { history: 'none', idle: false, minutes: 30, source: 'полчаса' },
+  ] as const)('LLM can start unassigned work after $history / idle=$idle / minutes=$minutes', async ({ history, idle, minutes, source }) => {
+    const text = minutes === null ? 'Ещё поработаю' : 'Ещё полчаса поработаю'
+    const bot = makeBot({ now: new Date('2026-10-09T15:01:34Z') })
+    bot.ctx.remindersEnabled = true
+    bot.ctx.reminderUserIds = [String(A)]
+    const quietUntil = new Date('2026-10-09T21:00:00Z')
+    const user = await prisma.user.create({ data: { tgId: BigInt(A), timezone: 'Europe/Moscow', technique: 'pomodoro', reminderPolicy: 1, quietUntil, idleRestAt: idle ? bot.now() : null } })
+    const previous = history === 'none' ? null : await prisma.focusSession.create({ data: {
+      userId: user.id, state: 'finished', reminderPolicy: 1, intentText: null, taskId: null,
+      startedAt: new Date(bot.now().getTime() - (history === 'old' ? 300 : 120) * 60_000), finishedAt: new Date(bot.now().getTime() - (history === 'old' ? 181 : 1) * 60_000), plannedMinutes: 90,
+    } })
+    const complete = vi.fn(async (request: LlmRequest) => {
+      const input = JSON.parse(request.input)
+      expect(input.text).toBe(text)
+      expect(input.session).toBeNull()
+      expect(input.allowedRoutes).toContain('continue_same')
+      expect(input.quietUntil).toBe(quietUntil.toISOString())
+      expect(input.idleRestAt).toBe(idle ? bot.now().toISOString() : null)
+      return { text: JSON.stringify({ route: 'continue_same', text, minutes, durationSource: source, followUp: null }), usage: null }
+    })
+    bot.ctx.llm = { enabled: true, model: 'test', complete }
+    await bot.text(A, text)
+    expect(complete).toHaveBeenCalledTimes(1)
+    const running = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })
+    expect(running).toMatchObject({ taskId: null, intentText: null, plannedMinutes: minutes ?? 25, minutesSource: minutes === null ? 'bot' : 'user', startedAt: bot.now(), plannedEndAt: new Date(bot.now().getTime() + (minutes ?? 25) * 60_000) })
+    expect(await prisma.task.count({ where: { userId: user.id } })).toBe(0)
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ idleRestAt: null, quietUntil, pendingInput: 'none' })
+    if (previous) expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: previous.id } })).toEqual(previous)
+    expect(await prisma.workPeriod.count({ where: { sessionId: running.id, endedAt: null } })).toBe(1)
+    expect(await prisma.reminderChain.findFirstOrThrow({ where: { userId: user.id, status: 'active' } })).toMatchObject({ kind: 'work', sessionId: running.id, firstDueAt: running.plannedEndAt })
+    expect(bot.textsTo(A)).toHaveLength(1)
+    expect(bot.lastText(A)).not.toContain('Отдыхай')
+    expect(bot.lastText(A)).toContain('напоминания остаются выключены')
+    expect(bot.lastText(A)).not.toContain('напишу в')
+  })
+  it('stop day → LLM-selected work starts a fresh thirty-minute timer without altering ninety minutes', async () => {
+    const bot = makeBot({ now: new Date('2026-10-09T13:30:00Z') })
+    bot.ctx.remindersEnabled = true
+    bot.ctx.reminderUserIds = [String(A)]
+    const user = await prisma.user.create({ data: { tgId: BigInt(A), timezone: 'Europe/Moscow', technique: 'pomodoro', reminderPolicy: 1 } })
+    await bot.textAs(A, 'Начать сессию', { route: 'control', text: 'Начать сессию', action: 'focus', value: null, followUp: null })
+    const original = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })
+    bot.advance(90)
+    await bot.press(A, cb('cycle', null, 'stop'))
+    expect(bot.lastText(A)).toContain('На сегодня остановились')
+    const saved = await prisma.focusSession.findUniqueOrThrow({ where: { id: original.id } })
+    const periods = await prisma.workPeriod.findMany({ where: { sessionId: original.id } })
+    expect(saved).toMatchObject({ state: 'finished', outcome: null, taskId: null })
+    expect(periods).toHaveLength(1)
+    expect((periods[0]!.endedAt!.getTime() - periods[0]!.startedAt.getTime()) / 60_000).toBe(90)
+    const text = 'Ещё полчаса поработаю'
+    await bot.textAs(A, text, { route: 'continue_same', text, minutes: 30, durationSource: 'полчаса', followUp: null })
+    const started = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })
+    expect(started).toMatchObject({ plannedMinutes: 30, minutesSource: 'user', taskId: null, intentText: null, startedAt: bot.now(), plannedEndAt: new Date(bot.now().getTime() + 30 * 60_000) })
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: original.id } })).toEqual(saved)
+    expect(await prisma.workPeriod.findMany({ where: { sessionId: original.id } })).toEqual(periods)
+    expect(await prisma.task.count({ where: { userId: user.id } })).toBe(0)
+    expect(bot.lastText(A)).toContain('30')
+    expect(bot.lastText(A)).not.toContain('Отдыхай')
+    expect(bot.lastText(A)).toContain('напоминания остаются выключены')
+    expect(bot.lastText(A)).not.toContain('напишу в')
   })
   it('a stale transactional snapshot closes neither the day nor the requested meeting', async () => {
     const text = 'Закрыть день и встретиться завтра в 10:00'

@@ -192,11 +192,11 @@ export const T = {
   longer: 'Длиннее',
   cancel: 'Отмена',
 
-  started: (minutes: number | null, rest: number, end: string | null, intent: string | null) => {
+  started: (minutes: number | null, rest: number, end: string | null, intent: string | null, quietUntil: string | null = null) => {
     const name = intent?.replace(/\s+/g, ' ').trim().slice(0, 80)
     const prefix = name ? `Сессия «${name}» началась.` : 'Сессия началась.'
     return minutes && end
-      ? `${prefix} ${capital(minutesText(minutes))} работы, потом ${rest} отдыха. Поехали — напишу в ${end}.`
+      ? `${prefix} ${capital(minutesText(minutes))} работы, потом ${rest} отдыха. ${quietUntil ? `Таймер до ${end}; напоминания остаются выключены до ${quietUntil}.` : `Поехали — напишу в ${end}.`}`
       : `${prefix} Работаем без таймера. Закончишь — /done.`
   },
   changeRunningWork: 'Изменить работу',

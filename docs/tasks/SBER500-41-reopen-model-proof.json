@@ -1,0 +1,74 @@
+{
+  "date": "2026-10-09",
+  "provider": "existing production provider, unchanged configuration",
+  "model": "gpt-5.4-mini",
+  "scope": "synthetic parser-only real API, no DB/executor/Telegram; old deployed prompt vs new local build",
+  "results": [
+    {
+      "name": "half_hour",
+      "variant": "old",
+      "ok": true,
+      "route": "break",
+      "minutes": 30,
+      "expected": "continue_same",
+      "pass": false,
+      "executor": false,
+      "database": false,
+      "telegram": false
+    },
+    {
+      "name": "half_hour",
+      "variant": "new",
+      "ok": true,
+      "route": "continue_same",
+      "minutes": 30,
+      "expected": "continue_same",
+      "pass": true,
+      "executor": false,
+      "database": false,
+      "telegram": false
+    },
+    {
+      "name": "work_no_duration",
+      "variant": "new",
+      "ok": true,
+      "route": "continue_same",
+      "minutes": null,
+      "expected": "continue_same",
+      "pass": true,
+      "executor": false,
+      "database": false,
+      "telegram": false
+    },
+    {
+      "name": "rest",
+      "variant": "new",
+      "ok": true,
+      "route": "break",
+      "minutes": 30,
+      "expected": "break",
+      "pass": true,
+      "executor": false,
+      "database": false,
+      "telegram": false
+    },
+    {
+      "name": "feedback",
+      "variant": "new",
+      "ok": true,
+      "route": "feedback",
+      "minutes": null,
+      "expected": "feedback",
+      "pass": true,
+      "executor": false,
+      "database": false,
+      "telegram": false
+    }
+  ],
+  "production_read_only_event": {
+    "at": "2026-10-09T15:00:28.211Z",
+    "route": "break",
+    "pending": "none"
+  },
+  "limitations": "one sample per case; not human acceptance or deployed fix"
+}
