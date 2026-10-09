@@ -14,6 +14,11 @@ const provider = (answer: unknown, observe?: (request: LlmRequest) => void): Llm
 })
 
 describe('bounded reminder generation', () => {
+  it.each(['Доброе утро! Сегодня работа или выходной?', 'Привет, сегодня работа или выходной?'])('rejects standard greeting: %s', async text => {
+    const result = await generateReminder(provider({ text, taskId: null }), { ...context, phase: 'morning' })
+    expect(result.provenance).toBe('fallback')
+    expect(result.result.text).not.toMatch(/Доброе утро|Привет/)
+  })
   it.each(['morning', 'work', 'break', 'post_rest'] as ReminderPhase[])('disabled %s returns neutral deterministic text without a call', async (phase) => {
     const meter = vi.fn(async (_meta: CallMeta) => {})
     const outcome = await generateReminder(disabledProvider, { ...context, phase }, meter)

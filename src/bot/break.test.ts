@@ -287,7 +287,7 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
     ).toEqual([])
     const next = await prisma.focusSession.findFirstOrThrow({ where: { userId: old.userId, state: 'running' } })
     expect(next).toMatchObject({ intentText: null, taskId: null, plannedMinutes: 40 })
-    expect(bot.lastText(A)).toContain('Таймер уже идёт')
+    expect(bot.lastText(A)).toContain('Сессия началась')
 
     const finished = await prisma.event.findFirstOrThrow({ where: { sessionId: old.id, type: 'session_auto_finished' } })
     expect(finished.payload).toMatchObject({ session_id: old.id, elapsed_minutes: 10, counted: true, reason: 'new_session' })
@@ -353,7 +353,7 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
       await runOutboxOnce(bot.ctx)
       await sweepOnce(bot.ctx)
     }
-    expect(bot.tg.sent.slice(before).filter((m) => m.text.includes('Пора работать')).length).toBeGreaterThanOrEqual(2)
+    expect(bot.tg.sent.slice(before).filter((m) => m.text.includes('Готов начать?')).length).toBeGreaterThanOrEqual(2)
   })
 
   it('вечерняя сводка на перерыве не пишет «сессий не было»', async () => {
@@ -362,7 +362,10 @@ describe.skipIf(!hasDb)('постоянные кнопки и перерыв', (
     await bot.textAs(A, 'Начать сессию', {"text":"Начать сессию","route":"control","action":"focus","value":null,"followUp":null})
     bot.advance(20)
     await bot.textAs(A, 'Перерыв', {"text":"Перерыв","route":"break","minutes":null,"durationSource":null,"followUp":null})
-    bot.advance(15)
+    bot.advance(10) // 21:00 — согласованное время сводки
+    // Сводка не перебивает незаконченный вопрос об исходе.
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    await prisma.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
 
     await runOutboxOnce(bot.ctx)
 

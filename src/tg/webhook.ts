@@ -174,7 +174,9 @@ async function onCommand(ctx: Ctx, user: User, command: string, args: string, cr
     await logEvent(ctx.db, user.id, 'bot_started', { source: user.source, returning: !created }, { at: now })
     if (['timezone', 'start_time', 'ritual'].includes(user.pendingInput)) return account.resumeOnboarding(ctx, user)
     if (created || await ctx.db.focusSession.count({ where: { userId: user.id } }) === 0) return account.beginOnboarding(ctx, user)
-    return session.askIntent(ctx, user, { prefix: T.welcomeBack })
+    // Знакомому пользователю start тоже запускает работу: повторная вводная
+    // не должна задерживать таймер, если модель выбрала start вместо focus.
+    return tasks.onSessionStart(ctx, user)
   }
   if (command === 'delete_me') return account.askDelete(ctx, user)
   if (created) return account.beginOnboarding(ctx, user)

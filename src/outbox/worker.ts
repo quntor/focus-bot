@@ -4,10 +4,11 @@ import { logEvent } from '../analytics/log.js'
 import { log } from '../lib/log.js'
 import { localHour } from '../lib/time.js'
 import { cb } from '../bot/callbacks.js'
-import { markBlocked, type Ctx } from '../bot/context.js'
-import { rememberConversationContext } from '../bot/conversation-context.js'
+import { type Ctx } from '../bot/context.js'
+import { rememberConversationContext, rememberQuestion } from '../bot/conversation-context.js'
+import { hasDecision, morningResolved } from '../bot/message-policy.js'
 import { buildSummary, declineKeyboard, DECLINES_BEFORE_ASK, ensureNextMeeting, reminderKeyboard } from '../bot/day-flow.js'
-import { autoFinish, deadlineKeyboard, openCollecting } from '../bot/session-flow.js'
+import { autoFinish, deadlineKeyboard } from '../bot/session-flow.js'
 import { buildTaskStartPrompt } from '../bot/tasks.js'
 import { rememberTaskNumberPrompt } from '../bot/task-number-prompt.js'
 import { T } from '../bot/texts.js'
@@ -73,7 +74,7 @@ async function countSilentDecline(ctx: Ctx, user: User): Promise<number> {
   })
 }
 
-async function renderReminder(ctx: Ctx, user: User, text: string, keyboard: Keyboard, openSession: boolean): Promise<Render> {
+async function renderReminder(ctx: Ctx, user: User, text: string, keyboard: Keyboard): Promise<Render> {
   const declines = await countSilentDecline(ctx, user)
   if (declines >= DECLINES_BEFORE_ASK) {
     return {
@@ -91,10 +92,8 @@ async function renderReminder(ctx: Ctx, user: User, text: string, keyboard: Keyb
   return {
     text,
     keyboard,
-    after: async () => {
-      // Вопрос «с чего начнёшь» открывает сессию, чтобы ответ текстом лёг в неё.
-      if (openSession) await openCollecting(ctx, user.id)
-    },
+    // An invitation is not confirmed intent. It must not create a session
+    // or capture the next unrelated reply as a task.
   }
 }
 
@@ -175,8 +174,8 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User, ownerTx?: Prisma.T
   if (m.kind === 'rest_over') {
     const sessionId = String(p.sessionId ?? '')
     const session = await ctx.db.focusSession.findFirst({ where: { id: sessionId, userId: user.id } })
-    if (!session || (session.restChoice !== null && session.restChoice !== 'rest')) return { skip: true }
-    const active = await ctx.db.focusSession.count({ where: { userId: user.id, state: { in: ['running', 'paused'] } } })
+    if (!session || session.restChoice !== 'rest' || user.idleRestAt) return { skip: true }
+    const active = await ctx.db.focusSession.count({ where: { userId: user.id, state: { in: ['collecting_intent', 'running', 'paused'] } } })
     if (active > 0) return { skip: true }
     if (user.reminderPolicy === 1) return {
       text: T.restOver, keyboard: reminderKeyboard(), after: async (tx) => {
@@ -184,7 +183,7 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User, ownerTx?: Prisma.T
         await ensureNextMeeting(tx, user, now)
       },
     }
-    const r = await renderReminder(ctx, user, T.restOver, reminderKeyboard(), true)
+    const r = await renderReminder(ctx, user, T.restOver, reminderKeyboard())
     return withEvent(r, async (tx) => {
       await logEvent(tx, user.id, 'rest_over_sent', { session_id: sessionId }, { at: now, sessionId })
       await ensureNextMeeting(tx, user, now)
@@ -219,12 +218,12 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User, ownerTx?: Prisma.T
 
   if (m.kind === 'meeting') {
     if (p.defaulted === true && !user.proactive) return { skip: true }
-    const active = await ctx.db.focusSession.count({ where: { userId: user.id, state: { in: ['running', 'paused'] } } })
+    const active = await ctx.db.focusSession.count({ where: { userId: user.id, state: { in: ['collecting_intent', 'running', 'paused'] } } })
     if (active > 0) return { skip: true }
     if (user.reminderPolicy === 1) {
       // Migrated mornings use the persisted chain. Explicit meetings ask only:
       // no silent-decline mutation, collecting session, or pending-input reset.
-      if (p.defaulted === true || p.morning === true) return { skip: true }
+      if (p.defaulted === true) return { skip: true }
       return { text: T.meetingPlain, keyboard: reminderKeyboard(), after: async (tx) => {
         await logEvent(tx, user.id, 'meeting_sent', {}, { at: now })
         await ensureNextMeeting(tx, user, now)
@@ -240,8 +239,8 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User, ownerTx?: Prisma.T
     ]
     const morningKeyboard = taskPrompt ? [...taskPrompt.keyboard, ...quickKeyboard] : quickKeyboard
     const r = p.morning === true
-      ? await renderReminder(ctx, user, taskPrompt?.text ?? T.morningNoTasks(hour), morningKeyboard, true)
-      : await renderReminder(ctx, user, T.meetingPlain, reminderKeyboard(), true)
+      ? await renderReminder(ctx, user, taskPrompt?.text ?? T.morningNoTasks(hour), morningKeyboard)
+      : await renderReminder(ctx, user, T.meetingPlain, reminderKeyboard())
     return withEvent(r, async (tx) => {
       await tx.user.updateMany({
         where: { id: user.id, pendingInput: { in: ['meeting_time', 'meeting_time_soft'] } },
@@ -260,6 +259,9 @@ async function render(ctx: Ctx, m: OutboxMessage, user: User, ownerTx?: Prisma.T
     const goal = await ctx.db.dailyGoal.findUnique({ where: { userId_dayKey: { userId: user.id, dayKey: day } } })
     if (goal?.summarySentAt) return { skip: true }
     const summary = await buildSummary(ctx.db, user, day, now)
+    // A day spent in explicitly chosen idle rest has nothing to report unless
+    // actual work or an agreed goal makes this summary meaningful.
+    if (user.idleRestAt && summary.sessions === 0 && summary.abandoned === 0 && !summary.inProgress && summary.target === null) return { skip: true }
     return {
       text: T.summary(summary, day === workDayKey(now, user.timezone) ? undefined : day),
       keyboard: [[{ text: T.closeDay, data: cb('sum', null, day.replace(/-/g, '')) }]],
@@ -295,7 +297,7 @@ async function finish(ctx: Ctx, id: string, data: Prisma.OutboxMessageUpdateInpu
 }
 
 function legacyFingerprint(user: User): string {
-  return JSON.stringify([user.pendingInput, user.lastUserActionAt, user.timezone, user.morningTime, user.eveningTime, user.quietUntil, user.proactive, user.pingsEnabled, user.reminderPolicy])
+  return JSON.stringify([user.pendingInput, user.lastUserActionAt, user.timezone, user.morningTime, user.eveningTime, user.quietUntil, user.idleRestAt, user.proactive, user.pingsEnabled, user.reminderPolicy])
 }
 
 async function legacySessionFingerprint(db: Prisma.TransactionClient, m: OutboxMessage): Promise<string> {
@@ -311,11 +313,22 @@ async function legacyEligibility(tx: Prisma.TransactionClient, ctx: Ctx, m: Outb
     const session = await tx.focusSession.findFirst({ where: { id: String(p.sessionId ?? ''), userId: user.id } })
     if (!session || session.reminderPolicy === 1) return 'skip'
   }
-  if (m.kind === 'meeting' && (p.defaulted === true || p.morning === true)) return 'skip'
-  if (!ctx.remindersEnabled) return new Date(ctx.now().getTime() + 60 * MIN)
-  const permitted = m.kind === 'summary' ? summaryAllowedAt(user, ctx.now()) : allowedAt(user, { nightUntil: null }, ctx.now())
-  if (!permitted) return new Date(ctx.now().getTime() + 60 * MIN)
-  if (permitted > ctx.now()) return permitted
+  if (m.kind === 'rest_over' && user.idleRestAt) return 'skip'
+  if ((m.kind === 'ping' || m.kind === 'rest_over') && hasDecision(user)) return new Date(ctx.now().getTime() + MIN)
+  if (m.kind === 'meeting') {
+    if (user.reminderPolicy === 1 && (p.defaulted === true)) return 'skip'
+    if (p.defaulted === true && (!user.proactive || user.idleRestAt || await morningResolved(tx, user, ctx.now()))) return 'skip'
+    if (await tx.focusSession.count({ where: { userId: user.id, state: { in: ['collecting_intent', 'running', 'paused'] } } })) return 'skip'
+  }
+  if (user.reminderPolicy === 1 && !ctx.remindersEnabled) return new Date(ctx.now().getTime() + 60 * MIN)
+  // Explicit legacy timers keep their accepted deadline, including at night.
+  // Quiet applies to every mode; work windows apply to unsolicited messages.
+  if (user.quietUntil && user.quietUntil > ctx.now()) return user.quietUntil
+  if (m.kind === 'summary' || m.kind === 'meeting' && p.defaulted === true || user.reminderPolicy === 1 && m.kind !== 'meeting') {
+    const permitted = m.kind === 'summary' ? summaryAllowedAt(user, ctx.now()) : allowedAt(user, { nightUntil: null }, ctx.now())
+    if (!permitted) return new Date(ctx.now().getTime() + 60 * MIN)
+    if (permitted > ctx.now()) return permitted
+  }
   if (m.kind === 'summary' || m.kind === 'meeting') {
     if (!user.proactive && m.kind === 'summary') return 'skip'
     if (m.kind === 'summary') {
@@ -325,7 +338,7 @@ async function legacyEligibility(tx: Prisma.TransactionClient, ctx: Ctx, m: Outb
       if (summaries.some((entry) => String((entry.payload as Record<string, unknown> | null)?.dayKey ?? '') > day)) return 'skip'
       if (summaries.some((entry) => entry.sentAt && entry.sentAt.getTime() > ctx.now().getTime() - MIN)) return new Date(ctx.now().getTime() + MIN)
     }
-    if (user.pendingInput !== 'none') return new Date(ctx.now().getTime() + MIN)
+    if (hasDecision(user)) return new Date(ctx.now().getTime() + MIN)
     const primary = await tx.reminderChain.findFirst({ where: { userId: user.id, status: 'active' } })
     // A primary question due now or just delivered owns this turn. Do not
     // suppress a summary indefinitely merely because work has a future timer.
@@ -416,7 +429,12 @@ async function deliverMigratedLegacy(ctx: Ctx, claimed: OutboxMessage): Promise<
     }
     await tx.user.updateMany({ where: { id: claimed.userId, sendGateToken: token }, data: { sendGateToken: null, sendGateUntil: null } })
   })
-  if (error === undefined) await rememberTaskNumberPrompt(ctx, claimed.userId, msg.text, msg.keyboard)
+  if (error === undefined) {
+    rememberConversationContext(claimed.userId, 'assistant', msg.text, ctx.now())
+    const user = await ctx.db.user.findUnique({ where: { id: claimed.userId } })
+    if (user) rememberQuestion(user.id, user.pendingInput, ctx.now(), `outbox_${claimed.kind}`)
+    await rememberTaskNumberPrompt(ctx, claimed.userId, msg.text, msg.keyboard)
+  }
 }
 
 async function recoverMigratedLegacy(ctx: Ctx, claimed: OutboxMessage): Promise<void> {
@@ -433,61 +451,8 @@ async function deliver(ctx: Ctx, m: OutboxMessage): Promise<void> {
   if (m.kind === 'reminder') return deliverReminder(ctx, m)
   const user = await ctx.db.user.findUnique({ where: { id: m.userId } })
   if (!user || user.blockedAt) return finish(ctx, m.id, { status: 'skipped' })
-  if (user.reminderPolicy === 1) return deliverMigratedLegacy(ctx, m)
-
-  let rendered: Render
-  try {
-    rendered = await render(ctx, m, user)
-  } catch (error) {
-    log.error('outbox_render_failed', error, { kind: m.kind })
-    return finish(ctx, m.id, { status: 'failed', lastError: 'render' })
-  }
-  if ('skip' in rendered) return finish(ctx, m.id, { status: 'skipped' })
-  const msg = 'replace' in rendered ? rendered.replace : rendered
-
-  // A manual new-policy start may have migrated the owner during legacy
-  // rendering. Discard the old turn and let the fenced path revalidate it.
-  const fresh = await ctx.db.user.findUnique({ where: { id: m.userId } })
-  if (fresh?.reminderPolicy === 1) return deliverMigratedLegacy(ctx, m)
-
-  try {
-    await ctx.tg.send(user.tgId, msg.text, msg.keyboard)
-  } catch (error) {
-    return onSendError(ctx, m, error)
-  }
-
-  // Отметка об отправке и всё, что из неё следует, — одной транзакцией.
-  await ctx.db.$transaction(async (tx) => {
-    const marked = await tx.outboxMessage.updateMany({ where: { id: m.id, status: 'sending', lockedUntil: m.lockedUntil }, data: { status: 'sent', sentAt: ctx.now(), lockedUntil: null } })
-    const owner = await tx.user.findUnique({ where: { id: m.userId }, select: { reminderPolicy: true } })
-    if (marked.count === 1 && owner?.reminderPolicy !== 1) await msg.after?.(tx)
-  })
-  rememberConversationContext(user.id, 'assistant', msg.text, ctx.now())
-  await rememberTaskNumberPrompt(ctx, user.id, msg.text, msg.keyboard)
-}
-
-// Классификация ошибок. Повторяем только то, что точно не ушло в Telegram:
-// дубль сообщения хуже потерянного, а ключа идемпотентности у sendMessage нет.
-async function onSendError(ctx: Ctx, m: OutboxMessage, error: unknown): Promise<void> {
-  const now = ctx.now()
-  if (error instanceof TelegramError) {
-    if (error.code === 403) {
-      await finish(ctx, m.id, { status: 'failed', lastError: '403' })
-      return markBlocked(ctx, m.userId)
-    }
-    if (error.code === 429) {
-      const wait = (error.retryAfterSec ?? 30) * 1000
-      return finish(ctx, m.id, { status: 'pending', sendAfter: new Date(now.getTime() + wait), lastError: '429' })
-    }
-    return finish(ctx, m.id, { status: 'failed', lastError: String(error.code ?? 'telegram') })
-  }
-  if (error instanceof DeliveryError && !error.maybeSent) {
-    if (m.attempts >= MAX_ATTEMPTS) return finish(ctx, m.id, { status: 'failed', lastError: error.code })
-    return finish(ctx, m.id, { status: 'pending', sendAfter: new Date(now.getTime() + 30_000 * m.attempts), lastError: error.code })
-  }
-  // Запрос ушёл, ответа нет. Не переотправляем, но записываем, чтобы потери
-  // было видно в дашборде.
-  await markUncertain(ctx, m, error instanceof DeliveryError ? error.code : 'unknown')
+  // Every policy shares the owner-locked, fresh-state send gate.
+  return deliverMigratedLegacy(ctx, m)
 }
 
 async function markUncertain(ctx: Ctx, m: OutboxMessage, code: string): Promise<void> {

@@ -12,6 +12,8 @@ function elapsed(start: Date, now: Date): string {
 export async function showStatus(ctx: Ctx, user: User): Promise<void> {
   const now = ctx.now()
   const text = await ctx.db.$transaction(async (tx) => {
+    const fresh = await tx.user.findUniqueOrThrow({ where: { id: user.id } })
+    if (fresh.idleRestAt) return `${T.statusRest}\n${T.statusElapsed(elapsed(fresh.idleRestAt, now))}\nБез таймера; автоматических приглашений к работе нет.`
     const active = await tx.focusSession.findFirst({
       where: { userId: user.id, state: { in: ['running', 'paused', 'collecting_intent'] } },
       orderBy: { createdAt: 'desc' }, include: { task: true },

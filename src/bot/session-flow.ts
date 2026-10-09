@@ -1,6 +1,6 @@
 import { requireActiveTask } from './task-tree.js'
 import { onReminderAction, quietKeyboard } from '../reminders/actions.js'
-import { cancelPrimary, lockUser } from '../reminders/store.js'
+import { cancelChain, cancelPrimary, lockUser } from '../reminders/store.js'
 import { closePeriod, projectAllocations } from '../reminders/accounting.js'
 import { inputTransaction, currentInputTransaction, assertCurrentInput } from './input-lock.js'
 import { randomBytes } from 'node:crypto'
@@ -953,7 +953,7 @@ export async function startRunning(ctx: Ctx, user: User, sessionId: string): Pro
       await cancelPending(tx, { userId: user.id, kind: 'meeting', sendAfter: { lte: new Date(now.getTime() + 3 * 60 * MIN) } })
       // Старт — новое действие: отложенный отчёт прошлой сессии, время встречи,
       // правка профиля или задачи больше не ждут ответа.
-      await tx.user.update({ where: { id: user.id }, data: { declinesInRow: 0, pendingInput: 'none' } })
+      await tx.user.update({ where: { id: user.id }, data: { declinesInRow: 0, pendingInput: 'none', idleRestAt: null } })
       await scheduleSummary(tx, user, now)
       await logEvent(
         tx,
@@ -1819,12 +1819,22 @@ export async function onRest(
 export async function onBreak(ctx: Ctx, user: User, restMinutes?: number, basis: 'total' | 'from_now' = 'total'): Promise<void> {
   const now = ctx.now()
   const session = await activeSession(ctx, user.id)
-  if (!session) return reply(ctx, user, T.restingIdle)
-  if (session.state === 'collecting_intent') {
+  if (!session || session.state === 'collecting_intent') {
     await inputTransaction(ctx, async (tx) => {
-      await transition(tx, { sessionId: session.id, userId: user.id }, 'collecting_intent', 'cancelled', { finishedAt: now })
-      await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
-      await logEvent(tx, user.id, 'session_cancelled', {}, { at: now, sessionId: session.id })
+      const current = await tx.focusSession.findFirst({ where: { userId: user.id, state: { in: ['collecting_intent', 'running', 'paused'] } } })
+      if (current?.id !== session?.id || current?.state !== session?.state) throw new StaleTransition()
+      const freshUser = await tx.user.findUniqueOrThrow({ where: { id: user.id } })
+      if (session) {
+        await transition(tx, { sessionId: session.id, userId: user.id }, 'collecting_intent', 'cancelled', { finishedAt: now })
+        await logEvent(tx, user.id, 'session_cancelled', {}, { at: now, sessionId: session.id })
+      }
+      await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'none', idleRestAt: freshUser.idleRestAt ?? now } })
+      const invitations = await tx.reminderChain.findMany({ where: { userId: user.id, status: 'active', kind: { in: ['morning', 'post_rest'] } } })
+      for (const chain of invitations) await cancelChain(tx, chain.id)
+      await tx.outboxMessage.updateMany({ where: { userId: user.id, status: { in: ['pending', 'paused', 'sending'] }, OR: [
+        { kind: 'meeting', payload: { path: ['defaulted'], equals: true } },
+        { kind: 'rest_over' }, { kind: 'break_over' },
+      ] }, data: { status: 'canceled' } })
     })
     return reply(ctx, user, T.restingIdle)
   }

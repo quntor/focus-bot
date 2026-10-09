@@ -7,7 +7,8 @@ import { llmMeter } from '../analytics/calls.js'
 import { logEvent } from '../analytics/log.js'
 import type { EventPayload } from '../analytics/payloads.js'
 import { dayKey } from '../lib/day.js'
-import { fallbackReminder, generateReminder, type ReminderContext, type ReminderPhase } from '../llm/reminder.js'
+import { fallbackReminder, generateReminder, hasGreeting, type ReminderContext, type ReminderPhase } from '../llm/reminder.js'
+import { morningResolved, hasDecision } from '../bot/message-policy.js'
 import { DeliveryError, TelegramError, type Keyboard } from '../tg/client.js'
 import { allowedAt } from './cadence.js'
 import { advance, cancelChain, lockUser } from './store.js'
@@ -35,10 +36,10 @@ async function snapshot(tx: Tx, m: OutboxMessage, now: Date) {
   const plan = await tx.calendarPlan.findUnique({ where: { userId_localDate: { userId: user.id, localDate } } })
   const active = await tx.focusSession.findFirst({ where: { userId: user.id, state: { in: ['running', 'paused', 'collecting_intent'] } } })
   const session = chain.sessionId ? await tx.focusSession.findFirst({ where: { id: chain.sessionId, userId: user.id } }) : null
-  if (phase === 'morning' && (chain.localDate !== localDate || plan || active)) return null
+  if (phase === 'morning' && (chain.localDate !== localDate || plan || active || user.idleRestAt || hasDecision(user) || await morningResolved(tx, user, now))) return null
   if (phase === 'work' && (!session || session.state !== 'running' || session.plannedMinutes === null)) return null
   if (phase === 'break' && (!session || session.state !== 'paused')) return null
-  if (phase === 'post_rest' && (active || !session || session.state !== 'finished' || session.restChoice !== 'rest')) return null
+  if (phase === 'post_rest' && (active || user.idleRestAt || !session || session.state !== 'finished' || session.restChoice !== 'rest')) return null
   const tasks = await tx.task.findMany({ where: { userId: user.id, status: 'active' }, orderBy: [{ lastSessionAt: 'desc' }, { id: 'asc' }], take: 3, select: { id: true, title: true } })
   const current = session?.taskId ? await tx.task.findFirst({ where: { id: session.taskId, userId: user.id }, select: { id: true, title: true, status: true } }) : null
   const previous = await tx.outboxMessage.findFirst({ where: { userId: user.id, chainId: chain.id, id: { not: m.id }, status: { in: ['sent', 'uncertain'] }, generatedText: { not: null } }, orderBy: [{ ordinal: 'desc' }, { createdAt: 'desc' }], select: { generatedText: true } })
@@ -55,6 +56,9 @@ async function snapshot(tx: Tx, m: OutboxMessage, now: Date) {
 
 function deferAt(user: User, chain: ReminderChain, now: Date): Date | null {
   if (user.blockedAt || user.reminderPolicy === 0) return null
+  // Keep the timer/slot, but do not put another decision over an unfinished
+  // task edit, profile, report or duration question. Revalidate on retry.
+  if (hasDecision(user)) return new Date(now.getTime() + 60_000)
   // The legacy midpoint toggle must not swallow the first timer deadline.
   // Later checks remain optional; quiet/window/global guards still apply below.
   const checksDisabled = chain.kind === 'morning' || chain.kind === 'post_rest'
@@ -97,8 +101,8 @@ export async function deliverReminder(ctx: Ctx, claimed: OutboxMessage): Promise
     const due = ctx.remindersEnabled ? deferAt(state.user, state.chain, ctx.now()) : new Date(ctx.now().getTime() + 60 * 60_000)
     if (!due) { await cancelChain(tx, state.chain.id); await deliveryEvent(tx, m, 'blocked', ctx.now()); return null }
     if (due > ctx.now()) { await tx.outboxMessage.update({ where: { id: m.id }, data: { status: 'pending', sendAfter: due, lockedUntil: null } }); await deliveryEvent(tx, m, state.user.quietUntil && state.user.quietUntil > ctx.now() ? 'quiet' : 'window', ctx.now()); return null }
-    const uncertainGeneration = m.generationStatus === 'started' || m.generationStatus === 'uncertain' || Boolean(m.generatedText && m.contextFingerprint !== state.fingerprint)
-    const cached = m.generatedText && m.contextFingerprint === state.fingerprint ? m.generatedText : null
+    const uncertainGeneration = m.generationStatus === 'started' || m.generationStatus === 'uncertain' || Boolean(m.generatedText && (m.contextFingerprint !== state.fingerprint || hasGreeting(m.generatedText)))
+    const cached = m.generatedText && m.contextFingerprint === state.fingerprint && !hasGreeting(m.generatedText) ? m.generatedText : null
     await tx.outboxMessage.update({ where: { id: m.id }, data: { generationToken: token, generationStatus: cached ? 'ready' : uncertainGeneration ? 'uncertain' : 'started' } })
     return { ...state, cached, uncertainGeneration }
   })

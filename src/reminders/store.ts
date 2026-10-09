@@ -1,9 +1,10 @@
 import type { Prisma, ReminderChain, FocusSession, User } from '@prisma/client'
 import type { Ctx } from '../bot/context.js'
 import { logEvent } from '../analytics/log.js'
-import { dayKey } from '../lib/day.js'
-import { nextLocalTime, parseClock } from '../lib/time.js'
+import { addDays, dayKey } from '../lib/day.js'
+import { localDateTime, nextLocalTime, parseClock } from '../lib/time.js'
 import { allowedAt, MIN, nightAllowance, repeatMinutes, type Phase } from './cadence.js'
+import { morningResolved, hasDecision } from '../bot/message-policy.js'
 export async function lockUser(tx: Prisma.TransactionClient, id: string): Promise<void> {
   await tx.$queryRaw`SELECT id FROM users WHERE id = ${id} FOR UPDATE`
 }
@@ -36,9 +37,12 @@ export async function resetChain(tx: Prisma.TransactionClient, chain: ReminderCh
   await slot(tx,next);await logEvent(tx,chain.userId,'reminder_chain_changed',{chain_id:next.id,kind:next.kind as Phase,revision:next.revision,reason:'cadence',interval_minutes:interval,next_due_ms:next.nextDueAt.getTime()},{at:now,sessionId:next.sessionId??undefined});return next
 }
 export async function advance(tx: Prisma.TransactionClient, chain: ReminderChain, anchor: Date): Promise<void> {
+  const user = chain.kind === 'morning' ? await tx.user.findUniqueOrThrow({ where: { id: chain.userId } }) : null
+  const due = user ? nextLocalTime(user.timezone, parseClock(user.morningTime)!, anchor)
+    : new Date(anchor.getTime()+repeatMinutes(chain.kind,chain.intervalMinutes,chain.restStep)*MIN)
   const next = await tx.reminderChain.updateMany({where:{id:chain.id,revision:chain.revision,status:'active',ordinal:chain.ordinal},data:{
     ordinal:{increment:1},restStep:chain.kind==='break'||chain.kind==='post_rest'?{increment:1}:chain.restStep,
-    deliveryAnchorAt:anchor,nextDueAt:new Date(anchor.getTime()+repeatMinutes(chain.kind,chain.intervalMinutes,chain.restStep)*MIN)}})
+    deliveryAnchorAt:anchor,nextDueAt:due}})
   if(next.count) await slot(tx,await tx.reminderChain.findUniqueOrThrow({where:{id:chain.id}}))
 }
 export async function answerPlan(tx: Prisma.TransactionClient,user: User,now: Date,answer: 'work'|'off',source: string): Promise<void> {
@@ -47,13 +51,15 @@ export async function answerPlan(tx: Prisma.TransactionClient,user: User,now: Da
 }
 export async function ensureMorning(tx: Prisma.TransactionClient,user: User,now: Date): Promise<void> {
   await lockUser(tx,user.id)
-  if(user.reminderPolicy!==1||!user.proactive||user.blockedAt||['timezone','start_time','ritual'].includes(user.pendingInput)) return
+  if(user.reminderPolicy!==1||!user.proactive||user.blockedAt||user.idleRestAt||hasDecision(user)) return
   if(await tx.reminderChain.count({where:{userId:user.id,status:'active'}})) return
   if(await tx.focusSession.count({where:{userId:user.id,state:{in:['running','paused','collecting_intent']}}})) return
-  const date=dayKey(now,user.timezone), plan=await tx.calendarPlan.findUnique({where:{userId_localDate:{userId:user.id,localDate:date}}})
+  // A human appointment owns the next invitation, not a competing morning.
+  if(await tx.outboxMessage.count({where:{userId:user.id,kind:'meeting',status:{in:['pending','paused','sending']},payload:{path:['defaulted'],equals:false}}})) return
+  const resolved=await morningResolved(tx,user,now)
   const permitted=allowedAt(user,{nightUntil:null},now)
   if(!permitted) return
-  const due=plan?nextLocalTime(user.timezone,parseClock(user.morningTime)!,now):permitted
+  const due=resolved?localDateTime(user.timezone,addDays(dayKey(now,user.timezone),1),parseClock(user.morningTime)!):permitted
   const off=await tx.dayOff.findUnique({where:{userId_dayKey:{userId:user.id,dayKey:dayKey(due,user.timezone)}}})
   const at=off?nextLocalTime(user.timezone,parseClock(user.morningTime)!,due):due
   await replaceChain(tx,user,'morning',null,now,60,{due:at,localDate:dayKey(at,user.timezone)})
@@ -70,8 +76,15 @@ export async function reconcile(ctx: Ctx): Promise<void> {
     let c=await tx.reminderChain.findFirst({where:{userId:user.id,status:'active'}})
     if(c){
       const s=c.sessionId?await tx.focusSession.findUnique({where:{id:c.sessionId}}):null
-      if(c.kind==='morning'&&(c.localDate!==dayKey(now,user.timezone)&&c.nextDueAt<=now||await tx.focusSession.count({where:{userId:user.id,state:{in:['running','paused','collecting_intent']}}}))) {await cancelChain(tx,c.id);c=null}
-      else if((c.kind==='work'&&s?.state!=='running')||(c.kind==='break'&&s?.state!=='paused')||(c.kind==='post_rest'&&await tx.focusSession.count({where:{userId:user.id,state:{in:['running','paused']}}}))){await cancelChain(tx,c.id);c=null}
+      const active = await tx.focusSession.count({ where: { userId: user.id, state: { in: ['running', 'paused', 'collecting_intent'] } } })
+      const staleMorning = c.kind === 'morning' && (
+        user.idleRestAt || hasDecision(user) || active > 0 ||
+        c.nextDueAt <= now && (c.localDate !== dayKey(now, user.timezone) || await morningResolved(tx, user, now))
+      )
+      const stalePhase = c.kind === 'work' && s?.state !== 'running' ||
+        c.kind === 'break' && s?.state !== 'paused' ||
+        c.kind === 'post_rest' && (active > 0 || user.idleRestAt)
+      if (staleMorning || stalePhase) { await cancelChain(tx, c.id); c = null }
     }
     if(!c){await ensureMorning(tx,user,now);return}
     const pending=await tx.outboxMessage.count({where:{chainId:c.id,chainRevision:c.revision,status:{in:['pending','sending','paused']}}})

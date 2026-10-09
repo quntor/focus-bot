@@ -42,7 +42,7 @@ const SYSTEM = [
   'phase=morning: спроси про работу сегодня или выходной. Без today_plan нейтральный вопрос; backlog не является планом, вчерашний план не переносится.',
   'phase=work: спроси, продолжить или передохнуть; можно упомянуть одну переданную задачу её точным title, тогда taskId обязателен.',
   'phase=break или post_rest: только мягкий вопрос о возвращении или продолжении отдыха, без задач и давления.',
-  'Допустим один вопрос и необязательное нейтральное приветствие. Никаких утверждений о работе, отдыхе, выполнении или игнорировании по молчанию.',
+  'Только один актуальный вопрос, без приветствий, вводных и ритуала. Никаких утверждений о работе, отдыхе, выполнении или игнорировании по молчанию.',
   'Никакой вины, обиды, «ты опять», CAPS, приказов, советов, обещаний наблюдения, ссылок, команд, времени, кнопок или действий.',
   'Не выдумывай задач и фактов; не утверждай, что отсутствие отметки означает провал. Называй задачу только при taskId из current_work/tasks.',
   'Ответ — строго JSON {"text":"вопрос","taskId":"переданный id или null"}, без дополнительных полей.',
@@ -52,17 +52,17 @@ const normalize = (text: string) => text.toLocaleLowerCase('ru').replace(/ё/g, 
 const bound = (text: string | null | undefined, limit = 300) => text?.slice(0, limit) ?? null
 const validTask = (task: ReminderTask) => task.id.length > 0 && task.id.length <= 100 && task.title.trim().length > 0
 const boundedTask = (task: ReminderTask): ReminderTask => ({ id: task.id, title: task.title.slice(0, 160) })
+export const hasGreeting = (text: string): boolean => /(?:привет|здравств|добр(?:ое|ый)\s+(?:утро|день|вечер)|с возвращением)/iu.test(text)
 
 // Conservative acceptance deliberately prefers a neutral fallback over an
 // unconstrained model statement. This validator is not evidence of live tone
 // quality; human golden-context review remains necessary before activation.
 function safeText(answer: ReminderText, phase: ReminderPhase, tasks: readonly ReminderTask[], anonymousWork: string | null): boolean {
-  let text = answer.text.trim()
+  const text = answer.text.trim()
   if (text !== answer.text || !text.endsWith('?') || (text.match(/\?/g) ?? []).length !== 1) return false
   if (/[\r\n\x00-\x1f]/u.test(text) || /https?:|www\.|[\p{L}\p{N}-]+\.[a-z]{2,}(?:\b|\/)|@[\p{L}\p{N}_]+|\/\p{L}|[<>\[\]{}]/iu.test(text)) return false
   if (/[А-ЯЁA-Z]{3,}/u.test(text)) return false
-  // Only a greeting may be declarative: an LLM may ask, not invent a report.
-  text = text.replace(/^(?:Привет|Доброе утро|Добрый день)[.!]\s*/u, '')
+  if (hasGreeting(text)) return false
   if (/[.!;]/u.test(text)) return false
   const value = normalize(text)
   if (/(?:опять|снова|игнор|молч|обид|винов|должен|должна|обязан|пора(?!бот)|быстр|немедлен|срочно|давай|наблюд|слеж|вижу|непрерыв|продуктив|работал|работала|отдыхал|отдыхала|выполнил|сделал|закончил|завершил|провал|ленив|потратил|потерял|молодец|нажми|открой|перейди|запусти|удали|напиши|сохрани|отправь|\d)/u.test(value)) return false

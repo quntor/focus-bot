@@ -10,6 +10,7 @@ const A = 4001
 
 async function runningSession(bot: ReturnType<typeof makeBot>) {
   await bot.setupOnboarded(A)
+    await prisma.focusSession.deleteMany({})
   await bot.textAs(A, 'глава, 40 минут', {"text":"глава, 40 минут","route":"new_task","intent":{"task":null,"title":"глава","scope":"step"},"minutes":40,"durationSource":"40 минут","followUp":null})
   return prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
 }
@@ -20,8 +21,9 @@ describe.skipIf(!hasDb)('outbox', () => {
   it('утром показывает активные задачи и запускает выбранную одним нажатием', async () => {
     const bot = makeBot()
     await bot.setupOnboarded(A)
+    await prisma.focusSession.deleteMany({})
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
-    await prisma.user.update({ where: { id: user.id }, data: { pendingInput: 'meeting_time' } })
+    await prisma.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
     const first = await prisma.task.create({ data: { userId: user.id, title: 'Подготовить отчёт' } })
     const second = await prisma.task.create({ data: { userId: user.id, title: 'Позвонить Ивану' } })
     await enqueue(prisma, {
@@ -36,7 +38,7 @@ describe.skipIf(!hasDb)('outbox', () => {
 
     const prompt = bot.tg.sent.filter((message) => message.chatId === BigInt(A)).at(-1)
     expect(prompt?.text).toBe(
-      ['Доброе утро! Пора работать.', '', 'У тебя такие дела:', `1. ${first.title}`, `2. ${second.title}`, '', 'С чего начнёшь?'].join('\n'),
+      ['Время, о котором договорились.', '', 'У тебя такие дела:', `1. ${first.title}`, `2. ${second.title}`, '', 'С чего начнёшь?'].join('\n'),
     )
     expect(prompt?.keyboard?.slice(0, 2)).toEqual([
       [{ text: first.title, data: `task:${first.id}:start` }],
@@ -61,6 +63,7 @@ describe.skipIf(!hasDb)('outbox', () => {
   it('утренняя цель остаётся необязательным действием после списка задач', async () => {
     const bot = makeBot()
     await bot.setupOnboarded(A)
+    await prisma.focusSession.deleteMany({})
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     const task = await prisma.task.create({ data: { userId: user.id, title: 'Сделать план дня' } })
     await enqueue(prisma, {
@@ -87,6 +90,7 @@ describe.skipIf(!hasDb)('outbox', () => {
   it('утром без задач позволяет одним нажатием начать период без задачи', async () => {
     const bot = makeBot()
     await bot.setupOnboarded(A)
+    await prisma.focusSession.deleteMany({})
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     await enqueue(prisma, {
       userId: user.id,
@@ -98,7 +102,7 @@ describe.skipIf(!hasDb)('outbox', () => {
 
     await runOutboxOnce(bot.ctx)
 
-    expect(bot.lastText(A)).toBe('Доброе утро! Пора работать. Можно начать без задачи или написать, что будешь делать.')
+    expect(bot.lastText(A)).toBe('Готов начать? Можно запустить сессию без задачи.')
     expect(bot.lastButton(A, 'quick:', ':start')).toBe('quick::start')
     await bot.press(A, 'quick::start')
     expect(await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })).toMatchObject({
@@ -108,9 +112,10 @@ describe.skipIf(!hasDb)('outbox', () => {
     })
   })
 
-  it('после полудня по местному времени здоровается без «доброго утра»', async () => {
+  it('приглашение после полудня тоже не содержит приветствия', async () => {
     const bot = makeBot()
     await bot.setupOnboarded(A)
+    await prisma.focusSession.deleteMany({})
     const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
     bot.advance(5 * 60) // 15:00 по Москве
     await enqueue(prisma, {
@@ -123,7 +128,7 @@ describe.skipIf(!hasDb)('outbox', () => {
 
     await runOutboxOnce(bot.ctx)
 
-    expect(bot.lastText(A)).toBe('Привет! Пора работать. Можно начать без задачи или написать, что будешь делать.')
+    expect(bot.lastText(A)).toBe('Готов начать? Можно запустить сессию без задачи.')
   })
 
   it('два воркера одновременно не отправляют одно сообщение дважды', async () => {

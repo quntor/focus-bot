@@ -27,7 +27,7 @@ describe.skipIf(!hasDb)('new policy webhook and worker flows', () => {
   }
   const chainFor = (userId: string) => prisma.reminderChain.findFirstOrThrow({ where: { userId, status: 'active' } })
 
-  it('morning repeats hourly and work answer offers explicit start without starting work', async () => {
+  it('morning asks once per local day and work answer offers explicit start without starting work', async () => {
     const { bot, user } = await setup()
     // Onboarding opens preparation; a morning question belongs to idle users.
     await prisma.focusSession.updateMany({ where: { userId: user.id, state: 'collecting_intent' }, data: { state: 'cancelled', finishedAt: bot.now() } })
@@ -35,11 +35,11 @@ describe.skipIf(!hasDb)('new policy webhook and worker flows', () => {
     await sweepOnce(bot.ctx)
     await runOutboxOnce(bot.ctx)
     expect(await prisma.focusSession.count({ where: { userId: user.id, state: 'running' } })).toBe(0)
-    expect((await chainFor(user.id)).nextDueAt).toEqual(new Date(INITIAL.getTime() + 60 * MIN))
+    expect((await chainFor(user.id)).nextDueAt).toEqual(new Date('2026-10-06T07:00:00Z'))
     bot.advance(60)
     await sweepOnce(bot.ctx)
     await runOutboxOnce(bot.ctx)
-    expect(bot.textsTo(A).filter((text) => /выходной/.test(text)).length).toBeGreaterThanOrEqual(2)
+    expect(bot.textsTo(A).filter((text) => /выходной/.test(text))).toHaveLength(1)
     await bot.press(A, bot.lastButton(A, 'morning:', ':work'))
     expect(await prisma.calendarPlan.findUniqueOrThrow({ where: { userId_localDate: { userId: user.id, localDate: '2026-10-05' } } })).toMatchObject({ answer: 'work' })
     expect(await prisma.focusSession.count({ where: { userId: user.id, state: 'running' } })).toBe(0)

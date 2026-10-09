@@ -21,6 +21,7 @@ describe.skipIf(!hasDb)('номер показанной задачи', () => {
     const second = await prisma.task.create({ data: { userId: user.id, title: 'Вторая', createdAt: new Date('2026-01-02') } })
     await bot.textAs(A, 'Начать сессию', {"text":"Начать сессию","route":"control","action":"focus","value":null,"followUp":null})
     const before = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id } })
+    await bot.textAs(A, 'Мои задачи', { text: 'Мои задачи', route: 'control', action: 'tasks', value: null, followUp: null })
     complete.mockClear()
     await bot.textAs(A, '2', {"text":"2","route":"task_action","action":"number","number":2,"task":null,"followUp":null})
     expect(bot.lastText(A)).toContain('Задача: «Вторая»')
@@ -132,9 +133,10 @@ describe.skipIf(!hasDb)('номер показанной задачи', () => {
     expect(bot.lastText(A)).not.toContain('Задача: «Дело 2»')
   })
 
-  it('сохраняет список из утреннего воркера после сброса meeting_time', async () => {
+  it('сохраняет список актуального утреннего приглашения без фиктивной подготовки', async () => {
     const { bot, user, tasks } = await listed()
-    await prisma.user.update({ where: { id: user.id }, data: { pendingInput: 'meeting_time' } })
+    await prisma.focusSession.deleteMany({ where: { userId: user.id } })
+    await prisma.user.update({ where: { id: user.id }, data: { pendingInput: 'none' } })
     await enqueue(prisma, { userId: user.id, kind: 'meeting', key: 'sber28:morning', sendAfter: bot.now(), payload: { defaulted: false, morning: true } })
     await runOutboxOnce(bot.ctx)
     await bot.textAs(A, '2', {"text":"2","route":"task_action","action":"number","number":2,"task":null,"followUp":null})
@@ -169,6 +171,7 @@ describe.skipIf(!hasDb)('номер показанной задачи', () => {
   it('новый вопрос из воркера закрывает старый список; события не содержат названий', async () => {
     const { bot, user } = await listed()
     await bot.textAs(A, 'Начать сессию', {"text":"Начать сессию","route":"control","action":"focus","value":null,"followUp":null})
+    await bot.textAs(A, 'Мои задачи', { text: 'Мои задачи', route: 'control', action: 'tasks', value: null, followUp: null })
     expect(await taskNumberPrompt(bot.ctx, user.id)).not.toBeNull()
     bot.advance(20)
     await runOutboxOnce(bot.ctx)

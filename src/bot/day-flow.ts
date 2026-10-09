@@ -1,4 +1,4 @@
-import { cancelPrimary, ensureMorning, slot } from '../reminders/store.js'
+import { cancelChain, cancelPrimary, ensureMorning, slot } from '../reminders/store.js'
 import { allowedAt } from '../reminders/cadence.js'
 import { computeTimeline } from '../reminders/accounting.js'
 import { inputTransaction } from './input-lock.js'
@@ -284,6 +284,10 @@ async function putMeeting(
   opts: { defaulted: boolean; morning: boolean },
 ): Promise<void> {
   const key = `meeting:${user.id}:${at.getTime()}`
+  if (!opts.defaulted && user.reminderPolicy === 1) {
+    const morning = await tx.reminderChain.findFirst({ where: { userId: user.id, kind: 'morning', status: 'active' } })
+    if (morning) await cancelChain(tx, morning.id)
+  }
   await cancelPending(tx, { userId: user.id, kind: 'meeting', idempotencyKey: { not: key } })
   const reused = await tx.outboxMessage.updateMany({
     where: { userId: user.id, kind: 'meeting', idempotencyKey: key, status: { in: ['pending', 'canceled'] } },
@@ -332,7 +336,7 @@ export async function nextMorning(tx: Prisma.TransactionClient, user: User, afte
 // поставленную встречу не трогает.
 export async function ensureNextMeeting(tx: Prisma.TransactionClient, user: User, now: Date): Promise<void> {
   if (user.reminderPolicy === 1) return ensureMorning(tx,user,now)
-  if (!user.proactive || user.blockedAt) return
+  if (!user.proactive || user.blockedAt || user.idleRestAt) return
   const pending = await tx.outboxMessage.count({ where: { userId: user.id, kind: 'meeting', status: 'pending' } })
   if (pending > 0) return
   await putMeeting(tx, user, await nextMorning(tx, user, now), { defaulted: true, morning: true })

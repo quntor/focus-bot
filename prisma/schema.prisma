@@ -22,6 +22,9 @@ model User {
   createdAt DateTime  @default(now()) @map("created_at")
   blockedAt DateTime? @map("blocked_at")
   quietUntil DateTime? @map("quiet_until")
+  // Explicit rest with no active work/timer: no automatic invitations until
+  // a successful work start. This is not a day off or a fake paused session.
+  idleRestAt DateTime? @map("idle_rest_at")
   reminderPolicy Int @default(0) @map("reminder_policy")
   sendGateUntil DateTime? @map("send_gate_until")
   sendGateToken String? @map("send_gate_token")

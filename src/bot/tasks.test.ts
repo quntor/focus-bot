@@ -43,7 +43,8 @@ describe.skipIf(!hasDb)('список задач из текста и голос
 
     const started = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
     expect(started).toMatchObject({ taskId: null, intentText: null, plannedMinutes: 40 })
-    expect(bot.lastText(A)).toContain('Таймер уже идёт')
+    expect(bot.lastText(A)).toContain('Сессия началась')
+    await bot.textAs(A, 'Мои задачи', { text: 'Мои задачи', route: 'control', action: 'tasks', value: null, followUp: null })
     const listMessage = bot.tg.sent.filter((message) => message.chatId === BigInt(A)).at(-1)
     expect(listMessage?.keyboard?.slice(0, 2)).toEqual([
       [{ text: first.title, data: `task:${first.id}:view0` }],

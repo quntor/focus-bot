@@ -190,10 +190,6 @@ export async function showTasks(ctx: Ctx, user: User, page = 0, notice?: string,
 
 export async function onSessionStart(ctx: Ctx, user: User): Promise<void> {
   await onStartButton(ctx, user)
-  const running = await activeSession(ctx, user.id)
-  if (running?.state !== 'running') return
-  const count = await ctx.db.task.count({ where: { userId: user.id, status: 'active' } })
-  if (count > 0) await showTasks(ctx, user, 0, T.tasksChoose)
 }
 
 export async function onTasksPage(ctx: Ctx, user: User, arg: string): Promise<void> {

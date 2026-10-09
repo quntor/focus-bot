@@ -16,7 +16,11 @@ const pendingMeetings = async () =>
 
 async function morningNow(bot: ReturnType<typeof makeBot>) {
   const u = await user()
-  await enqueue(prisma, { userId: u.id, kind: 'meeting', key: `meeting:${u.id}:test-${bot.now().getTime()}`, sendAfter: bot.now(), payload: { defaulted: true, morning: true } })
+  await prisma.focusSession.deleteMany({ where: { userId: u.id, state: 'collecting_intent' } })
+  // Advance the actual scheduled invitation; do not fabricate a second row
+  // beside yesterday's already-due successor.
+  const due = await prisma.outboxMessage.count({ where: { userId: u.id, kind: 'meeting', status: 'pending', sendAfter: { lte: bot.now() } } })
+  if (!due) await enqueue(prisma, { userId: u.id, kind: 'meeting', key: `meeting:${u.id}:test-${bot.now().getTime()}`, sendAfter: bot.now(), payload: { defaulted: true, morning: true } })
   await runOutboxOnce(bot.ctx)
 }
 
@@ -27,7 +31,7 @@ describe.skipIf(!hasDb)('бот не замолкает', () => {
     const bot = makeBot()
     await bot.setupOnboarded(A)
     await morningNow(bot)
-    expect(bot.lastText(A)).toContain('Пора работать')
+    expect(bot.lastText(A)).toContain('Готов начать?')
 
     const next = await pendingMeetings()
     expect(next).toHaveLength(1)
@@ -39,7 +43,7 @@ describe.skipIf(!hasDb)('бот не замолкает', () => {
     await bot.setupOnboarded(A)
     for (let i = 0; i < 3; i++) {
       await morningNow(bot)
-      bot.advance(60)
+      bot.advance(1440)
     }
     await morningNow(bot)
     expect(bot.textsTo(A)).toContain('Третий раз откладываем. Хочешь паузу или не получается начать?')

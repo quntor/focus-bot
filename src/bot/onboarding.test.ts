@@ -107,7 +107,8 @@ describe.skipIf(!hasDb)('онбординг нового пользовател�
 
     await bot.textAs(A, '/start', {"text":"/start","route":"control","action":"start","value":null,"followUp":null})
 
-    expect(bot.lastText(A)).toContain('С возвращением.')
+    expect(bot.lastText(A)).not.toContain('С возвращением.')
+    expect(await prisma.focusSession.count({ where: { userId: (await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })).id, state: 'running' } })).toBe(1)
     expect(bot.lastText(A)).not.toContain('Быстрый старт')
     expect(await prisma.user.count({ where: { tgId: BigInt(A) } })).toBe(1)
   })

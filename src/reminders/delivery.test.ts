@@ -78,6 +78,37 @@ describe.skipIf(!hasDb)('persistent reminder delivery', () => {
     expect((await prisma.reminderChain.findUniqueOrThrow({ where: { id: f.chain.id } })).ordinal).toBe(0)
     expect(await prisma.outboxMessage.count({ where: { chainId: f.chain.id } })).toBe(1)
   })
+  it('rejects a greeting in a persisted retry without another model call', async () => {
+    const f = await setup()
+    f.tg.failNext.push(new TelegramError('rate', 429, 15))
+    await deliverReminder(f.ctx, f.message)
+    let calls = 0
+    f.ctx.llm = { enabled: true, model: 'test', async complete() { calls++; throw new Error('must not regenerate cached unsafe text') } }
+    f.advance(1)
+    const retry = await prisma.outboxMessage.update({ where: { id: f.message.id }, data: {
+      status: 'sending', lockedUntil: new Date(f.ctx.now().getTime() + 60_000),
+      generatedText: 'Доброе утро! Пора отдыхать?',
+    } })
+    await deliverReminder(f.ctx, retry)
+    expect(calls).toBe(0)
+    expect(f.tg.sent.map(m => m.text)).toEqual([fallbackReminder('work').text])
+  })
+  it.each(['work', 'break', 'post_rest'])('%s waits for the current decision without losing the timer', async kind => {
+    const f = await setup()
+    if (kind === 'break') await prisma.focusSession.update({ where: { id: f.session.id }, data: { state: 'paused', pausedAt: f.ctx.now() } })
+    if (kind === 'post_rest') await prisma.focusSession.update({ where: { id: f.session.id }, data: { state: 'finished', finishedAt: f.ctx.now(), restChoice: 'rest' } })
+    await prisma.reminderChain.update({ where: { id: f.chain.id }, data: { kind } })
+    await prisma.user.update({ where: { id: f.user.id }, data: { pendingInput: 'profile' } })
+    await deliverReminder(f.ctx, f.message)
+    expect(f.tg.sent).toHaveLength(0)
+    expect(await prisma.reminderChain.findUniqueOrThrow({ where: { id: f.chain.id } })).toMatchObject({ status: 'active', ordinal: 0 })
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: f.user.id } })).toMatchObject({ pendingInput: 'profile' })
+    f.advance(1)
+    await prisma.user.update({ where: { id: f.user.id }, data: { pendingInput: 'none' } })
+    const retry = await prisma.outboxMessage.update({ where: { id: f.message.id }, data: { status: 'sending', lockedUntil: new Date(f.ctx.now().getTime() + 60_000) } })
+    await deliverReminder(f.ctx, retry)
+    expect(f.tg.sent).toHaveLength(1)
+  })
   it('unknown send advances from persisted start and does not resend', async () => {
     const f = await setup()
     f.tg.failNext.push(new DeliveryError(true, 'timeout'))

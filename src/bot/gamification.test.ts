@@ -36,7 +36,7 @@ describe.skipIf(!hasDb)('геймификация в сообщениях', () =
     bot.advance(2 * DAY)
     const { afterOutcome } = await session(bot)
     expect(afterOutcome).toContain('Вчера был пропуск — закрыл его заморозкой, осталась 1.')
-    expect(afterOutcome).toContain('С возвращением!')
+    expect(afterOutcome).toContain('Бонус за возвращение: +5.')
     const comeback = await prisma.pointsEntry.findMany({ where: { userId: user.id, reason: 'comeback' } })
     expect(comeback.map((p) => p.amount)).toEqual([5])
   })
