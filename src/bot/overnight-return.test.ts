@@ -142,6 +142,15 @@ describe.skipIf(!hasDb)('возвращение после ночного мол
     expect(await buildSummary(prisma, user, '2026-10-09')).toMatchObject({ totalMinutes: 30 })
     expect(await buildSummary(prisma, user, '2026-10-10')).toMatchObject({ totalMinutes: 0 })
   })
+  it('утренний явный отчёт привязывает вчерашние30минут к названной задаче без ночи', async () => {
+    const { bot, user, old } = await evening()
+    bot.advance(898)
+    await bot.textAs(A, 'Я закончил письмо, теперь отдыхаю', { route: 'end_session', text: 'Я закончил письмо, теперь отдыхаю', outcome: 'done', outcomeSource: 'Я закончил', completedTask: null, completedTitle: 'Письмо', completionSource: 'Я закончил письмо', rest: true, minutes: null, durationSource: null, followUp: null })
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ state: 'finished', finishedAt: old.plannedEndAt, outcome: 'done' })
+    expect(await buildSummary(prisma, user, '2026-10-09')).toMatchObject({ totalMinutes: 30, unassignedMinutes: 0, taskTimes: [{ title: 'Письмо', minutes: 30, completed: false }] })
+    expect(await prisma.task.findFirstOrThrow({ where: { userId: user.id, title: 'Письмо' } })).toMatchObject({ status: 'done' })
+    expect(await buildSummary(prisma, user, '2026-10-10')).toMatchObject({ totalMinutes: 0 })
+  })
   it('статус и сохранение учитывают предыдущий период и не считают паузу', async () => {
     const { bot, user, old } = await evening()
     // A25-minute closed period plus the final30-minute interval.

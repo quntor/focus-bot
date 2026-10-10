@@ -17,7 +17,8 @@ export async function syncReminderState(tx: Prisma.TransactionClient,userId: str
   if(before?.reminderPolicy===1&&['running','paused'].includes(before.state)&&(!active||active.id!==before.id||!['running','paused'].includes(active.state))){
     const closed=await tx.focusSession.findUnique({where:{id:before.id}})
     const end=closed?.finishedAt??now
-    await closePeriod(tx,before.id,end);await projectAllocations(tx,userId,before.id,end)
+    // Physical work ends at the cutoff; explicit later attribution still counts.
+    await closePeriod(tx,before.id,end);await projectAllocations(tx,userId,before.id,now)
     await cancelPrimary(tx,userId)
   }
   if(active?.reminderPolicy===1&&active.plannedMinutes!==null&&['running','paused'].includes(active.state)){
