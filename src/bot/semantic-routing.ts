@@ -1,3 +1,4 @@
+import { overnightCutoff, settleOvernightReturn } from '../reminders/overnight-return.js'
 import { addDays, dayKey } from '../lib/day.js'
 import { localDateTime, nextLocalTime } from '../lib/time.js'
 import { taskNumberPrompt } from './task-number-prompt.js'
@@ -173,10 +174,31 @@ async function dispatch(...args: Parameters<typeof dispatchRoute>): Promise<void
 async function dispatchRoute(ctx: Ctx, s: Snapshot, route: SemanticRoute, via: 'text' | 'voice', contextEventId: number | null, handlePending?: PendingHandler, control?: Control) {
   if (route.route === 'feedback') return reply(ctx, s.user!, T.feedback, undefined, { informational: true })
   if (route.route === 'clarify') return reply(ctx, s.user!, route.question, undefined, { informational: true })
-  if (route.route === 'control' && ['start','status','guide','help','tasks','settings','profile'].includes(route.action)) return control ? control(ctx, s.user!, route.action, route.value) : reply(ctx, s.user!, T.stale)
+  if (route.route === 'control' && route.action === 'start' && ['timezone', 'start_time', 'ritual'].includes(s.user!.pendingInput)) return control ? control(ctx, s.user!, route.action, route.value) : reply(ctx, s.user!, T.stale)
+  if (route.route === 'control' && ['status','guide','help','tasks','settings','profile'].includes(route.action)) return control ? control(ctx, s.user!, route.action, route.value) : reply(ctx, s.user!, T.stale)
   if (route.route === 'answer_pending') return handlePending ? handlePending(ctx, s.user!, route.text, via, contextEventId, route.answer) : reply(ctx, s.user!, T.stale)
   if (route.route === 'unclear') return askChoice(ctx, s, route.text, via)
   let user = s.user!
+  // Interpretation has succeeded. Reconcile sleep only for a selected work
+  // action, never for informational status, feedback or a failed model call.
+  const recoveryAction = ['continue_same', 'new_task', 'break', 'close_day'].includes(route.route) ||
+    route.route === 'task_action' && route.action === 'start' ||
+    route.route === 'control' && ['start', 'focus', 'new_session', 'stop'].includes(route.action)
+  let overnightSource: Snapshot['active'] = null
+  if (recoveryAction && s.active && overnightCutoff(s.active, user.timezone, ctx.now())) {
+    overnightSource = s.active
+    await inputTransaction(ctx, async tx => {
+      const fresh = await snapshot(ctx, user.id, tx)
+      if (!currentInput(ctx, user.id, contextEventId) || fresh.fingerprint !== s.fingerprint) throw new StaleTransition()
+      await settleOvernightReturn(tx, fresh.user!, fresh.active!, ctx.now())
+    }, { syncReminders: false })
+    const fresh = await snapshot(ctx, user.id)
+    // Model references retain their pre-action labels; the DB fingerprint is
+    // rebuilt from the reconciled state for every subsequent mutation guard.
+    s = { ...fresh, labelledTasks: s.labelledTasks }
+    user = s.user!
+    if (route.route === 'control' && route.action === 'stop') return reply(ctx, user, 'Вчерашняя сессия сохранена до планового конца. Ночь не засчитана; активной работы сейчас нет.')
+  }
   if (route.route === 'task_action' && route.action === 'number') {
     if (!await tasks.onTaskNumber(ctx, user, String(route.number))) await reply(ctx, user, T.stale)
     return
@@ -261,9 +283,19 @@ async function dispatchRoute(ctx: Ctx, s: Snapshot, route: SemanticRoute, via: '
     else if (!s.active && s.last?.continueSuggested && s.last.restChoice === null && s.last.taskId && s.labelledTasks.some((task) => task.id === s.last!.taskId && task.status === 'active')) {
       await session.onContinueChoice(ctx, user, s.last.id, 'same', { change: () => tasks.onSessionStart(ctx, user), minutes: route.minutes ?? undefined })
     } else {
-      const source = s.active?.state === 'collecting_intent' ? s.active : s.last
+      const source = s.active?.state === 'collecting_intent' ? s.active : overnightSource ?? s.last
       const task = s.labelledTasks.find((t) => t.id === source?.taskId && t.status === 'active')
       if (!source?.intentText && !task) return session.startUnassigned(ctx, user, { minutes: minutes ?? undefined, guard })
+      if (overnightSource) {
+        const next = await inputTransaction(ctx, async tx => {
+          if (!await guard(tx)) throw new StaleTransition()
+          return tx.focusSession.create({ data: { userId: user.id, state: 'collecting_intent', createdAt: ctx.now(),
+            taskId: task?.id ?? null, intentText: task?.title ?? source!.intentText!, scope: source!.scope,
+            technique: source!.technique, plannedMinutes: minutes ?? source!.plannedMinutes,
+            minutesSource: minutes === null ? 'bot' : 'user', plannedRestMinutes: source!.plannedRestMinutes } })
+        })
+        return session.startRunning(ctx, user, next.id)
+      }
       await session.onIntentText(ctx, user, task?.title ?? source!.intentText!, { taskId: task?.id ?? null, title: task?.title ?? source!.intentText!, scope: source?.scope === 'multi_session' ? 'multi_session' : 'step', minutes, llmUsed: true })
     }
   }

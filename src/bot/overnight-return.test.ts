@@ -1,0 +1,171 @@
+import { cb } from './callbacks.js'
+import { buildSummary } from './day-flow.js'
+import { overnightCutoff } from '../reminders/overnight-return.js'
+import { beforeEach, describe, expect, it } from 'vitest'
+import { makeBot } from '../test/bot.js'
+import { hasDb, prisma, resetDb } from '../test/db.js'
+
+const A = 88441
+async function evening(timezone = 'Europe/Moscow', now = '2026-10-09T16:58:00Z') {
+  const bot = makeBot({ now: new Date(now), semanticRouterEnabled: true })
+  bot.ctx.remindersEnabled = true
+  bot.ctx.reminderUserIds = [String(A)]
+  const user = await prisma.user.create({ data: { tgId: BigInt(A), timezone, technique: 'pomodoro', reminderPolicy: 1, quietUntil: new Date('2026-10-09T21:00:00Z') } })
+  await bot.textAs(A, 'ещё полчаса поработаю', { text: 'ещё полчаса поработаю', route: 'continue_same', minutes: 30, durationSource: 'полчаса', followUp: null })
+  const old = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+  return { bot, user, old }
+}
+const focus = { text: 'Начать сессию', route: 'control', action: 'focus', value: null, followUp: null }
+
+describe.skipIf(!hasDb)('возвращение после ночного молчания', () => {
+  beforeEach(resetDb)
+  it('утренний старт сохраняет30минут, не ночь, и создаёт свежий таймер', async () => {
+    const { bot, user, old } = await evening()
+    bot.advance(898)
+    await bot.textAs(A, 'Начать сессию', focus)
+    const closed = await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })
+    expect(closed).toMatchObject({ state: 'finished', finishedAt: old.plannedEndAt, outcome: null, counted: false })
+    const period = await prisma.workPeriod.findFirstOrThrow({ where: { sessionId: old.id } })
+    expect(period.endedAt).toEqual(old.plannedEndAt)
+    expect(period.endedAt!.getTime() - period.startedAt.getTime()).toBe(30 * 60_000)
+    const next = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })
+    expect(next.id).not.toBe(old.id)
+    expect(next.startedAt).toEqual(bot.ctx.now())
+    expect(next.plannedEndAt!.getTime() - next.startedAt!.getTime()).toBe(next.plannedMinutes! * 60_000)
+    expect(bot.lastText(A)).toContain('Сессия началась')
+    expect(bot.lastText(A)).not.toContain('20:28')
+    expect(await prisma.pointsEntry.count()).toBe(0)
+    expect(await prisma.reminderChain.count({ where: { sessionId: old.id, status: 'active' } })).toBe(0)
+    expect(await prisma.reminderChain.count({ where: { sessionId: next.id, status: 'active' } })).toBe(1)
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).quietUntil).toEqual(user.quietUntil)
+  })
+  it('утреннее продолжение с длительностью начинает новый период', async () => {
+    const { bot, old } = await evening()
+    bot.advance(898)
+    await bot.textAs(A, 'ещё15минут', { text: 'ещё15минут', route: 'continue_same', minutes: 15, durationSource: '15минут', followUp: null })
+    expect((await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })).finishedAt).toEqual(old.plannedEndAt)
+    const next = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+    expect(next.id).not.toBe(old.id)
+    expect(next.plannedMinutes).toBe(15)
+  })
+  it.each([['ещё полчаса', '2026-10-09T21:01:00Z'], ['ночное продолжение', '2026-10-10T00:59:00Z']])('%s до границы рабочих суток сохраняет overtime', async (_label, at) => {
+    const { bot, old } = await evening()
+    bot.advance((new Date(at).getTime() - bot.ctx.now().getTime()) / 60_000)
+    await bot.textAs(A, 'продолжаю', { text: 'продолжаю', route: 'continue_same', minutes: null, durationSource: null, followUp: null })
+    const same = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+    expect(same.id).toBe(old.id)
+    expect(await prisma.workPeriod.count({ where: { sessionId: old.id } })).toBe(1)
+    expect((await prisma.workPeriod.findFirstOrThrow({ where: { sessionId: old.id } })).endedAt).toBeNull()
+  })
+  it('утренний статус не изменяет БД и не показывает898минут работы', async () => {
+    const { bot, old } = await evening()
+    const periods = await prisma.workPeriod.findMany()
+    bot.advance(898)
+    await bot.textAs(A, 'Статус', { text: 'Статус', route: 'control', action: 'status', value: null, followUp: null })
+    expect(bot.lastText(A)).toContain('30 мин')
+    expect(bot.lastText(A)).not.toContain('898 мин')
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })).toEqual(old)
+    expect(await prisma.workPeriod.findMany()).toEqual(periods)
+  })
+  it('граница04:00 локальная, не UTC; обновлённый сегодняшний deadline не обрезается', async () => {
+    const { old } = await evening()
+    expect(overnightCutoff(old, 'Europe/Moscow', new Date('2026-10-10T00:59:59Z'))).toBeNull()
+    expect(overnightCutoff(old, 'Europe/Moscow', new Date('2026-10-10T01:00:00Z'))).toEqual(old.plannedEndAt)
+    expect(overnightCutoff(old, 'America/New_York', new Date('2026-10-10T01:00:00Z'))).toBeNull()
+    expect(overnightCutoff({ ...old, plannedEndAt: new Date('2026-10-10T07:30:00Z') }, 'Europe/Moscow', new Date('2026-10-10T07:56:00Z'))).toBeNull()
+    expect(overnightCutoff({ ...old, reminderPolicy: 0 }, 'Europe/Moscow', new Date('2026-10-10T07:56:00Z'))).toBeNull()
+    expect(overnightCutoff({ ...old, plannedEndAt: null }, 'Europe/Moscow', new Date('2026-10-10T07:56:00Z'))).toBeNull()
+  })
+  it.each(['step', 'multi_session'] as const)('прошлая задача%s сохраняет план, продолжение наследует её без автозавершения', async scope => {
+    const { bot, user, old } = await evening()
+    const task = await prisma.task.create({ data: { userId: user.id, title: 'Отчёт' } })
+    await bot.textAs(A, 'работаю над отчётом', { text: 'работаю над отчётом', route: 'task_action', action: 'start', task: 't1', number: null, followUp: null })
+    await prisma.focusSession.update({ where: { id: old.id }, data: { scope } })
+    bot.advance(898)
+    await bot.textAs(A, 'продолжаю', { text: 'продолжаю', route: 'continue_same', minutes: null, durationSource: null, followUp: null })
+    const next = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+    expect(next.id).not.toBe(old.id)
+    expect(next.taskId).toBe(task.id)
+    expect(next.scope).toBe(scope)
+    expect(await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).toMatchObject({ status: 'active' })
+    expect(await buildSummary(prisma, user, '2026-10-09')).toMatchObject({ totalMinutes: 30, taskTimes: [{ title: 'Отчёт', minutes: 30, completed: false }] })
+    expect(await prisma.pointsEntry.count()).toBe(0)
+  })
+  it.each(['continue', 'break'])('актуальная старая кнопка%s не засчитывает ночь; повтор не создаёт работу', async action => {
+    const { bot, user, old } = await evening()
+    const chain = await prisma.reminderChain.findFirstOrThrow({ where: { sessionId: old.id, status: 'active' } })
+    const slot = await prisma.outboxMessage.findFirstOrThrow({ where: { chainId: chain.id, chainRevision: chain.revision } })
+    await prisma.outboxMessage.update({ where: { id: slot.id }, data: { status: 'sent' } })
+    bot.advance(898)
+    const button = cb('cycle', slot.id, action)
+    await bot.press(A, button)
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ state: 'finished', finishedAt: old.plannedEndAt, counted: false })
+    const before = await prisma.focusSession.findMany({ where: { userId: user.id }, orderBy: { id: 'asc' } })
+    expect(before.filter(s => s.state === 'running')).toHaveLength(action === 'continue' ? 1 : 0)
+    await bot.press(A, button)
+    expect(await prisma.focusSession.findMany({ where: { userId: user.id }, orderBy: { id: 'asc' } })).toEqual(before)
+    expect(await buildSummary(prisma, user, '2026-10-09')).toMatchObject({ totalMinutes: 30, unassignedMinutes: 30 })
+  })
+  it('feedback и сбой LLM не закрывают сессию', async () => {
+    const { bot, old } = await evening()
+    bot.advance(898)
+    await bot.textAs(A, 'что за баг', { text: 'что за баг', route: 'feedback', followUp: null })
+    await bot.textAs(A, 'непонятно', { invalid: true })
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })).toEqual(old)
+    expect(await prisma.workPeriod.findFirstOrThrow({ where: { sessionId: old.id } })).toMatchObject({ endedAt: null })
+  })
+  it('новая названная работа утром не становится задачей вчерашнего периода', async () => {
+    const { bot, old } = await evening()
+    bot.advance(898)
+    await bot.textAs(A, 'Пишу письмо', { text: 'Пишу письмо', route: 'new_task', intent: { task: null, title: 'Письмо', scope: 'step' }, minutes: null, durationSource: null, followUp: null })
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ state: 'finished', taskId: null, finishedAt: old.plannedEndAt })
+    const next = await prisma.focusSession.findFirstOrThrow({ where: { state: 'collecting_intent' } })
+    expect(next.intentText).toBe('Письмо')
+  })
+
+  it('утренний /start тоже запускает свежий таймер', async () => {
+    const { bot, old } = await evening()
+    bot.advance(898)
+    await bot.textAs(A, '/start', { ...focus, text: '/start', action: 'start' })
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ state: 'finished', finishedAt: old.plannedEndAt })
+    const next = await prisma.focusSession.findFirstOrThrow({ where: { state: 'running' } })
+    expect(next.id).not.toBe(old.id)
+    expect(next.startedAt).toEqual(bot.ctx.now())
+  })
+  it('явный утренний исход допускает отчёт, но сохраняет только30минут вчера', async () => {
+    const { bot, user, old } = await evening()
+    bot.advance(898)
+    await bot.press(A, `out:${old.id}:done`)
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ state: 'finished', finishedAt: old.plannedEndAt, outcome: 'done' })
+    await bot.textAs(A, 'Закончил', { route: 'report', text: 'Закончил', report: { route: 'report', progress: 'moved', next_step: null, continue_now: false, continue_minutes: null, allocations: [] }, followUp: null })
+    expect((await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })).reportText).toBe('Закончил')
+    expect(await buildSummary(prisma, user, '2026-10-09')).toMatchObject({ totalMinutes: 30 })
+    expect(await buildSummary(prisma, user, '2026-10-10')).toMatchObject({ totalMinutes: 0 })
+  })
+  it('статус и сохранение учитывают предыдущий период и не считают паузу', async () => {
+    const { bot, user, old } = await evening()
+    // A25-minute closed period plus the final30-minute interval.
+    const first = new Date(old.startedAt!.getTime() - 40 * 60_000)
+    await prisma.workPeriod.create({ data: { sessionId: old.id, startedAt: first, endedAt: new Date(first.getTime() + 25 * 60_000) } })
+    await prisma.focusSession.update({ where: { id: old.id }, data: { startedAt: first, pausedSeconds: 15 * 60 } })
+    bot.advance(898)
+    await bot.textAs(A, 'Статус', { ...focus, text: 'Статус', action: 'status' })
+    expect(bot.lastText(A)).toContain('55 мин')
+    expect((await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })).state).toBe('running')
+    await bot.textAs(A, 'Начать сессию', focus)
+    expect(await buildSummary(prisma, user, '2026-10-09')).toMatchObject({ totalMinutes: 55 })
+    expect(await prisma.workPeriod.count({ where: { sessionId: old.id } })).toBe(2)
+  })
+
+  it('onboarding /start возобновляет ввод, не создаёт таймер и не отвечает stale', async () => {
+    const bot = makeBot({ semanticRouterEnabled: true })
+    await prisma.user.create({ data: { tgId: BigInt(A), pendingInput: 'timezone' } })
+    await bot.textAs(A, '/start', { ...focus, text: '/start', action: 'start' })
+    expect(await prisma.focusSession.count()).toBe(0)
+    expect(bot.lastText(A)).toContain('как в Москве?')
+    expect(bot.lastButton(A, 'onb:', ':tz_yes')).toBe('onb::tz_yes')
+    expect(bot.lastText(A)).not.toContain('неактуал')
+    expect((await prisma.user.findFirstOrThrow()).pendingInput).toBe('timezone')
+  })
+
+})

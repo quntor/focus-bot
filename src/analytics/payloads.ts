@@ -111,7 +111,7 @@ export const PAYLOADS = {
     session_id: id,
     elapsed_minutes: z.int().min(0),
     counted: z.boolean(),
-    reason: z.enum(['timeout', 'no_ping', 'new_session', 'break_timeout', 'day_end']),
+    reason: z.enum(['timeout', 'no_ping', 'new_session', 'break_timeout', 'day_end', 'overnight_return']),
   }),
   report_submitted: z.strictObject({ session_id: id, length_chars: z.int().min(0) }),
   report_parsed: z.strictObject({ session_id: id, llm_used: z.boolean(), progress: z.enum(['moved', 'stuck']).nullable() }),

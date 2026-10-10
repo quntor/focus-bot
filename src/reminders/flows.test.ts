@@ -68,9 +68,10 @@ describe.skipIf(!hasDb)('new policy webhook and worker flows', () => {
     expect(await prisma.outboxMessage.count({ where: { chainId: current.id, status: 'pending', sendAfter: current.nextDueAt } })).toBe(1)
   })
 
-  it('a report can explicitly allocate the remainder of multi-day physical work', async () => {
+  it('a report can explicitly allocate the remainder of multi-day timerless physical work', async () => {
     const { bot, user, session } = await start()
     const task = await prisma.task.create({ data: { userId: user.id, title: 'Собрать отчёт' } })
+    await prisma.focusSession.update({ where: { id: session.id }, data: { technique: 'free', plannedMinutes: null, plannedEndAt: null } })
     bot.advance(2880)
     await bot.press(A, `out:${session.id}:done`)
     await bot.textAs(A, 'Закончил, остальное на отчёт', { route: 'report', text: 'Закончил, остальное на отчёт', report: { route: 'report', progress: 'moved', next_step: null, continue_now: false, continue_minutes: null, allocations: [{ task: 't1', title: task.title, minutes: null, remainder: true, source: 'остальное на отчёт' }] }, followUp: null })
@@ -135,14 +136,12 @@ describe.skipIf(!hasDb)('new policy webhook and worker flows', () => {
     expect(await prisma.focusSession.count({ where: { userId: user.id } })).toBe(1)
   })
 
-  it('two-day work and rest silence stay open and preserve actual elapsed time above one day', async () => {
+  it('an explicit pause then two-day rest excludes the rest', async () => {
     const { bot, user, session } = await start()
-    bot.advance(2880)
-    await sweepOnce(bot.ctx)
+    bot.advance(40)
     await runOutboxOnce(bot.ctx)
-    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).toMatchObject({ state: 'running', finishedAt: null, outcome: null, counted: false })
     await bot.press(A, bot.lastButton(A, 'cycle:', ':break'))
-    expect(await prisma.event.findFirstOrThrow({ where: { sessionId: session.id, type: 'session_paused' } })).toMatchObject({ payload: { elapsed_minutes: 2880 } })
+    expect(await prisma.event.findFirstOrThrow({ where: { sessionId: session.id, type: 'session_paused' } })).toMatchObject({ payload: { elapsed_minutes: 40 } })
     bot.advance(2880)
     await sweepOnce(bot.ctx)
     await runOutboxOnce(bot.ctx)
@@ -152,7 +151,7 @@ describe.skipIf(!hasDb)('new policy webhook and worker flows', () => {
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })).toMatchObject({ state: 'running', pausedSeconds: 2880 * 60 })
     bot.advance(15)
     await bot.press(A, 'cycle::stop')
-    expect(await buildSummary(prisma, user, '2026-10-09')).toMatchObject({ totalMinutes: 2895, unassignedMinutes: 2895, done: 0, counted: 0 })
+    expect(await buildSummary(prisma, user, '2026-10-07')).toMatchObject({ totalMinutes: 55, unassignedMinutes: 55, done: 0, counted: 0 })
     expect(await prisma.pointsEntry.count({ where: { userId: user.id } })).toBe(0)
     expect(await prisma.workPeriod.count({ where: { sessionId: session.id } })).toBe(2)
   })

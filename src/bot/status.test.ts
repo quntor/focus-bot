@@ -25,7 +25,7 @@ describe.skipIf(!hasDb)('Статус', () => {
     const before = await prisma.focusSession.findUniqueOrThrow({ where: { id: session.id } })
     bot.advance(45)
     await bot.textAs(A, 'Статус', {"text":"Статус","route":"control","action":"status","value":null,"followUp":null})
-    expect(bot.lastText(A)).toContain('Идёт рабочая сессия')
+    expect(bot.lastText(A)).toContain('Плановый таймер завершён')
     expect(bot.lastText(A)).toContain('45 мин')
     expect(bot.lastText(A)).toContain('Текущая задача')
     expect(bot.lastText(A)).not.toContain('Старая задача')

@@ -1,3 +1,4 @@
+import { overnightCutoff } from '../reminders/overnight-return.js'
 import type { User } from '@prisma/client'
 import { reply, type Ctx } from './context.js'
 import { T } from './texts.js'
@@ -52,9 +53,17 @@ export async function showStatus(ctx: Ctx, user: User): Promise<void> {
       })
       if (ended) return T.statusIdle
     }
+    const cutoff = overnightCutoff(session, fresh.timezone, now)
+    if (cutoff) {
+      const periods = await tx.workPeriod.findMany({ where: { sessionId: session.id } })
+      const seconds = session.legacyUnassignedSeconds + periods.reduce((total, p) => total + Math.max(0, Math.floor((Math.min((p.endedAt ?? cutoff).getTime(), cutoff.getTime()) - p.startedAt.getTime()) / 1000)), 0)
+      const accounted = periods.length ? `${Math.floor(seconds / 60)} мин` : `${session.plannedMinutes} мин`
+      return `Вчерашний плановый таймер завершён.\nК учёту: ${accounted}; ночь не засчитывается.\nНовый старт закроет прошлую сессию и начнёт свежий таймер.`
+    }
     const title = session.task?.title ?? session.intentText
-    const lines: string[] = [resting ? T.statusRest : T.statusWork]
-    lines.push(start ? T.statusElapsed(elapsed(start, now)) : T.statusUnknownTime)
+    const expired = !resting && session.plannedEndAt !== null && now >= session.plannedEndAt
+    const lines: string[] = [resting ? T.statusRest : expired ? T.statusTimerExpired : T.statusWork]
+    lines.push(start ? (expired ? T.statusUnconfirmedElapsed(elapsed(start, now)) : T.statusElapsed(elapsed(start, now))) : T.statusUnknownTime)
     if (title) lines.push(T.statusTask(title, resting))
     else lines.push(T.statusNoTask)
     if (!resting && session.plannedEndAt && now >= session.plannedEndAt) lines.push(T.statusDeadlinePassed)

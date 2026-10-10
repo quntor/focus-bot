@@ -1,3 +1,4 @@
+import { overnightCutoff, settleOvernightReturn } from './overnight-return.js'
 import type { Prisma, User } from '@prisma/client'
 import type { Ctx } from '../bot/context.js'
 import { reply } from '../bot/context.js'
@@ -12,13 +13,14 @@ import { MIN, midnight, nightAllowance } from './cadence.js'
 import { answerPlan, cancelPrimary, lockUser, replaceChain, resetChain } from './store.js'
 import { closePeriod, openPeriod, projectAllocations, correctPause } from './accounting.js'
 import { logEvent } from '../analytics/log.js'
-import { askIntent } from '../bot/session-flow.js'
+import { askIntent, startRunning } from '../bot/session-flow.js'
 export function quietKeyboard(user: Pick<User,'quietUntil'>,now: Date): Keyboard {
   return user.quietUntil && user.quietUntil>now ? [[{text:'Возобновить напоминания',data:cb('cycle',null,'unmute')}]] : [
     [{text:'Сегодня больше не беспокоить',data:cb('cycle',null,'stop')}],
     [{text:'Отключить уведомления',data:cb('cycle',null,'quiet')}]]
 }
 export async function onReminderAction(ctx: Ctx,user: User,id: string|null,arg: string, options: { restMinutes?: number; restBasis?: 'total' | 'from_now'; workMinutes?: number; guard?: (tx: Prisma.TransactionClient) => Promise<boolean> } = {}): Promise<void> {
+  let overnightStart: string|null=null
   let start=false, text='Напоминания обновлены.', pauseId: string|null=null
   try {await currentInputTransaction(ctx,async tx=>{
     await lockUser(tx,user.id)
@@ -32,7 +34,23 @@ export async function onReminderAction(ctx: Ctx,user: User,id: string|null,arg: 
       if(chain.kind==='morning'&&chain.localDate!==dayKey(now,fresh.timezone)) throw new StaleTransition()
     } else if(!['quiet','stop','unmute','break','resume','continue','rest'].includes(arg)) throw new StaleTransition()
     if(chain){const action=arg==='quiet'?'mute':arg==='stop'?'stop_today':arg;await logEvent(tx,user.id,'reminder_answered',{chain_id:chain.id,kind:chain.kind as 'morning'|'work'|'break'|'post_rest',revision:chain.revision,action:action as 'work'|'off'|'continue'|'break'|'resume'|'rest'|'mute'|'unmute'|'stop_today'},{at:now})}
-    const session=await tx.focusSession.findFirst({where:{userId:user.id,state:{in:['running','paused','collecting_intent']}}})
+    let session=await tx.focusSession.findFirst({where:{userId:user.id,state:{in:['running','paused','collecting_intent']}}})
+    if(session && ['continue','break','stop'].includes(arg) && overnightCutoff(session,fresh.timezone,now)){
+      const previous=session
+      await settleOvernightReturn(tx,fresh,previous,now)
+      if(arg==='continue'){
+        const task=previous.taskId?await tx.task.findFirst({where:{id:previous.taskId,userId:user.id,status:'active'}}):null
+        const next=await tx.focusSession.create({data:{userId:user.id,state:'collecting_intent',createdAt:now,
+          taskId:task?.id??null,intentText:task?.title??null,scope:previous.scope,technique:previous.technique,
+          plannedMinutes:options.workMinutes??previous.plannedMinutes,minutesSource:options.workMinutes===undefined?'bot':'user',plannedRestMinutes:previous.plannedRestMinutes}})
+        overnightStart=next.id;return
+      }
+      if(arg==='break'){
+        await tx.user.update({where:{id:user.id},data:{idleRestAt:now,pendingInput:'none'}})
+        text='Вчерашняя сессия сохранена до планового конца; ночь не засчитана. Сейчас отдых без таймера.';return
+      }
+      session=null
+    }
     const workMinutes=options.workMinutes??session?.plannedMinutes
     const workPlan=options.workMinutes===undefined?{}:{plannedMinutes:options.workMinutes,minutesSource:'user' as const}
     if(arg==='quiet'||arg==='stop'){
@@ -105,6 +123,7 @@ export async function onReminderAction(ctx: Ctx,user: User,id: string|null,arg: 
     }else throw new StaleTransition()
     await tx.user.updateMany({where:{id:user.id,pendingInput:{in:['none',`session_end:${session.id}`]}},data:{pendingInput:'none'}})
   })}catch(e){if(e instanceof StaleTransition)return reply(ctx,user,'Эта кнопка уже неактуальна.');throw e}
+  if(overnightStart)return startRunning(ctx,await ctx.db.user.findUniqueOrThrow({where:{id:user.id}}),overnightStart)
   if(start)return askIntent(ctx,user)
   const fresh=await ctx.db.user.findUniqueOrThrow({where:{id:user.id}})
   const keyboard=pauseId?[[{text:'Уже отдыхаю',data:cb('retro',pauseId,'choose')}],...quietKeyboard(fresh,ctx.now())]:quietKeyboard(fresh,ctx.now())

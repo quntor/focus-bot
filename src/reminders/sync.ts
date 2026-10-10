@@ -15,7 +15,9 @@ export async function syncReminderState(tx: Prisma.TransactionClient,userId: str
     await answerPlan(tx,user,now,'work','manual_start')
   }
   if(before?.reminderPolicy===1&&['running','paused'].includes(before.state)&&(!active||active.id!==before.id||!['running','paused'].includes(active.state))){
-    await closePeriod(tx,before.id,now);await projectAllocations(tx,userId,before.id,now)
+    const closed=await tx.focusSession.findUnique({where:{id:before.id}})
+    const end=closed?.finishedAt??now
+    await closePeriod(tx,before.id,end);await projectAllocations(tx,userId,before.id,end)
     await cancelPrimary(tx,userId)
   }
   if(active?.reminderPolicy===1&&active.plannedMinutes!==null&&['running','paused'].includes(active.state)){

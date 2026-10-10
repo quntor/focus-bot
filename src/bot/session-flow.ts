@@ -1,3 +1,4 @@
+import { overnightCutoff } from '../reminders/overnight-return.js'
 import { requireActiveTask } from './task-tree.js'
 import { onReminderAction, quietKeyboard } from '../reminders/actions.js'
 import { cancelChain, cancelPrimary, lockUser } from '../reminders/store.js'
@@ -123,14 +124,15 @@ export async function autoFinish(
   reason: AutoFinishReason,
 ): Promise<{ elapsed: number; counted: boolean; credit: Credit | null }> {
   if (session.state !== 'running' && session.state !== 'paused') throw new StaleTransition()
-  const end = session.reminderPolicy === 1 ? now : until < now ? until : now
+  const sleepEnd = overnightCutoff(session, user.timezone, now)
+  const end = sleepEnd ?? (session.reminderPolicy === 1 ? now : until < now ? until : now)
   if (session.reminderPolicy === 1) {
     await cancelPrimary(tx,user.id)
     await closePeriod(tx,session.id,end)
     await projectAllocations(tx,user.id,session.id,now)
   }
   const elapsed = Math.floor(activeElapsedMs(session, end) / MIN)
-  const counted = isCounted('finished', elapsed)
+  const counted = sleepEnd === null && isCounted('finished', elapsed)
   const openPauseSeconds = session.state === 'paused' && session.pausedAt ? Math.floor(Math.max(0, end.getTime() - session.pausedAt.getTime()) / 1000) : 0
   await transition(tx, { sessionId: session.id, userId: user.id }, session.state, 'finished', {
     outcome: null,
@@ -147,7 +149,7 @@ export async function autoFinish(
     },
     data: { status: 'canceled' },
   })
-  await logEvent(tx, user.id, 'session_auto_finished', { session_id: session.id, elapsed_minutes: elapsed, counted, reason }, { at: now, sessionId: session.id })
+  await logEvent(tx, user.id, 'session_auto_finished', { session_id: session.id, elapsed_minutes: elapsed, counted, reason: sleepEnd ? 'overnight_return' : reason }, { at: now, sessionId: session.id })
   const credit = counted ? await creditCountedSession(tx, { userId: user.id, sessionId: session.id, dayKey: workDayKey(end, user.timezone), at: now }) : null
   return { elapsed, counted, credit }
 }
@@ -397,7 +399,8 @@ export async function onSemanticEnd(ctx: Ctx, user: User, sessionId: string, rou
       if (!await guard(tx)) throw new StaleTransition()
       const current = await tx.focusSession.findFirst({ where: { id: sessionId, userId: user.id, state: 'running' } })
       if (!current?.startedAt) throw new StaleTransition()
-      const elapsedMinutes = Math.floor(activeElapsedMs(current, now) / MIN)
+      const end = overnightCutoff(current, user.timezone, now) ?? now
+      const elapsedMinutes = Math.floor(activeElapsedMs(current, end) / MIN)
       const counted = isCounted('finished', elapsedMinutes)
       let completedId = completedTaskId
       if (route.completedTitle !== null) {
@@ -415,7 +418,7 @@ export async function onSemanticEnd(ctx: Ctx, user: User, sessionId: string, rou
         await tx.task.update({ where: { id: task.id }, data: { status: 'done', lastProgressAt: now, sessionsSinceProgress: 0, ...(current.taskId === null ? { sessionsCount: { increment: 1 }, lastSessionAt: now } : {}) } })
         await logEvent(tx, user.id, 'task_completed', { task_id: task.id, source: 'text' }, { at: now, sessionId })
       }
-      await transition(tx, { sessionId, userId: user.id }, 'running', 'finished', { outcome: route.outcome!, finishedAt: now, counted, progress: null, restChoice: route.rest ? 'rest' : null, ...(route.rest && route.minutes !== null ? { plannedRestMinutes: route.minutes } : {}) })
+      await transition(tx, { sessionId, userId: user.id }, 'running', 'finished', { outcome: route.outcome!, finishedAt: end, counted, progress: null, restChoice: route.rest ? 'rest' : null, ...(route.rest && route.minutes !== null ? { plannedRestMinutes: route.minutes } : {}) })
       await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `ping:${sessionId}` } })
       await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `session_end:${sessionId}` } })
       if (route.rest) {
@@ -426,7 +429,7 @@ export async function onSemanticEnd(ctx: Ctx, user: User, sessionId: string, rou
       }
       await tx.user.update({ where: { id: user.id }, data: { pendingInput: 'report_text' } })
       await logEvent(tx, user.id, 'session_completed', { session_id: sessionId, outcome: route.outcome!, elapsed_minutes: elapsedMinutes, early: current.plannedEndAt !== null && now < current.plannedEndAt, counted }, { at: now, sessionId })
-      if (counted) await creditCountedSession(tx, { userId: user.id, sessionId, dayKey: workDayKey(now, user.timezone), at: now })
+      if (counted) await creditCountedSession(tx, { userId: user.id, sessionId, dayKey: workDayKey(end, user.timezone), at: now })
     })
   } catch (error) {
     if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
@@ -445,7 +448,8 @@ async function completeTaskAndRest(
   const now = ctx.now()
   const cleanTitle = extractedTitle?.replace(/\s+/g, ' ').trim().slice(0, 80) || null
   const rest = session.plannedRestMinutes ?? restFor(session.plannedMinutes)
-  const elapsedSeconds = Math.floor(activeElapsedMs(session, now) / 1000)
+  const end = overnightCutoff(session, user.timezone, now) ?? now
+  const elapsedSeconds = Math.floor(activeElapsedMs(session, end) / 1000)
   const elapsedMinutes = Math.floor(elapsedSeconds / 60)
   const counted = isCounted('finished', elapsedMinutes)
   let taskTitle = cleanTitle
@@ -484,7 +488,7 @@ async function completeTaskAndRest(
       }
       await transition(tx, { sessionId: current.id, userId: user.id }, 'running', 'finished', {
         outcome: 'done',
-        finishedAt: now,
+        finishedAt: end,
         counted,
         progress: null,
         restChoice: 'rest',
@@ -522,7 +526,7 @@ async function completeTaskAndRest(
       }, { at: now, sessionId: current.id })
       if (task) await logEvent(tx, user.id, 'task_completed', { task_id: task.id, source: 'text' }, { at: now, sessionId: current.id })
       await logEvent(tx, user.id, 'rest_chosen', { session_id: current.id, choice: 'rest', rest_minutes: rest }, { at: now, sessionId: current.id })
-      if (counted) await creditCountedSession(tx, { userId: user.id, sessionId: current.id, dayKey: workDayKey(now, user.timezone), at: now })
+      if (counted) await creditCountedSession(tx, { userId: user.id, sessionId: current.id, dayKey: workDayKey(end, user.timezone), at: now })
     })
   } catch (error) {
     if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
@@ -555,7 +559,7 @@ export async function onSessionHelpAction(
 export async function askIntent(ctx: Ctx, user: User, opts: { continue?: boolean; preset?: { minutes: number }; prefix?: string } = {}) {
   const session = await openCollecting(ctx, user.id, opts.preset)
   if (session.state === 'running') {
-    await reply(ctx, user, T.alreadyRunning(endText(ctx, user, session)),session.reminderPolicy===1?quietKeyboard(user,ctx.now()):undefined)
+    await reply(ctx, user, T.alreadyRunning(endText(ctx, user, session), session.plannedEndAt !== null && session.plannedEndAt <= ctx.now()),session.reminderPolicy===1?quietKeyboard(user,ctx.now()):undefined)
     return
   }
   if (session.state === 'paused') {
@@ -586,7 +590,7 @@ export async function startUnassigned(ctx: Ctx, user: User, options: { minutes?:
     const existing = await tx.focusSession.findFirst({ where: { userId: user.id, state: { in: [...ACTIVE_STATES] } } })
     return existing ?? tx.focusSession.create({ data: { userId: user.id, state: 'collecting_intent', createdAt: ctx.now() } })
   }) : await openCollecting(ctx, user.id)
-  if (session.state === 'running') return reply(ctx, user, T.alreadyRunning(endText(ctx, user, session)),session.reminderPolicy===1?quietKeyboard(user,ctx.now()):undefined)
+  if (session.state === 'running') return reply(ctx, user, T.alreadyRunning(endText(ctx, user, session), session.plannedEndAt !== null && session.plannedEndAt <= ctx.now()),session.reminderPolicy===1?quietKeyboard(user,ctx.now()):undefined)
   if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
   // Намерение уже написано и длина предложена — «Начать сессию» значит «Ок»,
   // а не «стереть, что я написал».
@@ -703,7 +707,7 @@ export async function startTaskSession(ctx: Ctx, user: User, taskId: string): Pr
 export async function onIntentText(ctx: Ctx, user: User, text: string, prepared?: IntentResult): Promise<void> {
   const session = await openCollecting(ctx, user.id)
   if (session.state === 'running') {
-    await reply(ctx, user, T.alreadyRunning(endText(ctx, user, session)),session.reminderPolicy===1?quietKeyboard(user,ctx.now()):undefined)
+    await reply(ctx, user, T.alreadyRunning(endText(ctx, user, session), session.plannedEndAt !== null && session.plannedEndAt <= ctx.now()),session.reminderPolicy===1?quietKeyboard(user,ctx.now()):undefined)
     return
   }
   if (session.state === 'paused') {
@@ -1312,15 +1316,16 @@ export async function onOutcome(ctx: Ctx, user: User, sessionId: string, outcome
 
   const legacyBreak = session.state === 'paused' && session.reminderPolicy !== 1
 
-  const elapsed = Math.floor(activeElapsedMs(session, now) / MIN)
+  const end = overnightCutoff(session, user.timezone, now) ?? now
+  const elapsed = Math.floor(activeElapsedMs(session, end) / MIN)
   const counted = isCounted('finished', elapsed)
   const early = session.plannedEndAt !== null && now < session.plannedEndAt
-  const day = workDayKey(now, user.timezone)
+  const day = workDayKey(end, user.timezone)
 
   let credit: Credit | null = null
   try {
     await inputTransaction(ctx, async (tx) => {
-      await transition(tx, { sessionId, userId: user.id }, session.state as 'running'|'paused', 'finished', { outcome, finishedAt: now, counted, ...(legacyBreak ? { restChoice: 'rest' } : {}), ...(session.state === 'paused' ? { pausedAt:null,pausedSeconds:session.pausedSeconds+Math.floor((now.getTime()-session.pausedAt!.getTime())/1000) } : {}) })
+      await transition(tx, { sessionId, userId: user.id }, session.state as 'running'|'paused', 'finished', { outcome, finishedAt: end, counted, ...(legacyBreak ? { restChoice: 'rest' } : {}), ...(session.state === 'paused' ? { pausedAt:null,pausedSeconds:session.pausedSeconds+Math.floor((now.getTime()-session.pausedAt!.getTime())/1000) } : {}) })
       if (legacyBreak) {
         // Сохраняем ту же строку/дедлайн break_over даже при уже начавшейся
         // доставке: отчёт не продлевает отдых и не создаёт второго напоминания.
@@ -1355,10 +1360,17 @@ function creditLines(credit: Credit | null): string[] {
 
 // Отчёт — пара слов после исхода. Привязывается к последней закрытой сессии
 // этого же пользователя, у которой отчёта ещё нет.
-export function pendingReportSession(db: Ctx['db'] | Prisma.TransactionClient, userId: string, now: Date, includeId?: string) {
+export async function pendingReportSession(db: Ctx['db'] | Prisma.TransactionClient, userId: string, now: Date, includeId?: string) {
+  const since = new Date(now.getTime() - REPORT_WINDOW_MS)
+  const user = await db.user.findUniqueOrThrow({ where: { id: userId }, select: { subjectId: true } })
+  // A morning explicit outcome is recent even when physical work ended yesterday.
+  const outcomes = await db.event.findMany({ where: { subjectId: user.subjectId, type: 'session_completed', createdAt: { gte: since }, sessionId: { not: null } }, select: { sessionId: true } })
   return db.focusSession.findFirst({
-    where: { userId, state: 'finished', AND: [{ OR: [{ reportText: null }, ...(includeId ? [{ id: includeId }] : [])] }], OR: [{ restChoice: null }, { restChoice: 'rest' }], finishedAt: { gte: new Date(now.getTime() - REPORT_WINDOW_MS) } },
-    orderBy: { finishedAt: 'desc' },
+    where: { userId, state: 'finished', AND: [
+      { OR: [{ reportText: null }, ...(includeId ? [{ id: includeId }] : [])] },
+      { OR: [{ restChoice: null }, { restChoice: 'rest' }] },
+      { OR: [{ finishedAt: { gte: since } }, { id: { in: outcomes.map(e => e.sessionId!) } }] },
+    ] }, orderBy: { finishedAt: 'desc' },
   })
 }
 

@@ -89,6 +89,8 @@ export const T = {
   statusPreparing: 'Сессия ещё не началась: выбираем задачу и длительность.',
   statusNoTask: 'Задача не выбрана.',
   statusWork: 'Идёт рабочая сессия.',
+  statusTimerExpired: 'Плановый таймер завершён. Сессия ещё не закрыта.',
+  statusUnconfirmedElapsed: (duration: string) => `С начала рабочего периода: ${duration}. Фактическое время работы не подтверждено.`,
   statusRest: 'Идёт отдых.',
   statusUnknownTime: 'Время начала не сохранено.',
   statusElapsed: (duration: string) => `Прошло: ${duration}.`,
@@ -216,8 +218,9 @@ export const T = {
   runningDurationUpdated: (minutes: number, end: string) =>
     `Длительность изменил: ${minutesText(minutes)}. Новое время окончания — ${end}.`,
   cancelled: 'Старт отменил. Новую задачу не сохранял.',
-  alreadyRunning: (end: string | null) =>
-    end ? `Сессия идёт до ${end}. Закончить раньше — /done, бросить — /stop.` : 'Сессия идёт. Закончить — /done, бросить — /stop.',
+  alreadyRunning: (end: string | null, expired = false) =>
+    expired ? `Плановый таймер уже завершился${end ? ` (${end})` : ''}. Сессия ещё не закрыта; фактическое время работы не подтверждено. Завершить — /done, остановить — /stop.`
+      : end ? `Сессия идёт до ${end}. Закончить раньше — /done, бросить — /stop.` : 'Сессия идёт. Закончить — /done, бросить — /stop.',
   sessionHelpContinue: 'Продолжаем. Вернись к текущему маленькому шагу.',
   sessionHelpAction: {
     continue: 'Продолжить',
