@@ -591,7 +591,9 @@ export async function startUnassigned(ctx: Ctx, user: User, options: { minutes?:
     return existing ?? tx.focusSession.create({ data: { userId: user.id, state: 'collecting_intent', createdAt: ctx.now() } })
   }) : await openCollecting(ctx, user.id)
   if (session.state === 'running') return reply(ctx, user, T.alreadyRunning(endText(ctx, user, session), session.plannedEndAt !== null && session.plannedEndAt <= ctx.now()),session.reminderPolicy===1?quietKeyboard(user,ctx.now()):undefined)
-  if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
+  // Быстрый старт — новая работа, не вопрос о возврате. Закрываем прежнюю
+  // сессию с сохранением работы до паузы и запускаем таймер без задачи.
+  if (session.state === 'paused') return onNewAfterBreak(ctx, user, () => startUnassigned(ctx, user, options))
   // Намерение уже написано и длина предложена — «Начать сессию» значит «Ок»,
   // а не «стереть, что я написал».
   if (session.intentText !== null && session.plannedMinutes !== null) return startRunning(ctx, user, session.id)
