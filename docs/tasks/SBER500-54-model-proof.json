@@ -1,0 +1,95 @@
+{
+  "model": "gpt-5.4",
+  "results": [
+    {
+      "id": "original-idle",
+      "pass": true,
+      "result": {
+        "route": "clarify",
+        "question": "Хочешь продолжить — сколько ещё — или отдыхать?"
+      }
+    },
+    {
+      "id": "original-running",
+      "pass": true,
+      "result": {
+        "route": "clarify",
+        "question": "Хочешь продолжить — сколько ещё — или отдыхать?"
+      }
+    },
+    {
+      "id": "original-paused",
+      "pass": true,
+      "result": {
+        "route": "clarify",
+        "question": "Хочешь продолжить — сколько ещё — или отдыхать?"
+      }
+    },
+    {
+      "id": "pending-duration",
+      "pass": true,
+      "result": {
+        "route": "clarify",
+        "question": "Хочешь продолжить — сколько ещё — или отдыхать?"
+      }
+    },
+    {
+      "id": "past-task",
+      "pass": true,
+      "result": {
+        "route": "clarify",
+        "question": "Хочешь продолжить — сколько ещё — или отдыхать?"
+      }
+    },
+    {
+      "id": "past-numeric",
+      "pass": true,
+      "result": {
+        "route": "clarify",
+        "question": "Хочешь продолжить — сколько ещё — или отдыхать?"
+      }
+    },
+    {
+      "id": "future-idle",
+      "pass": true,
+      "result": {
+        "route": "continue_same",
+        "minutes": 30
+      }
+    },
+    {
+      "id": "future-running",
+      "pass": true,
+      "result": {
+        "route": "continue_same",
+        "minutes": 30
+      }
+    },
+    {
+      "id": "mixed-work",
+      "pass": true,
+      "result": {
+        "route": "continue_same",
+        "minutes": 15
+      }
+    },
+    {
+      "id": "mixed-break",
+      "pass": true,
+      "result": {
+        "route": "break",
+        "minutes": 5
+      }
+    }
+  ],
+  "baseline": [
+    {
+      "id": "original-idle",
+      "pass": false,
+      "result": {
+        "route": "unclear"
+      }
+    }
+  ],
+  "scope": "Isolated exact parser; synthetic input. Not live Telegram or actual production transition reproduction."
+}

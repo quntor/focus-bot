@@ -32,6 +32,40 @@ async function past(userId: string, now: Date) {
 
 describe.skipIf(!hasDb)('semantic routing: реальные регрессии и отсутствие смешанных записей', () => {
   beforeEach(resetDb)
+  it.each(['none', 'running', 'paused', 'running_duration', 'overnight'] as const)('уточнение уже отработанного времени не меняет %s или очередь', async (mode) => {
+    const text = 'я уже работаю полчаса'
+    const question = 'Хочешь продолжить — сколько ещё — или отдыхать?'
+    // Execution contract only; real-model recognition is probed separately.
+    const { bot, llm, user } = await ready({ route: 'clarify', text, question, followUp: null })
+    bot.ctx.remindersEnabled = true
+    const now = bot.ctx.now()
+    const task = await prisma.task.create({ data: { userId: user.id, title: 'Отчёт' } })
+    const startedAt = new Date(now.getTime() - (mode === 'overnight' ? 24 * 60 : 30) * 60_000)
+    const active = mode === 'none' ? null : await prisma.focusSession.create({ data: {
+      userId: user.id, taskId: task.id, intentText: task.title, state: mode === 'paused' ? 'paused' : 'running',
+      reminderPolicy: 1, startedAt, plannedMinutes: 40,
+      plannedEndAt: new Date(startedAt.getTime() + 40 * 60_000), pausedAt: mode === 'paused' ? now : null,
+    } })
+    if (active) await prisma.workPeriod.create({ data: { sessionId: active.id, startedAt, endedAt: mode === 'paused' ? now : null } })
+    const pendingInput = mode === 'running_duration' ? `running_duration:${active!.id}` : 'task_add'
+    await prisma.user.update({ where: { id: user.id }, data: { pendingInput, reminderPolicy: 1 } })
+    const chain = await prisma.reminderChain.create({ data: { userId: user.id, sessionId: active?.id ?? null,
+      kind: mode === 'paused' ? 'break' : 'work', phaseStartedAt: startedAt, firstDueAt: now, nextDueAt: now, intervalMinutes: 40 } })
+    await prisma.outboxMessage.create({ data: { userId: user.id, kind: 'reminder', chainId: chain.id, chainRevision: 1, ordinal: 0,
+      idempotencyKey: `reminder:${chain.id}:1:0`, sendAfter: now } })
+    const read = async () => ({
+      sessions: await prisma.focusSession.findMany({ where: { userId: user.id } }),
+      periods: await prisma.workPeriod.findMany(), tasks: await prisma.task.findMany(),
+      chains: await prisma.reminderChain.findMany(), queue: await prisma.outboxMessage.findMany(),
+      pending: (await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).pendingInput,
+    })
+    const before = await read()
+    await bot.text(A, text)
+    expect(await read()).toEqual(before)
+    expect(bot.lastText(A)).toBe(question)
+    expect(llm.complete).toHaveBeenCalledTimes(1)
+    expect((await prisma.event.findFirstOrThrow({ where: { type: 'semantic_routed' } })).payload).toMatchObject({ route: 'clarify' })
+  })
   it.each([
     ['running', 'еще 15 минут поработаю', 15],
     ['running', 'продолжу работать', 40],
