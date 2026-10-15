@@ -6,6 +6,7 @@ import { cancelPending } from '../outbox/queue.js'
 import { ensureNextMeeting } from '../bot/day-flow.js'
 import { reply, type Ctx } from '../bot/context.js'
 import { autoFinish } from '../bot/session-flow.js'
+import { allowedAt } from '../reminders/cadence.js'
 import { T } from '../bot/texts.js'
 import { StaleTransition } from '../session/fsm.js'
 
@@ -51,7 +52,7 @@ export async function sweepOnce(ctx: Ctx): Promise<void> {
       if (error instanceof StaleTransition) continue
       throw error
     }
-    if (result && !s.user.blockedAt) await reply(ctx, s.user, T.autoFinished(result.elapsed, result.counted))
+    if (result && await backgroundAllowed(ctx, s.userId)) await reply(ctx, s.user, T.autoFinished(result.elapsed, result.counted))
   }
 
   // Засчитывается работа до перерыва, дальше — следующая встреча, чтобы бот
@@ -83,7 +84,7 @@ export async function sweepOnce(ctx: Ctx): Promise<void> {
       if (error instanceof StaleTransition) continue
       throw error
     }
-    if (result && !s.user.blockedAt) await reply(ctx, s.user, T.breakExpired(result.elapsed, result.counted))
+    if (result && await backgroundAllowed(ctx, s.userId)) await reply(ctx, s.user, T.breakExpired(result.elapsed, result.counted))
   }
 
   const stale = await ctx.db.focusSession.findMany({
@@ -153,4 +154,12 @@ export function startLoops(ctx: Ctx, run: { outbox: () => Promise<number> }): ()
   return () => {
     stopped = true
   }
+}
+
+// Accounting/cleanup never waits for office hours; only the unsolicited notice does.
+async function backgroundAllowed(ctx: Ctx, userId: string): Promise<boolean> {
+  const user = await ctx.db.user.findUnique({ where: { id: userId } })
+  if (!user || user.blockedAt) return false
+  const due = allowedAt(user, { nightUntil: null }, ctx.now())
+  return due !== null && due <= ctx.now()
 }

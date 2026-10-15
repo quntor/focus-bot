@@ -67,6 +67,47 @@ describe.skipIf(!hasDb)('persistent reminder delivery', () => {
     expect(f.tg.sent).toHaveLength(0)
     expect((await prisma.outboxMessage.findUniqueOrThrow({ where: { id: f.message.id } })).status).toBe('pending')
   })
+  it.each(['work', 'break', 'post_rest'])('%s repeat does not inherit a first-timer night exception', async kind => {
+    const f = await setup()
+    f.setNow(new Date('2026-10-05T19:00:00Z'))
+    if (kind === 'break') await prisma.focusSession.update({where:{id:f.session.id},data:{state:'paused',pausedAt:f.ctx.now()}})
+    if (kind === 'post_rest') await prisma.focusSession.update({where:{id:f.session.id},data:{state:'finished',finishedAt:f.ctx.now(),restChoice:'rest'}})
+    await prisma.reminderChain.update({where:{id:f.chain.id},data:{kind,ordinal:1,nightUntil:new Date('2026-10-06T07:00:00Z')}})
+    const message=await prisma.outboxMessage.update({where:{id:f.message.id},data:{ordinal:1,lockedUntil:new Date(f.ctx.now().getTime()+60000)}})
+    await deliverReminder(f.ctx,message)
+    expect(f.tg.sent).toHaveLength(0)
+    expect((await prisma.outboxMessage.findUniqueOrThrow({where:{id:message.id}})).sendAfter).toEqual(new Date('2026-10-06T07:00:00Z'))
+  })
+  it.each(['work', 'break'])('first night %s signal is retained but its next check waits for working hours',async kind=>{
+    const f=await setup()
+    f.setNow(new Date('2026-10-05T19:00:00Z'))
+    if(kind==='break') await prisma.focusSession.update({where:{id:f.session.id},data:{state:'paused',pausedAt:f.ctx.now()}})
+    await prisma.reminderChain.update({where:{id:f.chain.id},data:{kind,nightUntil:new Date('2026-10-06T07:00:00Z')}})
+    const first=await prisma.outboxMessage.update({where:{id:f.message.id},data:{lockedUntil:new Date(f.ctx.now().getTime()+60000)}})
+    await deliverReminder(f.ctx,first)
+    expect(f.tg.sent).toHaveLength(1)
+    f.advance(45)
+    const next=await prisma.outboxMessage.findFirstOrThrow({where:{chainId:f.chain.id,status:'pending'}})
+    const claimed=await prisma.outboxMessage.update({where:{id:next.id},data:{status:'sending',lockedUntil:new Date(f.ctx.now().getTime()+60000)}})
+    await deliverReminder(f.ctx,claimed)
+    expect(f.tg.sent).toHaveLength(1)
+    expect((await prisma.outboxMessage.findUniqueOrThrow({where:{id:next.id}})).sendAfter).toEqual(new Date('2026-10-06T07:00:00Z'))
+  })
+  it('a weekday change during generation suppresses a prepared background message',async()=>{
+    const f=await setup()
+    await prisma.reminderChain.update({where:{id:f.chain.id},data:{ordinal:1}})
+    const message=await prisma.outboxMessage.update({where:{id:f.message.id},data:{ordinal:1,lockedUntil:new Date(f.ctx.now().getTime()+60000)}})
+    let finish!:()=>void, began!:()=>void
+    const started=new Promise<void>(r=>{began=r}), paused=new Promise<void>(r=>{finish=r})
+    f.ctx.llm={enabled:true,model:'test',async complete(){began();await paused;return {text:JSON.stringify(fallbackReminder('work')),usage:null}}}
+    const sending=deliverReminder(f.ctx,message)
+    await started
+    await prisma.user.update({where:{id:f.user.id},data:{notificationDays:0}})
+    finish()
+    await sending
+    expect(f.tg.sent).toHaveLength(0)
+    expect((await prisma.outboxMessage.findUniqueOrThrow({where:{id:message.id}})).status).toBe('pending')
+  })
   it('429 retries cached text without advancing cadence or replaying generation', async () => {
     const f = await setup()
     f.tg.failNext.push(new TelegramError('rate', 429, 15))

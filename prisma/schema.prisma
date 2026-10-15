@@ -78,6 +78,8 @@ model User {
   proactive            Boolean   @default(true)
   // Время первого сообщения дня, HH:MM в поясе пользователя.
   morningTime          String    @default("10:00") @map("morning_time")
+  // Bits Monday..Sunday; zero disables background messages, not explicit timers.
+  notificationDays     Int       @default(127) @map("notification_days")
   eveningTime          String    @default("21:00") @map("evening_time")
   // Отказы подряд: «ещё отдохну», молчание на напоминание. Третий — повод
   // спросить вслух, а не молча долбить дальше.

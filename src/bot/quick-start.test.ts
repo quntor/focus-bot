@@ -38,45 +38,42 @@ describe.skipIf(!hasDb)('SBER500-41 quick start without returning preamble', () 
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: current.id } })).toEqual(before)
     expect(await prisma.focusSession.count({ where: { userId: current.userId } })).toBe(1)
   })
-  it.each([0, 1] as const)('starts immediately from break under reminder policy %s', async policy => {
-    for (const control of ['focus', 'start', 'callback'] as const) {
-      await resetDb()
-      const bot = makeBot()
-      bot.ctx.remindersEnabled = policy === 1
-      bot.ctx.reminderUserIds = [String(A)]
-      await bot.setupOnboarded(A)
-      const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
-      await prisma.user.update({ where: { id: user.id }, data: { technique: 'pomodoro' } })
-      await bot.textAs(A, text, action('focus'))
-      const old = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })
-      expect(old.reminderPolicy).toBe(policy)
-      bot.advance(10)
-      await bot.textAs(A, 'Перерыв', { text: 'Перерыв', route: 'break', minutes: null, durationSource: null, followUp: null })
-      expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ state: 'paused' })
-      bot.advance(5)
-      const before = bot.textsTo(A).length
-      if (control === 'callback') await bot.press(A, 'quick::start')
-      else await bot.textAs(A, text, action(control))
-      const running = await prisma.focusSession.findMany({ where: { userId: user.id, state: 'running' } })
-      expect(running).toHaveLength(1)
-      expect(running[0]!.id).not.toBe(old.id)
-      expect(running[0]).toMatchObject({ taskId: null, intentText: null, startedAt: bot.now(), plannedMinutes: 25, plannedEndAt: new Date(bot.now().getTime() + 25 * 60_000) })
-      expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ state: 'finished', pausedSeconds: 300 })
-      expect(await buildSummary(prisma, user, '2026-09-22')).toMatchObject({ totalMinutes: 10 })
-      expect(await prisma.outboxMessage.count({ where: { userId: user.id, status: { in: ['pending', 'paused'] }, OR: [{ idempotencyKey: { startsWith: `ping:${old.id}` } }, { idempotencyKey: { startsWith: `session_end:${old.id}` } }] } })).toBe(0)
-      if (policy === 1) {
-        expect(await prisma.reminderChain.findMany({ where: { userId: user.id, status: 'active', kind: { in: ['work', 'break'] } } })).toMatchObject([{ kind: 'work', sessionId: running[0]!.id }])
-      }
-      const replies = bot.textsTo(A).slice(before)
-      expect(replies).toHaveLength(1)
-      expect(replies[0]).toContain('Сессия началась')
-      expect(replies[0]).not.toContain('Ты на перерыве')
-      const started = running[0]
-      bot.advance(1)
-      await bot.textAs(A, text, action('focus'))
-      expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: started!.id } })).toEqual(started)
-      expect(await prisma.focusSession.count({ where: { userId: user.id, state: { in: ['running', 'paused'] } } })).toBe(1)
+  it.each([0, 1].flatMap(policy => (['focus', 'start', 'callback'] as const).map(control => ({ policy, control }))))('starts immediately from break under policy $policy via $control', async ({ policy, control }) => {
+    const bot = makeBot()
+    bot.ctx.remindersEnabled = policy === 1
+    bot.ctx.reminderUserIds = [String(A)]
+    await bot.setupOnboarded(A)
+    const user = await prisma.user.findUniqueOrThrow({ where: { tgId: BigInt(A) } })
+    await prisma.user.update({ where: { id: user.id }, data: { technique: 'pomodoro' } })
+    await bot.textAs(A, text, action('focus'))
+    const old = await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })
+    expect(old.reminderPolicy).toBe(policy)
+    bot.advance(10)
+    await bot.textAs(A, 'Перерыв', { text: 'Перерыв', route: 'break', minutes: null, durationSource: null, followUp: null })
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ state: 'paused' })
+    bot.advance(5)
+    const before = bot.textsTo(A).length
+    if (control === 'callback') await bot.press(A, 'quick::start')
+    else await bot.textAs(A, text, action(control))
+    const running = await prisma.focusSession.findMany({ where: { userId: user.id, state: 'running' } })
+    expect(running).toHaveLength(1)
+    expect(running[0]!.id).not.toBe(old.id)
+    expect(running[0]).toMatchObject({ taskId: null, intentText: null, startedAt: bot.now(), plannedMinutes: 25, plannedEndAt: new Date(bot.now().getTime() + 25 * 60_000) })
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ state: 'finished', pausedSeconds: 300 })
+    expect(await buildSummary(prisma, user, '2026-09-22')).toMatchObject({ totalMinutes: 10 })
+    expect(await prisma.outboxMessage.count({ where: { userId: user.id, status: { in: ['pending', 'paused'] }, OR: [{ idempotencyKey: { startsWith: `ping:${old.id}` } }, { idempotencyKey: { startsWith: `session_end:${old.id}` } }] } })).toBe(0)
+    if (policy === 1) {
+      expect(await prisma.reminderChain.findMany({ where: { userId: user.id, status: 'active', kind: { in: ['work', 'break'] } } })).toMatchObject([{ kind: 'work', sessionId: running[0]!.id }])
     }
+    const replies = bot.textsTo(A).slice(before)
+    expect(replies).toHaveLength(1)
+    expect(replies[0]).toContain('Сессия началась')
+    expect(replies[0]).not.toContain('Ты на перерыве')
+    const started = running[0]
+    bot.advance(1)
+    await bot.textAs(A, text, action('focus'))
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: started!.id } })).toEqual(started)
+    expect(await prisma.focusSession.count({ where: { userId: user.id, state: { in: ['running', 'paused'] } } })).toBe(1)
   })
 
 })

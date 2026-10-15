@@ -66,7 +66,8 @@ function deferAt(user: User, chain: ReminderChain, now: Date): Date | null {
     : !user.pingsEnabled && chain.ordinal > 0
   if (checksDisabled) return new Date(now.getTime() + 60 * 60_000)
   const quiet = user.quietUntil && user.quietUntil > now ? user.quietUntil : now
-  return allowedAt(user, chain, quiet) ?? new Date(now.getTime() + 60 * 60_000)
+  const firstTimer = ['work', 'break'].includes(chain.kind) && chain.ordinal === 0
+  return allowedAt(firstTimer ? { ...user, notificationDays: 127 } : user, firstTimer ? chain : { nightUntil: null }, quiet) ?? new Date(now.getTime() + 60 * 60_000)
 }
 
 async function releaseGate(tx: Tx, userId: string, token: string) {

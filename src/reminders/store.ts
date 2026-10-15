@@ -38,8 +38,9 @@ export async function resetChain(tx: Prisma.TransactionClient, chain: ReminderCh
 }
 export async function advance(tx: Prisma.TransactionClient, chain: ReminderChain, anchor: Date): Promise<void> {
   const user = chain.kind === 'morning' ? await tx.user.findUniqueOrThrow({ where: { id: chain.userId } }) : null
-  const due = user ? nextLocalTime(user.timezone, parseClock(user.morningTime)!, anchor)
+  const due = user ? allowedAt(user, { nightUntil: null }, nextLocalTime(user.timezone, parseClock(user.morningTime)!, anchor))
     : new Date(anchor.getTime()+repeatMinutes(chain.kind,chain.intervalMinutes,chain.restStep)*MIN)
+  if (!due) { await cancelChain(tx, chain.id); return }
   const next = await tx.reminderChain.updateMany({where:{id:chain.id,revision:chain.revision,status:'active',ordinal:chain.ordinal},data:{
     ordinal:{increment:1},restStep:chain.kind==='break'||chain.kind==='post_rest'?{increment:1}:chain.restStep,
     deliveryAnchorAt:anchor,nextDueAt:due}})
@@ -57,11 +58,13 @@ export async function ensureMorning(tx: Prisma.TransactionClient,user: User,now:
   // A human appointment owns the next invitation, not a competing morning.
   if(await tx.outboxMessage.count({where:{userId:user.id,kind:'meeting',status:{in:['pending','paused','sending']},payload:{path:['defaulted'],equals:false}}})) return
   const resolved=await morningResolved(tx,user,now)
-  const permitted=allowedAt(user,{nightUntil:null},now)
-  if(!permitted) return
-  const due=resolved?localDateTime(user.timezone,addDays(dayKey(now,user.timezone),1),parseClock(user.morningTime)!):permitted
-  const off=await tx.dayOff.findUnique({where:{userId_dayKey:{userId:user.id,dayKey:dayKey(due,user.timezone)}}})
-  const at=off?nextLocalTime(user.timezone,parseClock(user.morningTime)!,due):due
+  let at=allowedAt(user,{nightUntil:null},resolved?localDateTime(user.timezone,addDays(dayKey(now,user.timezone),1),parseClock(user.morningTime)!):now)
+  const offDays=await tx.dayOff.findMany({where:{userId:user.id},select:{dayKey:true}})
+  for(let i=0;at&&i<=offDays.length;i++){
+    if(!offDays.some(off=>off.dayKey===dayKey(at!,user.timezone))) break
+    at=allowedAt(user,{nightUntil:null},nextLocalTime(user.timezone,parseClock(user.morningTime)!,at))
+  }
+  if(!at)return
   await replaceChain(tx,user,'morning',null,now,60,{due:at,localDate:dayKey(at,user.timezone)})
 }
 export async function reconcile(ctx: Ctx): Promise<void> {

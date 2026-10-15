@@ -297,7 +297,7 @@ async function finish(ctx: Ctx, id: string, data: Prisma.OutboxMessageUpdateInpu
 }
 
 function legacyFingerprint(user: User): string {
-  return JSON.stringify([user.pendingInput, user.lastUserActionAt, user.timezone, user.morningTime, user.eveningTime, user.quietUntil, user.idleRestAt, user.proactive, user.pingsEnabled, user.reminderPolicy])
+  return JSON.stringify([user.pendingInput, user.lastUserActionAt, user.timezone, user.morningTime, user.eveningTime, user.notificationDays, user.quietUntil, user.idleRestAt, user.proactive, user.pingsEnabled, user.reminderPolicy])
 }
 
 async function legacySessionFingerprint(db: Prisma.TransactionClient, m: OutboxMessage): Promise<string> {
@@ -324,7 +324,7 @@ async function legacyEligibility(tx: Prisma.TransactionClient, ctx: Ctx, m: Outb
   // Explicit legacy timers keep their accepted deadline, including at night.
   // Quiet applies to every mode; work windows apply to unsolicited messages.
   if (user.quietUntil && user.quietUntil > ctx.now()) return user.quietUntil
-  if (m.kind === 'summary' || m.kind === 'meeting' && p.defaulted === true || user.reminderPolicy === 1 && m.kind !== 'meeting') {
+  if (['summary', 'ping', 'rest_over'].includes(m.kind) || m.kind === 'meeting' && p.defaulted === true || user.reminderPolicy === 1 && m.kind !== 'meeting') {
     const permitted = m.kind === 'summary' ? summaryAllowedAt(user, ctx.now()) : allowedAt(user, { nightUntil: null }, ctx.now())
     if (!permitted) return new Date(ctx.now().getTime() + 60 * MIN)
     if (permitted > ctx.now()) return permitted

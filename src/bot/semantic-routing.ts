@@ -33,7 +33,7 @@ function currentInput(ctx: Ctx, userId: string, inputId: number | null): boolean
 }
 function pendingType(pending: string) {
   const prefix = pending.split(':')[0]!
-  const known = ['retro', 'task_split_clarify', 'task_split_manual', 'none', 'report_text', 'session_end', 'running_work', 'running_duration', 'running_task_choice', 'task_add', 'task_edit', 'task_split', 'task_split_manual', 'timezone', 'settings_timezone', 'start_time', 'ritual', 'profile_ritual', 'meeting_time', 'meeting_time_soft', 'morning_time', 'profile'] as const
+  const known = ['retro', 'task_split_clarify', 'task_split_manual', 'none', 'report_text', 'session_end', 'running_work', 'running_duration', 'running_task_choice', 'task_add', 'task_edit', 'task_split', 'task_split_manual', 'timezone', 'settings_timezone', 'start_time', 'ritual', 'profile_ritual', 'meeting_time', 'meeting_time_soft', 'morning_time', 'schedule_start', 'schedule_end', 'profile'] as const
   return known.find((value) => value === prefix) ?? 'other'
 }
 async function snapshot(ctx: Ctx, userId: string, db: Ctx['db'] | Prisma.TransactionClient = ctx.db) {
@@ -49,7 +49,7 @@ async function snapshot(ctx: Ctx, userId: string, db: Ctx['db'] | Prisma.Transac
   const ownedTasks = [...relevant.sort((a, b) => relevantIds.indexOf(a.id) - relevantIds.indexOf(b.id)), ...pool.filter(t => !relevantIds.includes(t.id))].slice(0, 20)
   const labelledTasks = ownedTasks.map((task, i) => ({ ...task, label: `t${i + 1}` }))
   // Whole persisted state stays local. The model sees only a bounded projection.
-  const fingerprint = JSON.stringify({ user: user && { pendingInput: user.pendingInput, timezone: user.timezone, technique: user.technique, defaultWorkMinutes: user.defaultWorkMinutes, defaultRestMinutes: user.defaultRestMinutes, profileText: user.profileText, idleRestAt: user.idleRestAt, quietUntil: user.quietUntil }, active, last, report, ownedTasks })
+  const fingerprint = JSON.stringify({ user: user && { pendingInput: user.pendingInput, notificationDays: user.notificationDays, morningTime: user.morningTime, eveningTime: user.eveningTime, timezone: user.timezone, technique: user.technique, defaultWorkMinutes: user.defaultWorkMinutes, defaultRestMinutes: user.defaultRestMinutes, profileText: user.profileText, idleRestAt: user.idleRestAt, quietUntil: user.quietUntil }, active, last, report, ownedTasks })
   return { user, active, last, report, labelledTasks, fingerprint }
 }
 type Snapshot = Awaited<ReturnType<typeof snapshot>>

@@ -2,7 +2,7 @@ import { quietKeyboard } from '../reminders/actions.js'
 import { inputTransaction } from './input-lock.js'
 import type { User } from '@prisma/client'
 import { logEvent } from '../analytics/log.js'
-import { parseClock, zoneFromLocalClock, offsetMinutes } from '../lib/time.js'
+import { localDateTime, parseClock, zoneFromLocalClock, offsetMinutes } from '../lib/time.js'
 import { cancelPending } from '../outbox/queue.js'
 import { isTechnique } from '../session/technique.js'
 import { cb } from './callbacks.js'
@@ -158,6 +158,7 @@ export async function sendSettings(ctx: Ctx, user: User): Promise<void> {
     user,
     T.settings({ technique: user.technique, pings: user.pingsEnabled, proactive: user.proactive, morning: user.morningTime, timezone: user.timezone })+`\nСтандарт работы: ${user.defaultWorkMinutes ?? 'по технике'}${user.defaultWorkMinutes !== null ? ' мин' : ''}; отдых: ${user.defaultRestMinutes ?? 'по технике'}${user.defaultRestMinutes !== null ? ' мин' : ''}. Можно написать: «Стандартная сессия 50 минут. Отдых 15 минут».`+(user.reminderPolicy===1?'\nПинги управляют повторными проверками работы и перерыва, но не первым сигналом конца таймера. «Писать первым» — утром и после отдыха.':''),
     [
+      [{ text: 'Выходные', data: cb('set', null, 'schedule') }],
       [{ text: T.setTechnique, data: cb('set', null, 'technique') }],
       [{ text: T.togglePings, data: cb('set', null, 'pings') }],
       [{ text: T.toggleProactive, data: cb('set', null, 'proactive') }],
@@ -172,6 +173,7 @@ export async function sendSettings(ctx: Ctx, user: User): Promise<void> {
 
 export async function onSetting(ctx: Ctx, user: User, arg: string): Promise<void> {
   const now = ctx.now()
+  if (arg === 'schedule' || arg.startsWith('day_') || arg === 'schedule_start' || arg === 'schedule_end' || arg === 'schedule_back') return onScheduleSetting(ctx, user, arg)
   if (arg === 'technique') {
     return reply(ctx, user, T.techniques, [
       [
@@ -229,6 +231,7 @@ export async function onMorningText(ctx: Ctx, user: User, text: string): Promise
   const clock = parseClock(text)
   if (!clock) return reply(ctx, user, T.askMorning)
   const value = `${String(clock.h).padStart(2, '0')}:${String(clock.m).padStart(2, '0')}`
+  if (value >= user.eveningTime) return reply(ctx, user, 'Начало должно быть раньше конца рабочего времени (' + user.eveningTime + '). Укажи другое время.')
   const now = ctx.now()
   await inputTransaction(ctx, async (tx) => {
     await tx.user.update({ where: { id: user.id }, data: { morningTime: value, pendingInput: 'none' } })
@@ -298,4 +301,74 @@ export async function onDeleteConfirm(ctx: Ctx, user: User): Promise<void> {
   } catch {
     // Пользователя уже нет — ни помечать блокировку, ни логировать нечего.
   }
+}
+
+const SCHEDULE_DAYS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
+
+export async function sendSchedule(ctx: Ctx, user: User): Promise<void> {
+  const days = SCHEDULE_DAYS.map((day, i) => ({
+    text: `${user.notificationDays & (1 << i) ? '✅' : '⬜'} ${day}`,
+    // Explicit assignment makes a repeated/stale button idempotent.
+    data: cb('set', null, `day_${i}_${user.notificationDays & (1 << i) ? 'off' : 'on'}`),
+  }))
+  await reply(ctx, user,
+    `Выходные и рабочее время\nГалочка — в этот день можно писать. Изменения сохраняются сразу.\nВремя: ${user.morningTime}–${user.eveningTime}, часовой пояс: ${user.timezone}.` +
+    (user.notificationDays === 0 ? '\nВсе дни выключены: регулярные сообщения отключены.' : '') +
+    '\nРасписание действует на приглашения, повторные проверки и сводки. Расписание дней не отменяет первый сигнал запущенного таймера. Рабочие часы и режим тишины продолжают действовать. Явно назначенная встреча сохраняет своё время. На твои сообщения отвечаю в любой день.',
+    [days.slice(0, 4), days.slice(4), [
+      { text: `Начало: ${user.morningTime}`, data: cb('set', null, 'schedule_start') },
+      { text: `Конец: ${user.eveningTime}`, data: cb('set', null, 'schedule_end') },
+    ], [{ text: 'К настройкам', data: cb('set', null, 'schedule_back') }]],
+  )
+}
+
+async function onScheduleSetting(ctx: Ctx, user: User, arg: string): Promise<void> {
+  if (arg === 'schedule_start' || arg === 'schedule_end') {
+    await inputTransaction(ctx, tx => tx.user.update({ where: { id: user.id }, data: { pendingInput: arg } }), { syncReminders: false })
+    return reply(ctx, user, `${arg === 'schedule_start' ? 'Во сколько начинается' : 'Во сколько заканчивается'} рабочее время? Напиши время, например ${arg === 'schedule_start' ? '09:00' : '18:00'}. Начало и конец должны быть в пределах одного дня.`, [[{text:'Назад',data:cb('set',null,'schedule')} ]])
+  }
+  const day = /^day_([0-6])_(on|off)$/.exec(arg)
+  if (day) {
+    await inputTransaction(ctx, async tx => {
+      const fresh = await tx.user.findUniqueOrThrow({ where: { id: user.id } })
+      const bit = 1 << Number(day[1])
+      const notificationDays = day[2] === 'on' ? fresh.notificationDays | bit : fresh.notificationDays & ~bit
+      const updated = await tx.user.update({ where: { id: user.id }, data: { notificationDays } })
+      await logEvent(tx, user.id, 'settings_changed', { key: 'notification_days' }, { at: ctx.now() })
+      await rescheduleMorning(tx, updated, ctx.now())
+      await ensureNextMeeting(tx, updated, ctx.now())
+    }, { syncReminders: false })
+  } else if (arg !== 'schedule' && arg !== 'schedule_back') return reply(ctx, user, T.stale)
+  // Opening this screen does not cancel an unrelated dialogue or timer.
+  await inputTransaction(ctx, tx => tx.user.updateMany({ where: { id: user.id, pendingInput: { in: ['schedule_start','schedule_end'] } }, data: { pendingInput: 'none' } }), { syncReminders: false })
+  const fresh = await ctx.db.user.findUniqueOrThrow({ where: { id: user.id } })
+  return arg === 'schedule_back' ? sendSettings(ctx, fresh) : sendSchedule(ctx, fresh)
+}
+
+export async function onScheduleTimeText(ctx: Ctx, user: User, text: string): Promise<void> {
+  const clock = parseClock(text)
+  if (!clock || !['schedule_start','schedule_end'].includes(user.pendingInput)) return reply(ctx, user, 'Укажи время в формате ЧЧ:ММ, например 09:00.')
+  const value = `${String(clock.h).padStart(2,'0')}:${String(clock.m).padStart(2,'0')}`
+  const saved = await inputTransaction(ctx, async tx => {
+    const fresh = await tx.user.findUniqueOrThrow({ where: { id: user.id } })
+    if (fresh.pendingInput !== user.pendingInput) return false
+    const morningTime = fresh.pendingInput === 'schedule_start' ? value : fresh.morningTime
+    const eveningTime = fresh.pendingInput === 'schedule_end' ? value : fresh.eveningTime
+    if (morningTime >= eveningTime) return false
+    const updated = await tx.user.update({ where: { id: user.id }, data: { morningTime, eveningTime, pendingInput: 'none' } })
+    await logEvent(tx, user.id, 'settings_changed', { key: fresh.pendingInput === 'schedule_start' ? 'morning_time' : 'evening_time' }, { at: ctx.now() })
+    await rescheduleMorning(tx, updated, ctx.now())
+    await ensureNextMeeting(tx, updated, ctx.now())
+    // Already queued evening summaries follow the new end, not the old hour.
+    const summaries = await tx.outboxMessage.findMany({ where: { userId: user.id, kind: 'summary', status: 'pending' } })
+    for (const summary of summaries) {
+      const day = (summary.payload as { dayKey?: string } | null)?.dayKey
+      if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) continue
+      const at = localDateTime(updated.timezone, day, parseClock(eveningTime)!)
+      await tx.outboxMessage.update({ where: { id: summary.id }, data: { sendAfter: at < ctx.now() ? ctx.now() : at } })
+    }
+    return true
+  }, { syncReminders: false })
+  if (!saved) return reply(ctx, user, 'Начало должно быть раньше конца рабочего времени. Укажи другое время; текущий таймер не меняю.', [[{text:'Назад',data:cb('set',null,'schedule')} ]])
+  await sendSchedule(ctx, await ctx.db.user.findUniqueOrThrow({ where: { id: user.id } }))
 }

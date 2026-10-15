@@ -259,6 +259,7 @@ async function routePendingInput(ctx: Ctx, user: User, text: string, via: 'text'
     const value = `${String(answer.hour).padStart(2, '0')}:${String(answer.minute).padStart(2, '0')}`
     if (pending === 'timezone' || pending === 'settings_timezone') return account.onTimezoneText(ctx, user, value)
     if (pending === 'start_time') return account.onStartTimeText(ctx, user, value)
+    if (pending === 'schedule_start' || pending === 'schedule_end') return account.onScheduleTimeText(ctx, user, value)
     if (pending === 'morning_time') return account.onMorningText(ctx, user, value)
     if (pending === 'meeting_time' || pending === 'meeting_time_soft') {
       const clock = { h: answer.hour, m: answer.minute }

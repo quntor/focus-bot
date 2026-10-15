@@ -316,18 +316,20 @@ async function putMeeting(
 // тишиной. Выбор человека её заменит.
 export async function putDefaultMeeting(tx: Prisma.TransactionClient, user: User, now: Date): Promise<void> {
   if (!user.proactive) return
-  await putMeeting(tx, user, await nextMorning(tx, user, now), { defaulted: true, morning: true })
+  const at = await nextMorning(tx, user, now)
+  if (at) await putMeeting(tx, user, at, { defaulted: true, morning: true })
 }
 
 // Ближайшее утро после `after`, не попадающее на объявленный выходной.
-export async function nextMorning(tx: Prisma.TransactionClient, user: User, after: Date): Promise<Date> {
-  let at = nextLocalTime(user.timezone, morningClock(user), after)
-  for (let i = 0; i < 7; i++) {
-    const off = await tx.dayOff.findFirst({ where: { userId: user.id, dayKey: workDayKey(at, user.timezone) }, select: { id: true } })
-    if (!off) return at
-    at = nextLocalTime(user.timezone, morningClock(user), at)
+export async function nextMorning(tx: Prisma.TransactionClient, user: User, after: Date): Promise<Date | null> {
+  let at = allowedAt(user, { nightUntil: null }, nextLocalTime(user.timezone, morningClock(user), after))
+  // A repeating weekday may coincide with several separately declared days off.
+  const offDays = await tx.dayOff.findMany({ where: { userId: user.id }, select: { dayKey: true } })
+  for (let i = 0; at && i <= offDays.length; i++) {
+    if (!offDays.some(off => off.dayKey === workDayKey(at!, user.timezone))) return at
+    at = allowedAt(user, { nightUntil: null }, nextLocalTime(user.timezone, morningClock(user), at))
   }
-  return at
+  return null
 }
 
 // Инвариант: у пользователя с «писать первым» всегда есть одна будущая
@@ -339,7 +341,8 @@ export async function ensureNextMeeting(tx: Prisma.TransactionClient, user: User
   if (!user.proactive || user.blockedAt || user.idleRestAt) return
   const pending = await tx.outboxMessage.count({ where: { userId: user.id, kind: 'meeting', status: 'pending' } })
   if (pending > 0) return
-  await putMeeting(tx, user, await nextMorning(tx, user, now), { defaulted: true, morning: true })
+  const at = await nextMorning(tx, user, now)
+  if (at) await putMeeting(tx, user, at, { defaulted: true, morning: true })
 }
 
 // Пояс или время утра сменились — утренняя встреча переезжает на новое утро.
@@ -355,7 +358,9 @@ export async function rescheduleMorning(tx: Prisma.TransactionClient, user: User
       // Invalidate cached texts and pending sends, preserving the phase, step
       // and physical UTC history. Re-evaluate only the future delivery window.
       await tx.outboxMessage.updateMany({ where: { chainId: chain.id, status: { in: ['pending', 'paused', 'sending'] } }, data: { status: 'canceled' } })
-      const due = allowedAt(fresh, chain, chain.nextDueAt > now ? chain.nextDueAt : now)
+      const firstTimer = ['work', 'break'].includes(chain.kind) && chain.ordinal === 0
+      const candidate = firstTimer ? chain.firstDueAt : chain.nextDueAt
+      const due = allowedAt(firstTimer ? { ...fresh, notificationDays: 127 } : fresh, firstTimer ? chain : { nightUntil: null }, candidate > now ? candidate : now)
       const updated = await tx.reminderChain.update({ where: { id: chain.id }, data: {
         revision: { increment: 1 }, ...(due ? { nextDueAt: due } : {}),
       } })
@@ -368,7 +373,10 @@ export async function rescheduleMorning(tx: Prisma.TransactionClient, user: User
   })
   if (!morning) return
   const defaulted = (morning.payload as { defaulted?: unknown } | null)?.defaulted === true
-  await putMeeting(tx, user, await nextMorning(tx, user, now), { defaulted, morning: true })
+  if (!defaulted) return
+  const at = await nextMorning(tx, user, now)
+  if (at) await putMeeting(tx, user, at, { defaulted, morning: true })
+  else await cancelPending(tx, { userId: user.id, kind: 'meeting', payload: { path: ['defaulted'], equals: true } })
 }
 
 // «Всё, на сегодня» — работает всегда и без уговоров, но заканчивается итогом
