@@ -68,6 +68,8 @@ model User {
   ritualText           String?   @map("ritual_text")
   // auto | pomodoro | medium | long | free — см. src/session/technique.ts.
   technique            String    @default("auto")
+  defaultWorkMinutes   Int?      @map("default_work_minutes")
+  defaultRestMinutes   Int?      @map("default_rest_minutes")
   // Когда бот предложил технику по рисунку сессий. Предлагает один раз: дальше
   // выбор — в настройках, без напоминаний.
   techniqueSuggestedAt DateTime? @map("technique_suggested_at")

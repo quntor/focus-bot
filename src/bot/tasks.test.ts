@@ -543,7 +543,7 @@ describe.skipIf(!hasDb)('разбор задачи на шаги', () => {
     expect(await prisma.task.count({ where: { userId: user.id } })).toBe(1)
     expect(await prisma.focusSession.findMany({ where: { userId: user.id } })).toEqual(sessionsBefore)
     expect(await prisma.outboxMessage.findMany({ where: { userId: user.id } })).toEqual(outboxBefore)
-    expect(bot.lastText(A)).toContain('Ничего не меняю')
+    expect(bot.lastText(A)).toContain('Таймеры и дела не меняю')
   })
 
   it('сначала спрашивает, как человек видит задачу, и строит шаги от его ответа', async () => {
@@ -590,7 +590,7 @@ describe.skipIf(!hasDb)('разбор задачи на шаги', () => {
 
     await bot.press(A, `task:${task.id}:split`)
     await bot.text(A, 'сначала разберусь с темой')
-    expect(bot.lastText(A)).toContain('Ничего не меняю')
+    expect(bot.lastText(A)).toContain('Таймеры и дела не меняю')
     expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ pendingInput: `task_split:${task.id}` })
 
     await bot.textAs(A, '1. Выбрать тему\n2. Найти три источника', pendingSteps('1. Выбрать тему\n2. Найти три источника', ['Выбрать тему', 'Найти три источника']))

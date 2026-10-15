@@ -1,3 +1,4 @@
+import { preferredWork, preferredRest, nextPeriodRest } from '../session/preferences.js'
 import { overnightCutoff } from '../reminders/overnight-return.js'
 import { requireActiveTask } from './task-tree.js'
 import { onReminderAction, quietKeyboard } from '../reminders/actions.js'
@@ -600,8 +601,8 @@ export async function startUnassigned(ctx: Ctx, user: User, options: { minutes?:
 
   const technique: Technique = isTechnique(user.technique) ? user.technique : 'auto'
   const minutes =
-    options.minutes ?? session.plannedMinutes ?? (technique === 'auto' ? proposeMinutes(await sessionHistory(ctx, user.id)) : PRESETS[technique].minutes)
-  const rest = technique === 'auto' ? restFor(minutes) : PRESETS[technique].rest
+    options.minutes ?? preferredWork(user, session.plannedMinutes ?? (technique === 'auto' ? proposeMinutes(await sessionHistory(ctx, user.id)) : PRESETS[technique].minutes))
+  const rest = preferredRest(user, technique === 'auto' ? restFor(minutes) : PRESETS[technique].rest)
   const updated = await inputTransaction(ctx, (tx) => tx.focusSession.updateMany({
     where: { id: session.id, userId: user.id, state: 'collecting_intent' },
     data: {
@@ -678,11 +679,11 @@ export async function startTaskSession(ctx: Ctx, user: User, taskId: string): Pr
   if (session.state === 'paused') return reply(ctx, user, T.breakChoice)
 
   const technique: Technique = isTechnique(user.technique) ? user.technique : 'auto'
-  // Предустановка («давай 10 минут» после «не получается начать») действует и
-  // при выборе задачи кнопкой, а не только при ответе текстом.
+  // Личный стандарт важнее предложения бота, в том числе короткого старта.
+  // Явно названные пользователем интервалы обрабатываются отдельно.
   const preset = session.intentText === null && session.plannedMinutes !== null && session.minutesSource === 'bot' ? session.plannedMinutes : null
-  const minutes = preset ?? (technique === 'auto' ? proposeMinutes(await sessionHistory(ctx, user.id)) : PRESETS[technique].minutes)
-  const rest = preset !== null || technique === 'auto' ? restFor(minutes) : PRESETS[technique].rest
+  const minutes = preferredWork(user, preset ?? (technique === 'auto' ? proposeMinutes(await sessionHistory(ctx, user.id)) : PRESETS[technique].minutes))
+  const rest = preferredRest(user, preset !== null || technique === 'auto' ? restFor(minutes) : PRESETS[technique].rest)
   const updated = await inputTransaction(ctx, async (tx) => {
     if (!await tx.task.findFirst({ where: { id: task.id, userId: user.id, status: 'active' }, select: { id: true } })) return 0
     const res = await tx.focusSession.updateMany({
@@ -810,6 +811,9 @@ async function handleIntent(ctx: Ctx, user: User, session: FocusSession, text: s
     // «Диплом за час» → «с плана»: названный час не забывается при уточнении.
     minutes = session.plannedMinutes
     source = 'user'
+  } else if (user.defaultWorkMinutes !== null) {
+    minutes = user.defaultWorkMinutes
+    source = 'bot'
   } else if (session.plannedMinutes !== null && session.minutesSource === 'bot' && !refining) {
     minutes = session.plannedMinutes
     source = 'bot'
@@ -820,7 +824,7 @@ async function handleIntent(ctx: Ctx, user: User, session: FocusSession, text: s
     minutes = proposeMinutes(await sessionHistory(ctx, user.id))
     source = 'bot'
   }
-  const rest = technique !== 'auto' && named === null ? PRESETS[technique].rest : restFor(minutes)
+  const rest = preferredRest(user, technique !== 'auto' && named === null ? PRESETS[technique].rest : restFor(minutes))
 
   try {
     await inputTransaction(ctx, async (tx) => {
@@ -904,11 +908,11 @@ export async function onLength(ctx: Ctx, user: User, sessionId: string, arg: str
   if (session.plannedMinutes === null) return reply(ctx, user, T.stale)
 
   const minutes = adjust(session.plannedMinutes, arg)
-  const rest = restFor(minutes)
+  const rest = preferredRest(user, restFor(minutes))
   const res = await inputTransaction(ctx, async (tx) => {
     const r = await tx.focusSession.updateMany({
       where: { id: sessionId, userId: user.id, state: 'collecting_intent' },
-      data: { plannedMinutes: minutes, plannedRestMinutes: rest, minutesAdjusted: arg },
+      data: { plannedMinutes: minutes, plannedRestMinutes: rest, minutesSource: 'user', minutesAdjusted: arg },
     })
     if (r.count === 1) {
       await logEvent(tx, user.id, 'session_length_adjusted', { direction: arg, planned_minutes: minutes }, { at: now, sessionId })
@@ -927,8 +931,8 @@ export async function startRunning(ctx: Ctx, user: User, sessionId: string): Pro
   if (!session || session.state !== 'collecting_intent') return reply(ctx, user, T.stale)
 
   const technique: Technique = isTechnique(session.technique ?? '') ? (session.technique as Technique) : 'auto'
-  const minutes = session.plannedMinutes
-  const rest = session.plannedRestMinutes ?? restFor(minutes)
+  const minutes = session.minutesSource === 'user' ? session.plannedMinutes : preferredWork(user, session.plannedMinutes)
+  const rest = nextPeriodRest(user, session, minutes)
   const plannedEndAt = minutes === null ? null : new Date(now.getTime() + minutes * MIN)
 
   // Пинг: свободный режим — раз в полчаса; помодоро — без пинга; остальное — в
@@ -948,7 +952,7 @@ export async function startRunning(ctx: Ctx, user: User, sessionId: string): Pro
         taskId = task.id
         isNewTask = task.created
       }
-      await transition(tx, { sessionId, userId: user.id }, 'collecting_intent', 'running', { startedAt: now, plannedEndAt, pingAt })
+      await transition(tx, { sessionId, userId: user.id }, 'collecting_intent', 'running', { startedAt: now, plannedMinutes: minutes, plannedRestMinutes: rest, plannedEndAt, pingAt })
       if (isNewTask && taskId) {
         await tx.focusSession.update({ where: { id: sessionId }, data: { task: { connect: { id: taskId } } } })
       }
@@ -1014,7 +1018,7 @@ export async function onRunningEdit(
 // The model supplies only a validated work interval; scheduling stays in the same owner transaction.
 async function applyNamedWorkDuration(tx: Prisma.TransactionClient, user: User, session: FocusSession, minutes: number, now: Date): Promise<void> {
   const due = new Date(now.getTime() + minutes * MIN)
-  await tx.focusSession.update({ where: { id: session.id }, data: { plannedMinutes: minutes, minutesSource: 'user', plannedRestMinutes: restFor(minutes), plannedEndAt: due, pingAt: null } })
+  await tx.focusSession.update({ where: { id: session.id }, data: { plannedMinutes: minutes, minutesSource: 'user', plannedRestMinutes: preferredRest(user, restFor(minutes)), plannedEndAt: due, pingAt: null } })
   await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `session_end:${session.id}` } })
   await cancelPending(tx, { userId: user.id, idempotencyKey: { startsWith: `ping:${session.id}` } })
   if (session.reminderPolicy !== 1) await enqueue(tx, { userId: user.id, kind: 'session_end', key: `session_end:${session.id}:semantic:${now.getTime()}`, sendAfter: due, payload: { sessionId: session.id } })
@@ -1124,7 +1128,7 @@ export async function onRunningDurationText(ctx: Ctx, user: User, sessionId: str
   const remainingMs = session.reminderPolicy===1 || options.fromNow ? minutes*MIN : minutes * MIN - elapsedMs
   if (remainingMs <= 0) return reply(ctx, user, T.runningDurationTooShort(Math.max(1, Math.ceil(elapsedMs / MIN))))
   const plannedEndAt = new Date(now.getTime() + remainingMs)
-  const rest = restFor(minutes)
+  const rest = preferredRest(user, restFor(minutes))
   const technique: Technique = isTechnique(session.technique ?? '') ? (session.technique as Technique) : 'auto'
   let pingAt: Date | null = null
   if (user.pingsEnabled && session.pingAnsweredAt === null && technique !== 'pomodoro' && minutes >= 20) {
@@ -1682,7 +1686,7 @@ async function askRest(
   if (options.continueSuggested && session.taskId) {
     const task = await ctx.db.task.findFirst({ where: { id: session.taskId, userId: user.id, status: 'active' }, select: { title: true } })
     if (task) {
-      const minutes = options.continueMinutes ?? session.plannedMinutes
+      const minutes = options.continueMinutes ?? preferredWork(user, session.plannedMinutes)
       const label = Array.from(task.title).length > 32 ? `${Array.from(task.title).slice(0, 31).join('')}…` : task.title
       await reply(ctx, user, T.continuePrompt(task.title, minutes), [
         [{ text: T.continueSame(label, minutes), data: cb('again', session.id, 'same') }],
@@ -1731,7 +1735,7 @@ export async function onContinueChoice(
   if (await activeSession(ctx, user.id)) return reply(ctx, user, T.stale)
 
   const now = ctx.now()
-  const continuationMinutes = next.minutes ?? session.continueMinutes ?? session.plannedMinutes
+  const continuationMinutes = next.minutes ?? session.continueMinutes ?? preferredWork(user, session.plannedMinutes)
   const hasExplicitContinuationMinutes = next.minutes !== undefined || session.continueMinutes !== null
   let collectingId: string | null = null
   try {
@@ -1752,7 +1756,7 @@ export async function onContinueChoice(
             scope: 'step',
             plannedMinutes: continuationMinutes,
             minutesSource: hasExplicitContinuationMinutes ? 'user' : session.minutesSource,
-            plannedRestMinutes: hasExplicitContinuationMinutes ? restFor(continuationMinutes) : session.plannedRestMinutes,
+            plannedRestMinutes: hasExplicitContinuationMinutes ? preferredRest(user, restFor(continuationMinutes)) : nextPeriodRest(user, session, continuationMinutes),
             technique: session.technique,
             createdAt: now,
           },
@@ -1945,8 +1949,10 @@ export async function onResume(ctx: Ctx, user: User): Promise<void> {
 
   if (session.reminderPolicy === 1) return onReminderAction(ctx,user,null,'resume')
   const pauseMs = Math.max(0, now.getTime() - session.pausedAt.getTime())
-  const plannedEndAt = session.plannedMinutes === null ? null : new Date(now.getTime() + session.plannedMinutes * MIN)
-  const pingAt = periodPingAt(user, session, now)
+  const minutes = preferredWork(user, session.plannedMinutes)
+  const workPlan = { plannedMinutes: minutes, plannedRestMinutes: nextPeriodRest(user, session, minutes) }
+  const plannedEndAt = minutes === null ? null : new Date(now.getTime() + minutes * MIN)
+  const pingAt = periodPingAt(user, { ...session, ...workPlan }, now)
   const period = now.getTime()
 
   try {
@@ -1954,6 +1960,7 @@ export async function onResume(ctx: Ctx, user: User): Promise<void> {
       await transition(tx, { sessionId: session.id, userId: user.id }, 'paused', 'running', {
         pausedAt: null,
         pausedSeconds: { increment: Math.floor(pauseMs / 1000) },
+        ...workPlan,
         plannedEndAt,
         pingAt,
         pingAnsweredAt: null,
@@ -1994,7 +2001,7 @@ export async function onResume(ctx: Ctx, user: User): Promise<void> {
     if (error instanceof StaleTransition) return reply(ctx, user, T.stale)
     throw error
   }
-  await reply(ctx, user, T.breakResumed(session.plannedMinutes, plannedEndAt ? hhmm(plannedEndAt, user.timezone) : null))
+  await reply(ctx, user, T.breakResumed(minutes, plannedEndAt ? hhmm(plannedEndAt, user.timezone) : null))
 }
 
 export async function onNewAfterBreak(ctx: Ctx, user: User, afterClose?: () => Promise<void>): Promise<void> {

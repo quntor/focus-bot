@@ -56,9 +56,9 @@ async function snapshot(tx: Tx, m: OutboxMessage, now: Date) {
 
 function deferAt(user: User, chain: ReminderChain, now: Date): Date | null {
   if (user.blockedAt || user.reminderPolicy === 0) return null
-  // Keep the timer/slot, but do not put another decision over an unfinished
-  // task edit, profile, report or duration question. Revalidate on retry.
-  if (hasDecision(user)) return new Date(now.getTime() + 60_000)
+  // Background invitations may wait for dialogue. Explicit work/break timers
+  // must still ring even if a duration/edit question remains unanswered.
+  if (['morning', 'post_rest'].includes(chain.kind) && hasDecision(user)) return new Date(now.getTime() + 60_000)
   // The legacy midpoint toggle must not swallow the first timer deadline.
   // Later checks remain optional; quiet/window/global guards still apply below.
   const checksDisabled = chain.kind === 'morning' || chain.kind === 'post_rest'

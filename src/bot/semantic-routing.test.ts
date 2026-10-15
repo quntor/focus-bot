@@ -1,3 +1,6 @@
+import { onStartButton, onResume, onLength } from './session-flow.js'
+import { onTechnique, sendSettings } from './account.js'
+import { LlmCallError } from '../llm/provider.js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LlmProvider, LlmRequest } from '../llm/provider.js'
 import { makeBot } from '../test/bot.js'
@@ -32,6 +35,99 @@ async function past(userId: string, now: Date) {
 
 describe.skipIf(!hasDb)('semantic routing: реальные регрессии и отсутствие смешанных записей', () => {
   beforeEach(resetDb)
+  const defaultsText = 'Стандартная сессия 50 минут. Отдых 15 минут'
+  const defaultsRoute = { route: 'settings', text: defaultsText, workMinutes: 50, restMinutes: 15, workSource: '50 минут', restSource: '15 минут', followUp: null }
+  async function timerFixture(value: unknown | ((req: LlmRequest) => Promise<unknown>)) {
+    const f = await ready(value)
+    f.bot.ctx.remindersEnabled = true
+    const now = f.bot.ctx.now()
+    const startedAt = new Date(now.getTime() - 30 * 60_000)
+    const active = await prisma.focusSession.create({ data: { userId: f.user.id, state: 'running', reminderPolicy: 1, startedAt, plannedEndAt: now, plannedMinutes: 30, plannedRestMinutes: 5 } })
+    await prisma.workPeriod.create({ data: { sessionId: active.id, startedAt } })
+    await prisma.user.update({ where: { id: f.user.id }, data: { reminderPolicy: 1, pendingInput: `running_duration:${active.id}`, pingsEnabled: false } })
+    const chain = await prisma.reminderChain.create({ data: { userId: f.user.id, sessionId: active.id, kind: 'work', phaseStartedAt: startedAt, firstDueAt: now, nextDueAt: now, intervalMinutes: 30 } })
+    const message = await prisma.outboxMessage.create({ data: { userId: f.user.id, kind: 'reminder', chainId: chain.id, chainRevision: 1, ordinal: 0, idempotencyKey: `reminder:${chain.id}:1:0`, sendAfter: now, status: 'sending', lockedUntil: new Date(now.getTime() + 60_000) } })
+    const read = async () => ({ sessions: await prisma.focusSession.findMany(), periods: await prisma.workPeriod.findMany(), tasks: await prisma.task.findMany(), chains: await prisma.reminderChain.findMany(), queue: await prisma.outboxMessage.findMany(), user: await prisma.user.findUniqueOrThrow({ where: { id: f.user.id } }) })
+    return { ...f, active, chain, message, read }
+  }
+  it('saves 50/15 during running_duration, preserves entire current timer, then delivers its signal', async () => {
+    const f = await timerFixture(defaultsRoute)
+    const before = await f.read()
+    await f.bot.text(A, defaultsText)
+    const after = await f.read()
+    expect(after).toEqual({ ...before, user: { ...before.user, defaultWorkMinutes: 50, defaultRestMinutes: 15 } })
+    expect(f.bot.lastText(A)).toContain('Текущий таймер не меняю')
+    await deliverReminder(f.bot.ctx, f.message)
+    expect((await prisma.outboxMessage.findUniqueOrThrow({ where: { id: f.message.id } })).status).toBe('sent')
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: f.user.id } })).pendingInput).toBe(`running_duration:${f.active.id}`)
+  })
+  it.each(['clarify', 'unclear', 'out_of_scope', 'invalid', 'error'] as const)('%s preserves timers and the pending deadline remains deliverable', async route => {
+    const text = route === 'out_of_scope' ? 'Найди информацию в интернете' : 'А можно иначе?'
+    const f = await timerFixture(async (_req: LlmRequest) => {
+      if (route === 'error') throw new LlmCallError('unavailable', 'unavailable')
+      return { route, text, followUp: null, ...(route === 'clarify' ? { question: 'Изменить текущую работу или стандартный режим?' } : {}) }
+    })
+    const before = await f.read()
+    await f.bot.text(A, text)
+    expect(await f.read()).toEqual(before)
+    expect(f.bot.lastText(A)).not.toContain('Не смог понять')
+    if (route === 'out_of_scope') expect(f.bot.lastText(A)).toContain('только управляю временем и делами')
+    await deliverReminder(f.bot.ctx, f.message)
+    expect((await prisma.outboxMessage.findUniqueOrThrow({ where: { id: f.message.id } })).status).toBe('sent')
+  })
+  it('partial defaults retain the other value and new start uses persisted 50/15', async () => {
+    const { bot, user } = await ready({ ...defaultsRoute, workMinutes: null, workSource: null })
+    await prisma.user.update({ where: { id: user.id }, data: { defaultWorkMinutes: 50 } })
+    await bot.text(A, defaultsText)
+    const fresh = await prisma.user.findUniqueOrThrow({ where: { id: user.id } })
+    await onStartButton(bot.ctx, fresh)
+    expect(await prisma.focusSession.findFirstOrThrow({ where: { userId: user.id, state: 'running' } })).toMatchObject({ plannedMinutes: 50, plannedRestMinutes: 15 })
+    await sendSettings(bot.ctx, fresh)
+    expect(bot.lastText(A)).toContain('Стандарт работы: 50 мин; отдых: 15 мин')
+  })
+  it.each([[0, 15], [1, 15], [0, null], [1, null]] as const)('resume uses saved defaults for the next period, policy %s rest %s', async (policy, rest) => {
+    const { bot, user } = await ready({ ...defaultsRoute, restMinutes: rest, restSource: rest === null ? null : defaultsRoute.restSource })
+    bot.ctx.remindersEnabled = true
+    const now = bot.ctx.now()
+    const active = await prisma.focusSession.create({ data: { userId: user.id, state: 'paused', reminderPolicy: policy, startedAt: new Date(now.getTime() - 45 * 60_000), pausedAt: new Date(now.getTime() - 5 * 60_000), plannedMinutes: 30, plannedRestMinutes: 5 } })
+    if (policy === 1) await prisma.reminderChain.create({ data: { userId: user.id, sessionId: active.id, kind: 'break', phaseStartedAt: now, firstDueAt: now, nextDueAt: now, intervalMinutes: 5 } })
+    await bot.text(A, defaultsText)
+    await onResume(bot.ctx, await prisma.user.findUniqueOrThrow({ where: { id: user.id } }))
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: active.id } })).toMatchObject({ state: 'running', plannedMinutes: 50, plannedRestMinutes: rest ?? 10, plannedEndAt: new Date(now.getTime() + 50 * 60_000) })
+  })
+  it('prepared proposal follows new defaults, explicit one-off minutes still win', async () => {
+    const { bot, user } = await ready(defaultsRoute)
+    const prepared = await prisma.focusSession.create({ data: { userId: user.id, state: 'collecting_intent', intentText: 'Отчёт', plannedMinutes: 25, plannedRestMinutes: 5, minutesSource: 'bot' } })
+    await bot.text(A, defaultsText)
+    const fresh = await prisma.user.findUniqueOrThrow({ where: { id: user.id } })
+    await onStartButton(bot.ctx, fresh)
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: prepared.id } })).toMatchObject({ plannedMinutes: 50, plannedRestMinutes: 15 })
+    await prisma.focusSession.update({ where: { id: prepared.id }, data: { state: 'finished' } })
+    const explicit = await prisma.focusSession.create({ data: { userId: user.id, state: 'collecting_intent', intentText: 'Письмо', plannedMinutes: 20, minutesSource: 'user' } })
+    await onStartButton(bot.ctx, fresh)
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: explicit.id } })).toMatchObject({ plannedMinutes: 20, plannedRestMinutes: 15 })
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ defaultWorkMinutes: 50, defaultRestMinutes: 15 })
+  })
+  it('a length-button adjustment overrides the standard only for this period', async () => {
+    const { bot, user } = await ready(defaultsRoute)
+    await bot.text(A, defaultsText)
+    const fresh = await prisma.user.findUniqueOrThrow({ where: { id: user.id } })
+    const prepared = await prisma.focusSession.create({ data: { userId: user.id, state: 'collecting_intent', intentText: 'Отчёт', plannedMinutes: 50, plannedRestMinutes: 15, minutesSource: 'bot' } })
+    await onLength(bot.ctx, fresh, prepared.id, 'down')
+    const adjusted = await prisma.focusSession.findUniqueOrThrow({ where: { id: prepared.id } })
+    expect(adjusted.plannedMinutes).toBeLessThan(50)
+    await onStartButton(bot.ctx, fresh)
+    expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: prepared.id } })).toMatchObject({ state: 'running', plannedMinutes: adjusted.plannedMinutes, plannedRestMinutes: 15, minutesSource: 'user', plannedEndAt: new Date(bot.ctx.now().getTime() + adjusted.plannedMinutes! * 60_000) })
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ defaultWorkMinutes: 50, defaultRestMinutes: 15 })
+  })
+  it('choosing a preset clears personal overrides without touching the running timer', async () => {
+    const f = await timerFixture(defaultsRoute)
+    await f.bot.text(A, defaultsText)
+    const before = await f.read()
+    await onTechnique(f.bot.ctx, before.user, 'pomodoro')
+    const after = await f.read()
+    expect(after).toEqual({ ...before, user: { ...before.user, technique: 'pomodoro', defaultWorkMinutes: null, defaultRestMinutes: null } })
+  })
   it.each(['none', 'running', 'paused', 'running_duration', 'overnight'] as const)('уточнение уже отработанного времени не меняет %s или очередь', async (mode) => {
     const text = 'я уже работаю полчаса'
     const question = 'Хочешь продолжить — сколько ещё — или отдыхать?'
@@ -247,7 +343,7 @@ describe.skipIf(!hasDb)('semantic routing: реальные регрессии �
     await bot.text(A, text)
     expect(await prisma.focusSession.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ reportText: null })
     expect(await prisma.focusSession.count({ where: { state: 'collecting_intent' } })).toBe(0)
-    expect(bot.lastText(A)).toContain('Ничего не меняю')
+    expect(bot.lastText(A)).toContain('Таймеры и дела не меняю')
     expect(await prisma.event.findFirstOrThrow({ where: { type: 'llm_fallback', payload: { path: ['stage'], equals: 'semantic_router' } } })).toMatchObject({ payload: { stage: 'semantic_router', reason } })
     expect(vi.mocked(llm.complete).mock.calls.filter(([req]) => req.system.includes('семантический маршрутизатор'))).toHaveLength(1)
   })

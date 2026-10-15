@@ -27,6 +27,7 @@ export const REMINDER_KINDS = ['morning', 'work', 'break', 'post_rest'] as const
 export const REMINDER_ACTIONS = ['work', 'off', 'continue', 'break', 'resume', 'rest', 'mute', 'unmute', 'stop_today', 'retro', 'retro5', 'retro10', 'retro15'] as const
 const reminderSlot = { chain_id: id, outbox_id: id, kind: z.enum(REMINDER_KINDS), revision: z.int().min(1), ordinal: z.int().min(0) }
 export const SETTINGS_KEYS = [
+  'intervals',
   'technique',
   'pings_enabled',
   'proactive',
@@ -54,7 +55,7 @@ export const PAYLOADS = {
   }),
   voice_transcribed: z.strictObject({ duration_seconds: z.int().min(0).max(180), length_chars: z.int().min(0) }),
   semantic_routed: z.strictObject({
-    route: z.enum(['report', 'new_task', 'continue_same', 'session_help', 'capture', 'answer_pending', 'close_day', 'feedback', 'break', 'end_session', 'intent_step', 'schedule_meeting', 'control', 'task_action', 'clarify', 'unclear']),
+    route: z.enum(['report', 'new_task', 'continue_same', 'session_help', 'capture', 'answer_pending', 'close_day', 'feedback', 'break', 'end_session', 'intent_step', 'schedule_meeting', 'control', 'task_action', 'clarify', 'unclear', 'settings', 'out_of_scope']),
     pending: z.enum(['retro', 'task_split_clarify', 'none', 'report_text', 'session_end', 'running_work', 'running_duration', 'running_task_choice', 'task_add', 'task_edit', 'task_split', 'task_split_manual', 'timezone', 'settings_timezone', 'start_time', 'ritual', 'profile_ritual', 'meeting_time', 'meeting_time_soft', 'morning_time', 'profile', 'other']),
     intercepted: z.boolean(),
   }),

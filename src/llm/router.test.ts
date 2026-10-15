@@ -130,3 +130,21 @@ describe('semantic route contract', () => {
     }
   })
 })
+
+describe('personal intervals and role boundary', () => {
+  const text = 'Стандартная сессия 50 минут. Отдых 15 минут'
+  const value = { route: 'settings', text, workMinutes: 50, restMinutes: 15, workSource: '50 минут', restSource: '15 минут', followUp: null }
+  const settingsInput = { ...input, text, allowedRoutes: ['settings', 'out_of_scope'] as const }
+  it('accepts persistent work/rest including partial updates', async () => {
+    expect(await parseSemanticRoute(provider(value), settingsInput)).toMatchObject({ ok: true })
+    expect(await parseSemanticRoute(provider({ ...value, workMinutes: null, workSource: null }), settingsInput)).toMatchObject({ ok: true })
+  })
+  it.each([{ workMinutes: null, restMinutes: null, workSource: null, restSource: null }, { workSource: null }, { restSource: 'придуманная цитата' }, { workMinutes: 1 }, { restMinutes: 0 }, { restMinutes: 241 }])('rejects invalid defaults %j', async patch => {
+    expect(await parseSemanticRoute(provider({ ...value, ...patch }), settingsInput)).toMatchObject({ ok: false })
+  })
+  it('out-of-scope cannot include generated solution or another action', async () => {
+    const outside = { route: 'out_of_scope', text, followUp: null }
+    expect(await parseSemanticRoute(provider(outside), settingsInput)).toMatchObject({ ok: true })
+    expect(await parseSemanticRoute(provider({ ...outside, reply: 'solution' }), settingsInput)).toMatchObject({ ok: false })
+  })
+})

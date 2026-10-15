@@ -1,3 +1,4 @@
+import { preferredWork, nextPeriodRest } from '../session/preferences.js'
 import { overnightCutoff, settleOvernightReturn } from '../reminders/overnight-return.js'
 import { addDays, dayKey } from '../lib/day.js'
 import { localDateTime, nextLocalTime } from '../lib/time.js'
@@ -48,14 +49,14 @@ async function snapshot(ctx: Ctx, userId: string, db: Ctx['db'] | Prisma.Transac
   const ownedTasks = [...relevant.sort((a, b) => relevantIds.indexOf(a.id) - relevantIds.indexOf(b.id)), ...pool.filter(t => !relevantIds.includes(t.id))].slice(0, 20)
   const labelledTasks = ownedTasks.map((task, i) => ({ ...task, label: `t${i + 1}` }))
   // Whole persisted state stays local. The model sees only a bounded projection.
-  const fingerprint = JSON.stringify({ user: user && { pendingInput: user.pendingInput, timezone: user.timezone, technique: user.technique, profileText: user.profileText, idleRestAt: user.idleRestAt, quietUntil: user.quietUntil }, active, last, report, ownedTasks })
+  const fingerprint = JSON.stringify({ user: user && { pendingInput: user.pendingInput, timezone: user.timezone, technique: user.technique, defaultWorkMinutes: user.defaultWorkMinutes, defaultRestMinutes: user.defaultRestMinutes, profileText: user.profileText, idleRestAt: user.idleRestAt, quietUntil: user.quietUntil }, active, last, report, ownedTasks })
   return { user, active, last, report, labelledTasks, fingerprint }
 }
 type Snapshot = Awaited<ReturnType<typeof snapshot>>
 function allowedRoutes(s: Snapshot): SemanticRouteName[] {
   const pending = s.user!.pendingInput
-  if (['timezone', 'start_time', 'ritual'].includes(pending)) return ['answer_pending', 'feedback', 'control', 'clarify']
-  const routes: SemanticRouteName[] = ['new_task', 'capture', 'close_day', 'feedback', 'control', 'task_action', 'schedule_meeting', 'clarify', 'unclear']
+  if (['timezone', 'start_time', 'ritual'].includes(pending)) return ['answer_pending', 'feedback', 'control', 'clarify', 'out_of_scope']
+  const routes: SemanticRouteName[] = ['new_task', 'capture', 'close_day', 'feedback', 'control', 'task_action', 'schedule_meeting', 'clarify', 'unclear', 'settings', 'out_of_scope']
   if (pending !== 'none' && pending !== 'report_text' && !pending.startsWith('session_end:')) routes.push('answer_pending')
   if (s.report && !s.active) routes.push('report')
   routes.push('break')
@@ -106,7 +107,7 @@ export async function routeSemanticInput(ctx: Ctx, user: User, text: string, via
   await logEvent(ctx.db, user.id, 'semantic_routed', { route: route.route, pending: pendingType(fresh.user.pendingInput), intercepted }, { at: ctx.now(), sessionId: before.active?.id })
   const dispatchState = await snapshot(ctx, user.id)
   if (dispatchState.fingerprint !== fresh.fingerprint || !currentInput(ctx, user.id, inputId)) return reply(ctx, fresh.user, T.stale)
-  if (route.route === 'unclear' && !dispatchState.report) return reply(ctx, fresh.user, 'Уточни, что ты хочешь сделать. Ничего не меняю.', undefined, { informational: true })
+  if (route.route === 'unclear' && !dispatchState.report) return reply(ctx, fresh.user, 'Что нужно сделать: записать дело, изменить время работы или отдыха, либо отметить результат? Действующий таймер пока не меняю.', undefined, { informational: true })
   await dispatch(ctx, dispatchState, route, via, contextEventId, handlePending, control)
   if (route.route === 'feedback') return
   if (route.followUp) {
@@ -172,6 +173,22 @@ async function dispatch(...args: Parameters<typeof dispatchRoute>): Promise<void
   }
 }
 async function dispatchRoute(ctx: Ctx, s: Snapshot, route: SemanticRoute, via: 'text' | 'voice', contextEventId: number | null, handlePending?: PendingHandler, control?: Control) {
+  if (route.route === 'out_of_scope') return reply(ctx, s.user!, T.outOfScope, undefined, { informational: true })
+  if (route.route === 'settings') {
+    const updated = await inputTransaction(ctx, async tx => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${s.user!.id}))`
+      const fresh = await snapshot(ctx, s.user!.id, tx)
+      if (fresh.fingerprint !== s.fingerprint || !currentInput(ctx, s.user!.id, contextEventId)) throw new StaleTransition()
+      const updated = await tx.user.update({ where: { id: s.user!.id }, data: {
+        ...(route.workMinutes !== null ? { defaultWorkMinutes: route.workMinutes } : {}),
+        ...(route.restMinutes !== null ? { defaultRestMinutes: route.restMinutes } : {}),
+      } })
+      await logEvent(tx, updated.id, 'settings_changed', { key: 'intervals' }, { at: ctx.now() })
+      return updated
+    }, { syncReminders: false })
+    const parts = [updated.defaultWorkMinutes !== null ? `${updated.defaultWorkMinutes} минут работы` : null, updated.defaultRestMinutes !== null ? `${updated.defaultRestMinutes} минут отдыха` : null].filter(Boolean)
+    return reply(ctx, updated, `Сохранил стандарт: ${parts.join(', ')}. Он будет действовать со следующего рабочего периода. Текущий таймер не меняю.`, undefined, { informational: true })
+  }
   if (route.route === 'feedback') return reply(ctx, s.user!, T.feedback, undefined, { informational: true })
   if (route.route === 'clarify') return reply(ctx, s.user!, route.question, undefined, { informational: true })
   if (route.route === 'control' && route.action === 'start' && ['timezone', 'start_time', 'ritual'].includes(s.user!.pendingInput)) return control ? control(ctx, s.user!, route.action, route.value) : reply(ctx, s.user!, T.stale)
@@ -291,8 +308,8 @@ async function dispatchRoute(ctx: Ctx, s: Snapshot, route: SemanticRoute, via: '
           if (!await guard(tx)) throw new StaleTransition()
           return tx.focusSession.create({ data: { userId: user.id, state: 'collecting_intent', createdAt: ctx.now(),
             taskId: task?.id ?? null, intentText: task?.title ?? source!.intentText!, scope: source!.scope,
-            technique: source!.technique, plannedMinutes: minutes ?? source!.plannedMinutes,
-            minutesSource: minutes === null ? 'bot' : 'user', plannedRestMinutes: source!.plannedRestMinutes } })
+            technique: source!.technique, plannedMinutes: minutes ?? preferredWork(user, source!.plannedMinutes),
+            minutesSource: minutes === null ? 'bot' : 'user', plannedRestMinutes: nextPeriodRest(user, source!, minutes ?? preferredWork(user, source!.plannedMinutes)) } })
         })
         return session.startRunning(ctx, user, next.id)
       }

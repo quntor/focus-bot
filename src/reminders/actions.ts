@@ -1,3 +1,4 @@
+import { preferredWork, nextPeriodRest } from '../session/preferences.js'
 import { overnightCutoff, settleOvernightReturn } from './overnight-return.js'
 import type { Prisma, User } from '@prisma/client'
 import type { Ctx } from '../bot/context.js'
@@ -42,7 +43,7 @@ export async function onReminderAction(ctx: Ctx,user: User,id: string|null,arg: 
         const task=previous.taskId?await tx.task.findFirst({where:{id:previous.taskId,userId:user.id,status:'active'}}):null
         const next=await tx.focusSession.create({data:{userId:user.id,state:'collecting_intent',createdAt:now,
           taskId:task?.id??null,intentText:task?.title??null,scope:previous.scope,technique:previous.technique,
-          plannedMinutes:options.workMinutes??previous.plannedMinutes,minutesSource:options.workMinutes===undefined?'bot':'user',plannedRestMinutes:previous.plannedRestMinutes}})
+          plannedMinutes:options.workMinutes??preferredWork(fresh,previous.plannedMinutes),minutesSource:options.workMinutes===undefined?'bot':'user',plannedRestMinutes:nextPeriodRest(fresh,previous,options.workMinutes??preferredWork(fresh,previous.plannedMinutes))}})
         overnightStart=next.id;return
       }
       if(arg==='break'){
@@ -51,8 +52,8 @@ export async function onReminderAction(ctx: Ctx,user: User,id: string|null,arg: 
       }
       session=null
     }
-    const workMinutes=options.workMinutes??session?.plannedMinutes
-    const workPlan=options.workMinutes===undefined?{}:{plannedMinutes:options.workMinutes,minutesSource:'user' as const}
+    const workMinutes=options.workMinutes??preferredWork(fresh,session?.plannedMinutes??null)
+    const workPlan={plannedMinutes:workMinutes,plannedRestMinutes:nextPeriodRest(fresh,session,workMinutes),...(options.workMinutes!==undefined?{minutesSource:'user' as const}:{})}
     if(arg==='quiet'||arg==='stop'){
       await tx.user.update({where:{id:user.id},data:{quietUntil:midnight(fresh,now)}})
       if(arg==='stop'){

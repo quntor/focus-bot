@@ -156,7 +156,7 @@ export async function sendSettings(ctx: Ctx, user: User): Promise<void> {
   await reply(
     ctx,
     user,
-    T.settings({ technique: user.technique, pings: user.pingsEnabled, proactive: user.proactive, morning: user.morningTime, timezone: user.timezone })+(user.reminderPolicy===1?'\nПинги управляют повторными проверками работы и перерыва, но не первым сигналом конца таймера. «Писать первым» — утром и после отдыха.':''),
+    T.settings({ technique: user.technique, pings: user.pingsEnabled, proactive: user.proactive, morning: user.morningTime, timezone: user.timezone })+`\nСтандарт работы: ${user.defaultWorkMinutes ?? 'по технике'}${user.defaultWorkMinutes !== null ? ' мин' : ''}; отдых: ${user.defaultRestMinutes ?? 'по технике'}${user.defaultRestMinutes !== null ? ' мин' : ''}. Можно написать: «Стандартная сессия 50 минут. Отдых 15 минут».`+(user.reminderPolicy===1?'\nПинги управляют повторными проверками работы и перерыва, но не первым сигналом конца таймера. «Писать первым» — утром и после отдыха.':''),
     [
       [{ text: T.setTechnique, data: cb('set', null, 'technique') }],
       [{ text: T.togglePings, data: cb('set', null, 'pings') }],
@@ -219,10 +219,10 @@ export async function onTechnique(ctx: Ctx, user: User, arg: string): Promise<vo
   if (!isTechnique(arg)) return reply(ctx, user, T.stale)
   const now = ctx.now()
   await inputTransaction(ctx, async (tx) => {
-    await tx.user.update({ where: { id: user.id }, data: { technique: arg } })
+    await tx.user.update({ where: { id: user.id }, data: { technique: arg, defaultWorkMinutes: null, defaultRestMinutes: null } })
     await logEvent(tx, user.id, 'settings_changed', { key: 'technique' }, { at: now })
-  })
-  await reply(ctx, user, T.saved)
+  }, { syncReminders: false })
+  await reply(ctx, user, 'Техника сохранена. Личные интервалы заменены режимом выбранной техники; текущий таймер не меняю.')
 }
 
 export async function onMorningText(ctx: Ctx, user: User, text: string): Promise<void> {
