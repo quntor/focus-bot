@@ -1,0 +1,6 @@
+day_msk,dau,llm_calls,skill_calls,tool_calls,background_calls,calls_strict,calls_all,calls_strict_per_dau,calls_all_per_dau
+2026-10-12,4,11,11,0,0,22,22,5.5,5.5
+2026-10-13,5,8,8,0,0,16,16,3.2,3.2
+2026-10-14,2,42,42,0,0,84,84,42.0,42.0
+2026-10-15,6,50,50,0,0,100,100,16.67,16.67
+2026-10-16,4,13,13,0,0,26,26,6.5,6.5
